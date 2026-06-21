@@ -18,13 +18,19 @@
 # SPEC refs: §7 (S0 substrate), §12 (replica OPTIONAL; streaming when present),
 # §4 (_meta audit DB). See docs/spec/SPEC.amendments.md "S0 integration substrate".
 
-set -euo pipefail
+set -Eeuo pipefail
+IFS=$'\n\t'
 
 PGBIN="${PGBIN:-/opt/homebrew/opt/postgresql@18/bin}"
 LISTEN="localhost"
 PRIMARY_PORT="${PG_BUMPERS_PRIMARY_PORT:-54321}"
 REPLICA_PORT="${PG_BUMPERS_REPLICA_PORT:-54322}"
 META_PORT="${PG_BUMPERS_META_PORT:-54323}"
+
+# Identity sentinel stamped by local-stack.sh up. A bare port probe is satisfied
+# by ANY postmaster on the port (incl. a stale orphan); this proves the cluster
+# answering is the one local-stack.sh actually brought up, all from one run.
+SENTINEL_DB="pgb_localstack_sentinel"
 
 # Bound for replication visibility (seconds).
 REPL_WAIT_SECS="${PG_BUMPERS_REPL_WAIT_SECS:-15}"
@@ -50,23 +56,37 @@ psql_q() { # host-port db sql
   "$PGBIN/psql" -X -h "$LISTEN" -p "$1" -U postgres -d "$2" -tAqc "$3"
 }
 
+# Read the identity sentinel run_id from a cluster (empty if absent).
+sentinel_id() { psql_q "$1" "$SENTINEL_DB" 'SELECT run_id FROM public.pgb_sentinel LIMIT 1' 2>/dev/null || true; }
+
 # --------------------------------------------------------------------------------------
-# 1. primary reachable
+# 1. primary reachable + IS OUR cluster (sentinel present)
 # --------------------------------------------------------------------------------------
-info "1/5 primary reachable (port $PRIMARY_PORT)"
+info "1/5 primary reachable + our cluster (port $PRIMARY_PORT)"
+PRIMARY_RUN_ID=""
 if "$PGBIN/pg_isready" -h "$LISTEN" -p "$PRIMARY_PORT" -q; then
-  pass "primary accepting connections"
+  PRIMARY_RUN_ID="$(sentinel_id "$PRIMARY_PORT")"
+  if [ -n "$PRIMARY_RUN_ID" ]; then
+    pass "primary accepting connections (our cluster, run_id=$PRIMARY_RUN_ID)"
+  else
+    fail "primary on port $PRIMARY_PORT has NO sentinel — a foreign/orphan postmaster, not our stack"
+  fi
 else
   fail "primary NOT reachable on port $PRIMARY_PORT"
 fi
 
 # --------------------------------------------------------------------------------------
-# 2. meta reachable + _meta DB present
+# 2. meta reachable + _meta DB present + same run_id
 # --------------------------------------------------------------------------------------
-info "2/5 meta reachable + _meta DB (port $META_PORT)"
+info "2/5 meta reachable + _meta DB + identity (port $META_PORT)"
 if "$PGBIN/pg_isready" -h "$LISTEN" -p "$META_PORT" -q; then
   if [ "$(psql_q "$META_PORT" _meta 'SELECT 1' 2>/dev/null || true)" = "1" ]; then
-    pass "meta reachable and _meta DB queryable"
+    meta_id="$(sentinel_id "$META_PORT")"
+    if [ -n "$PRIMARY_RUN_ID" ] && [ "$meta_id" = "$PRIMARY_RUN_ID" ]; then
+      pass "meta reachable, _meta DB queryable, sentinel matches primary"
+    else
+      fail "meta reachable but sentinel mismatch (meta='$meta_id' vs primary='$PRIMARY_RUN_ID') — not the same up"
+    fi
   else
     fail "meta reachable but _meta DB not queryable"
   fi
@@ -75,15 +95,18 @@ else
 fi
 
 # --------------------------------------------------------------------------------------
-# 3. replica reachable + in recovery (is a standby)
+# 3. replica reachable + in recovery + inherited the SAME run_id (our standby)
 # --------------------------------------------------------------------------------------
-info "3/5 replica reachable + in recovery (port $REPLICA_PORT)"
+info "3/5 replica reachable + in recovery + our standby (port $REPLICA_PORT)"
 if "$PGBIN/pg_isready" -h "$LISTEN" -p "$REPLICA_PORT" -q; then
   in_rec="$(psql_q "$REPLICA_PORT" postgres 'SELECT pg_is_in_recovery()' 2>/dev/null || true)"
-  if [ "$in_rec" = "t" ]; then
-    pass "replica is in recovery (pg_is_in_recovery() = t)"
-  else
+  rep_id="$(sentinel_id "$REPLICA_PORT")"
+  if [ "$in_rec" = "t" ] && [ -n "$PRIMARY_RUN_ID" ] && [ "$rep_id" = "$PRIMARY_RUN_ID" ]; then
+    pass "replica in recovery and inherited primary's sentinel (run_id=$rep_id)"
+  elif [ "$in_rec" != "t" ]; then
     fail "replica reachable but NOT in recovery (got '$in_rec')"
+  else
+    fail "replica in recovery but sentinel mismatch (replica='$rep_id' vs primary='$PRIMARY_RUN_ID') — not our standby"
   fi
 else
   fail "replica NOT reachable on port $REPLICA_PORT"

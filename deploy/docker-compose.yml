@@ -27,6 +27,13 @@
 # statically validated here (`docker compose config -q`); it must be re-validated with a
 # live `up` on a docker-healthy machine. The live S0 substrate in this env is
 # deploy/local-stack.sh (local Postgres 18 via initdb/pg_basebackup).
+#
+# ⚠️  HOST-PORT CONFLICT: by default `primary` publishes host port 5432. The founder
+# runs Postgres on 5432, so `docker compose up` here WOULD collide. The host ports are
+# overridable — export PGB_PRIMARY_HOST_PORT / PGB_META_HOST_PORT / PGB_REPLICA_HOST_PORT
+# (e.g. PGB_PRIMARY_HOST_PORT=15432) before `up`. The live substrate here (Path B,
+# deploy/local-stack.sh) already uses dedicated high ports 54321/54322/54323 and never
+# touches 5432.
 
 name: pg_bumpers
 
@@ -76,7 +83,9 @@ services:
       # archive_mode is intentionally OFF by default (PITR is OPTIONAL per §12);
       # to make this PITR-ready, set: -c archive_mode=on -c archive_command='...'.
     ports:
-      - "5432:5432"
+      # ⚠️ host 5432 by default — collides with a Postgres already on 5432.
+      # Override: PGB_PRIMARY_HOST_PORT=15432 docker compose ... up -d
+      - "${PGB_PRIMARY_HOST_PORT:-5432}:5432"
     volumes:
       # Init hooks run once on first boot (alphabetical). The hardened-role SQL
       # (issue #5, SPEC §3 layer 0-1) lands under deploy/init/ — see the marker
@@ -103,7 +112,7 @@ services:
       - -c
       - listen_addresses=*
     ports:
-      - "5433:5432"
+      - "${PGB_META_HOST_PORT:-5433}:5432"
     volumes:
       - meta-data:/var/lib/postgresql/data
     healthcheck: *pg-healthcheck
@@ -144,7 +153,7 @@ services:
         echo "hot_standby = on" >> "$$DATA/postgresql.auto.conf"
         exec postgres -D "$$DATA"
     ports:
-      - "5434:5432"
+      - "${PGB_REPLICA_HOST_PORT:-5434}:5432"
     volumes:
       - replica-data:/var/lib/postgresql/data
     depends_on:

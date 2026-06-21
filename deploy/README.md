@@ -41,12 +41,25 @@ docker compose -f deploy/docker-compose.yml config -q && echo COMPOSE_OK
 docker compose -f deploy/docker-compose.yml --profile replica --profile dblab down -v
 ```
 
-| Service | Profile    | Host port | Role |
-|---------|------------|-----------|------|
-| primary | (always)   | **5432**  | primary, `wal_level=replica`, replication+PITR-ready |
-| meta    | (always)   | **5433**  | separate instance hosting the `_meta` audit DB (§4) |
-| replica | `replica`  | **5434**  | streaming standby of `primary` (`pg_basebackup -R`) |
-| dblab   | `dblab`    | —         | clone-provider PLACEHOLDER (OPTIONAL; S2) |
+| Service | Profile    | Host port | Override env             | Role |
+|---------|------------|-----------|--------------------------|------|
+| primary | (always)   | **5432**  | `PGB_PRIMARY_HOST_PORT`  | primary, `wal_level=replica`, replication+PITR-ready |
+| meta    | (always)   | **5433**  | `PGB_META_HOST_PORT`     | separate instance hosting the `_meta` audit DB (§4) |
+| replica | `replica`  | **5434**  | `PGB_REPLICA_HOST_PORT`  | streaming standby of `primary` (`pg_basebackup -R`) |
+| dblab   | `dblab`    | —         | —                        | clone-provider PLACEHOLDER (OPTIONAL; S2) |
+
+> **⚠️ Host-port 5432 conflict.** The shipped compose publishes host port **5432** for
+> `primary` — and **the founder runs Postgres on 5432**. Running `docker compose up` on
+> the founder's host (or any host with something on 5432) would **collide** and fail to
+> bind. Override the host ports before bringing it up:
+>
+> ```sh
+> PGB_PRIMARY_HOST_PORT=15432 PGB_META_HOST_PORT=15433 PGB_REPLICA_HOST_PORT=15434 \
+>   docker compose -f deploy/docker-compose.yml up -d
+> ```
+>
+> (The local substrate — **Path B** below — never has this problem: it uses dedicated
+> high ports 54321/54322/54323 and never touches 5432.)
 
 > **Live container runs are blocked in the pg_bumpers build environment** (`docker pull`
 > hangs at zero blob bytes — host-level daemon fault). Here, the compose is only
@@ -72,11 +85,13 @@ deploy/local-stack.sh status  # pg_isready snapshot for all three
 deploy/local-stack.sh down    # stop all clusters, remove ./.localstack/ (clean teardown)
 ```
 
+(Ordered primary / meta / replica to match the Path A table above.)
+
 | Cluster | Port      | Role |
 |---------|-----------|------|
 | primary | **54321** | `wal_level=replica`, `max_wal_senders=10`, `wal_keep_size=128MB`, replication+PITR-ready |
-| replica | **54322** | streaming standby (`pg_basebackup -R` → `standby.signal` + `primary_conninfo`) |
 | meta    | **54323** | separate cluster hosting the append-only `_meta` audit DB (§4) |
+| replica | **54322** | streaming standby (`pg_basebackup -R` → `standby.signal` + `primary_conninfo`) |
 
 Connection strings (trust auth, loopback only — throwaway dev clusters):
 
@@ -94,6 +109,28 @@ The hardened-role WALL SQL (issue #5) attaches at a marked include point in
 does **not** duplicate the role work.
 
 `./.localstack/` is git-ignored (root `.gitignore`), so `git status` stays clean.
+
+### Truthful, robust teardown
+
+`down` does not just delete the data dir — it **stops OUR postmasters and verifies the
+ports are actually free**, then fails loudly if any are still bound:
+
+- On `up`, each started postmaster's PID is recorded in an out-of-tree ledger
+  (`$TMPDIR/pg_bumpers-localstack/<root-digest>/<port>.pid`) that **survives**
+  `rm -rf ./.localstack/`. So even if the data dir is deleted out-of-band (e.g.
+  `git clean -fdx`, since the dir is gitignored), `down` can still stop the orphaned
+  postmasters — matching on the **recorded PID** and, as a backstop, on any postmaster
+  LISTENing on our port whose `-D` data dir is one of ours. It **never** touches a
+  process it can't prove is ours (5432 and unrelated processes are safe).
+- `down` re-checks the ports with `lsof` afterward and **errors non-zero** if any of
+  54321/54322/54323 is still bound — it never claims success while a port stays occupied.
+- `up` stamps a per-run **identity sentinel** (a `pgb_localstack_sentinel` DB with a
+  unique `run_id`); `wait_ready` and `smoke.sh` verify it, so a stale orphan squatting a
+  port can never read as "our freshly-started cluster." `up` also refuses to start onto a
+  port held by a process it doesn't own.
+- A partial/failed `up` self-cleans via an `EXIT`/`ERR` trap (no leaked clusters).
+- `PG_BUMPERS_LOCALSTACK_DIR` is validated (non-empty, absolute, not `/` or `$HOME`,
+  confined under the repo or a `*localstack*` dir) before any `rm -rf`.
 
 ---
 
