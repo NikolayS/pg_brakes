@@ -1,68 +1,118 @@
-//! pg_bumpers proxy binary (stub).
+//! pg_bumpers proxy binary — the inline, agent-only enforcement endpoint
+//! (SPEC §3 layer 2, §7 S1).
 //!
-//! The proxy is the inline enforcement point and the only endpoint the agent
-//! role may reach (SPEC §3 layer 2): read-only, replica routing, EXPLAIN-cost
-//! gate (advisory), row/byte mid-stream cutoff, cumulative per-role budgets,
-//! timeout injection, hash-chained audit, extended-protocol-only. This S0 stub
-//! only prints its identity and carries the per-role budget seam + a test; the
-//! real FE/BE loop lands in S1.
+//! Reads its wiring from the environment (so it stays 12-factor and secret-store
+//! friendly), loads per-role budgets from `policy.yaml`, optionally terminates
+//! TLS on the agent endpoint, and serves each connection through the enforced
+//! FE/BE loop in [`pgb_proxy::serve_connection`].
+//!
+//! Environment:
+//! - `PGB_PROXY_LISTEN`      — agent listen addr (default `127.0.0.1:6432`).
+//! - `PGB_PROXY_TLS_CERT` / `PGB_PROXY_TLS_KEY` — PEM paths; both ⇒ TLS on.
+//! - `PGB_BACKEND_HOST` / `PGB_BACKEND_PORT` / `PGB_BACKEND_DB` — PG18 target
+//!   (defaults `127.0.0.1` / `54321` / `postgres`; **never 5432**).
+//! - `PGB_BACKEND_ROLE` / `PGB_BACKEND_PASSWORD` — the WALL role + password
+//!   (defaults `pgb_agent` / `pgb_agent_dev_pw`).
+//! - `PGB_AGENT_USER` / `PGB_AGENT_PASSWORD` — the SCRAM credential the proxy
+//!   verifies for agents.
+//! - `PGB_POLICY_PATH` — path to `policy.yaml`.
+//! - `PGB_POLICY_ROLE` — which role's budgets apply (default `analytics`).
+//! - `PGB_STATEMENT_TIMEOUT_MS` — injected `statement_timeout` (default 30000).
 
-/// A cumulative per-role volume budget (bytes) over a window (SPEC §3 layer 2).
-///
-/// Fail-closed: once the budget is exhausted the proxy cuts the stream off.
-#[derive(Debug, Clone, Copy)]
-struct ByteBudget {
-    limit: u64,
-    used: u64,
+use std::sync::{Arc, Mutex};
+
+use pgb_audit::InMemorySink;
+use pgb_core::{Clock, SystemClock};
+use pgb_policy::PolicyConfig;
+use pgb_proxy::config::{BackendTarget, TlsConfig};
+use pgb_proxy::{serve_connection, ProxyConfig, Recorder};
+use tokio::net::TcpListener;
+
+fn env_or(key: &str, default: &str) -> String {
+    std::env::var(key).unwrap_or_else(|_| default.to_string())
 }
 
-impl ByteBudget {
-    fn new(limit: u64) -> Self {
-        ByteBudget { limit, used: 0 }
-    }
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Install the ring crypto provider for rustls (process-wide, once).
+    let _ = rustls::crypto::ring::default_provider().install_default();
 
-    /// Try to charge `n` bytes. Returns `false` (and refuses) if it would
-    /// exceed the budget — the mid-stream cutoff.
-    fn try_charge(&mut self, n: u64) -> bool {
-        match self.used.checked_add(n) {
-            Some(total) if total <= self.limit => {
-                self.used = total;
-                true
-            }
-            _ => false,
-        }
-    }
-}
+    let listen = env_or("PGB_PROXY_LISTEN", "127.0.0.1:6432").parse()?;
 
-fn main() {
-    // Exercise the local seam plus the workspace deps the proxy is built on,
-    // so the stub is live, wired code rather than dead scaffolding.
-    let mut budget = ByteBudget::new(1 << 20);
-    let charged = budget.try_charge(0);
-    let trust = pgb_core::TrustLevel::default_floor();
-    let verdict = pgb_policy::StubRiskEngine.evaluate();
-    let proto_ok = pgb_pgwire::ProtocolMode::Extended.is_allowed_for_agent();
-    // Exercise the audit seam: an empty hash chain's head is the defined
-    // genesis (the real FE/BE loop appends recorded statements in S1).
-    let audit_head = pgb_audit::AuditChain::new().head_hash();
-    println!(
-        "pgb-proxy: stub — inline read enforcement lands in S1 (see SPEC.md §3). \
-         seams ready (budget_limit={}, charged={charged}, trust={trust:?}, \
-         verdict={verdict:?}, extended_only={proto_ok}, audit_head={audit_head}).",
-        budget.limit
+    let tls = match (
+        std::env::var("PGB_PROXY_TLS_CERT"),
+        std::env::var("PGB_PROXY_TLS_KEY"),
+    ) {
+        (Ok(cert), Ok(key)) => Some(TlsConfig {
+            cert_pem: cert.into(),
+            key_pem: key.into(),
+        }),
+        _ => None,
+    };
+
+    let policy_path = env_or("PGB_POLICY_PATH", "crates/policy/policy.example.yaml");
+    let policy_role = env_or("PGB_POLICY_ROLE", "analytics");
+    let policy = PolicyConfig::load_from_yaml(&std::fs::read_to_string(&policy_path)?)?;
+    let budget = ProxyConfig::budget_for(&policy, &policy_role)?;
+
+    let cfg = Arc::new(ProxyConfig {
+        listen,
+        tls,
+        backend: BackendTarget {
+            host: env_or("PGB_BACKEND_HOST", "127.0.0.1"),
+            port: env_or("PGB_BACKEND_PORT", "54321").parse()?,
+            database: env_or("PGB_BACKEND_DB", "postgres"),
+            role: env_or("PGB_BACKEND_ROLE", "pgb_agent"),
+            password: env_or("PGB_BACKEND_PASSWORD", "pgb_agent_dev_pw"),
+        },
+        agent_user: env_or("PGB_AGENT_USER", "pgb_agent"),
+        agent_password: env_or("PGB_AGENT_PASSWORD", "pgb_agent_dev_pw"),
+        policy_role: policy_role.clone(),
+        budget,
+        statement_timeout_ms: env_or("PGB_STATEMENT_TIMEOUT_MS", "30000").parse()?,
+    });
+
+    // Audit sink: the in-memory hash chain (the Postgres `_meta` sink is wired in
+    // a follow-up; this binary keeps the chain in-process). The chain is the
+    // tamper-evident evidence that hostile statements were stopped.
+    let sink: Arc<Mutex<dyn pgb_audit::Sink + Send>> = Arc::new(Mutex::new(InMemorySink::new()));
+    let clock: Arc<dyn Clock> = Arc::new(SystemClock::new());
+    let recorder = Recorder::new(sink, clock, cfg.backend.role.clone());
+
+    let tls_acceptor = match &cfg.tls {
+        Some(t) => Some(Arc::new(tokio_rustls::TlsAcceptor::from(
+            pgb_proxy::tls::server_config(t)?,
+        ))),
+        None => None,
+    };
+
+    let listener = TcpListener::bind(cfg.listen).await?;
+    eprintln!(
+        "pgb-proxy: listening on {} → backend {}:{} as {} (policy role `{}`, \
+         statement_timeout={}ms, tls={})",
+        cfg.listen,
+        cfg.backend.host,
+        cfg.backend.port,
+        cfg.backend.role,
+        cfg.policy_role,
+        cfg.statement_timeout_ms,
+        cfg.tls.is_some(),
     );
-}
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn budget_cuts_off_on_overrun() {
-        let mut budget = ByteBudget::new(100);
-        assert!(budget.try_charge(60));
-        assert!(budget.try_charge(40)); // exactly at the limit
-                                        // Any further byte exceeds the budget -> cutoff (fail-closed).
-        assert!(!budget.try_charge(1));
+    let mut conn_id: u64 = 0;
+    loop {
+        let (tcp, peer) = listener.accept().await?;
+        conn_id += 1;
+        let session_id = format!("conn-{conn_id}");
+        let cfg = cfg.clone();
+        let tls_acceptor = tls_acceptor.clone();
+        let recorder = recorder.clone();
+        tokio::spawn(async move {
+            if let Err(e) =
+                serve_connection(tcp, cfg, tls_acceptor, recorder, session_id.clone()).await
+            {
+                eprintln!("pgb-proxy: session {session_id} ({peer}) ended: {e}");
+            }
+        });
     }
 }
