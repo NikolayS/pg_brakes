@@ -61,9 +61,19 @@ ALTER ROLE pgb_agent
                     --        even if a role were granted it must SET ROLE explicitly.
   LOGIN;
 
--- [ATTR] Pin search_path: no mutable / "$user" injection. A pinned, schema-qualified
--- path defeats search-path-hijack (a writable schema earlier in the path shadowing a
--- trusted object). pg_catalog is implicitly first; we name only the whitelisted schema.
+-- [BEST-EFFORT / DEFENSE-IN-DEPTH] Pin search_path at the role level. HONEST CAVEAT:
+-- this role-level pin is NOT immutable. PostgreSQL lets ANY non-superuser role change its
+-- OWN role-level GUCs, so `ALTER ROLE pgb_agent SET search_path=…` / `RESET ALL` (run as
+-- the agent itself) defeats this pin. The AUTHORITATIVE search_path pin is the PROXY (S1),
+-- which sets search_path per session on every connection it brokers; this line is
+-- defense-in-depth for the raw-client lens and to drift-correct on every re-apply.
+--   The WALL's REAL guarantee does NOT depend on search_path: access is via fully-qualified
+-- EXPLICIT SELECT grants only (§6 whitelist), and the agent can neither CREATE schemas/
+-- objects (NOCREATE on schema public, NOSUPERUSER, member-of-nothing) nor write anywhere.
+-- Therefore ANY search_path the agent picks (even pg_temp-first, even RESET ALL) CANNOT
+-- widen its read surface or plant a trojan. The wall_matrix asserts exactly this invariant
+-- (see the "search_path invariant" rows): the agent CAN mutate its path (documented PG
+-- behavior), yet STILL cannot read non-whitelisted data or write after maximal mutation.
 ALTER ROLE pgb_agent SET search_path = pg_catalog, "public";
 
 -- -------------------------------------------------------------------------------------
@@ -145,13 +155,53 @@ REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA public FROM pgb_agent;
 ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
 
 -- -------------------------------------------------------------------------------------
--- 4. [NO-GRANT] Large objects / server files are gated by superuser + predefined-role
---    membership (pg_read_server_files / pg_write_server_files), both denied above. There
---    is no per-object GRANT to revoke for the lo_*/pg_read_file built-ins; the deny is
---    structural and proven by the harness attempting lo_import / pg_read_file /
---    COPY…PROGRAM and asserting a permission error. Documented, not silently skipped.
+-- 4. [REVOKE] No write grant ANYWHERE — close the two PUBLIC-default write paths.
+--    (a) TEMP on the database: PostgreSQL grants TEMPORARY to PUBLIC by default, which
+--        lets the agent CREATE TEMP TABLE … INSERT (session-local, but still a write +
+--        disk-consumption DoS vector). REVOKE it from PUBLIC and from the agent so the
+--        "no write grant anywhere" claim is TRUE. (CONNECT is left intact so the agent
+--        can still log in.)
+--    (b) Large-object WRITE built-ins: PostgreSQL grants EXECUTE to PUBLIC by default on
+--        the lo_* server-side functions. The READ/file paths (lo_import/lo_export) are
+--        already gated on pg_read/write_server_files (denied above), but the IN-DB write
+--        path (lo_create/lowrite/lo_from_bytea/lo_put/lo_creat/lo_truncate*/lo_unlink) is
+--        reachable via the PUBLIC default and lets the agent write large objects it owns.
+--        REVOKE EXECUTE on every lo_* WRITE/mutate built-in from PUBLIC so no in-DB write
+--        path remains. (loread/lo_open are reads and are left for completeness of the
+--        no-write claim; they cannot widen the read surface beyond LOs the agent created,
+--        which it now cannot.)
+--    Both are real REVOKEs (the privilege exists by PUBLIC default); the harness proves
+--    each by ATTEMPTING the write as the agent and asserting a permission error.
+-- -------------------------------------------------------------------------------------
+-- REVOKE TEMP on the CONNECTED database (current_database()); identifiers stay literal-free
+-- via format()/EXECUTE so this file needs no psql :vars and re-targets by being run against
+-- the intended database (matches the role's "scoped to the connected database" model above).
+DO $$
+BEGIN
+  EXECUTE format('REVOKE TEMPORARY ON DATABASE %I FROM PUBLIC', current_database());
+  EXECUTE format('REVOKE TEMPORARY ON DATABASE %I FROM pgb_agent', current_database());
+END
+$$;
+
+SET LOCAL client_min_messages = error;   -- silence any "no privileges could be revoked" notices
+REVOKE EXECUTE ON FUNCTION lo_create(oid)            FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION lo_creat(integer)         FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION lowrite(integer, bytea)   FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION lo_from_bytea(oid, bytea) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION lo_put(oid, bigint, bytea) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION lo_truncate(integer, integer)   FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION lo_truncate64(integer, bigint)  FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION lo_unlink(oid)            FROM PUBLIC;
+RESET client_min_messages;
+
+-- -------------------------------------------------------------------------------------
+-- 5. [NO-GRANT] Server-file large objects (lo_import/lo_export) and pg_read_file are
+--    gated by superuser + predefined-role membership (pg_read/write_server_files), both
+--    denied above. There is no per-object GRANT to revoke for those file paths; the deny
+--    is structural and proven by the harness attempting them and asserting a permission
+--    error. Documented, not silently skipped.
 --
--- 5. [NO-GRANT] dblink / postgres_fdw / file_fdw egress: the agent is NOT superuser and
+-- 6. [NO-GRANT] dblink / postgres_fdw / file_fdw egress: the agent is NOT superuser and
 --    has no CREATE on the database, so it cannot CREATE EXTENSION. The harness asserts
 --    these extensions are NOT installed AND that the agent cannot create them.
 -- -------------------------------------------------------------------------------------
@@ -197,8 +247,18 @@ COMMIT;
 
 -- =====================================================================================
 -- Done. The agent role is now: LOGIN, NOSUPERUSER, NOINHERIT, member-of-nothing,
--- NOCREATEDB/ROLE, NOREPLICATION, NOBYPASSRLS, search_path pinned, PUBLIC EXECUTE
--- revoked, NO write grant, SELECT only on the explicit whitelist, default-deny
--- everywhere else. dblink/fdw/COPY-PROGRAM/lo_*/pg_read_file denied structurally.
--- deploy/test/wall_matrix.sh asserts every one of these by attempting the denied action.
+-- NOCREATEDB/ROLE, NOREPLICATION, NOBYPASSRLS, PUBLIC EXECUTE revoked, NO write grant
+-- ANYWHERE (incl. TEMP on the database + the in-DB large-object write built-ins, both
+-- revoked from PUBLIC above), SELECT only on the explicit whitelist, default-deny
+-- everywhere else. dblink/fdw/COPY-PROGRAM/lo_import/lo_export/pg_read_file denied
+-- structurally (superuser/predefined-role gated).
+--
+-- search_path: the role-level pin above is BEST-EFFORT defense-in-depth ONLY — a
+-- non-superuser CAN change its own role GUCs, so the agent can mutate/RESET its path.
+-- The AUTHORITATIVE pin is the PROXY (S1). The WALL's guarantee does NOT rely on
+-- search_path: with explicit fully-qualified SELECT grants as the only read surface and
+-- no CREATE/no write anywhere, no search_path the agent chooses can widen access or plant
+-- a trojan. deploy/test/wall_matrix.sh asserts every deny by attempting it as the agent,
+-- AND asserts the search_path invariant (agent mutates path + RESET ALL → STILL cannot
+-- read non-whitelisted data or write anywhere).
 -- =====================================================================================

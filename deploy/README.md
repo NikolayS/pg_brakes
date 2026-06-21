@@ -176,7 +176,7 @@ proxy** — and refuses any agent connection that doesn't originate from the pro
 
 | Artifact | What it is |
 |----------|------------|
-| `sql/10_hardened_role.sql` | **Canonical, idempotent** hardened-role migration: creates `pgb_agent` (LOGIN, NOSUPERUSER, NOINHERIT, member-of-nothing, NOCREATEDB/ROLE, NOREPLICATION, NOBYPASSRLS), revokes all `pg_*` predefined roles + PUBLIC EXECUTE, pins `search_path`, grants **SELECT-whitelist only** (no write grant), default-deny everywhere. |
+| `sql/10_hardened_role.sql` | **Canonical, idempotent** hardened-role migration: creates `pgb_agent` (LOGIN, NOSUPERUSER, NOINHERIT, member-of-nothing, NOCREATEDB/ROLE, NOREPLICATION, NOBYPASSRLS), revokes all `pg_*` predefined roles + PUBLIC EXECUTE, **revokes TEMP on the database + the in-DB large-object write built-ins** (so there is **no write grant ANYWHERE**), sets a **best-effort** role-level `search_path` pin (see note below), grants **SELECT-whitelist only**, default-deny everywhere. |
 | `init/10_hardened_role.sql` | Byte-for-byte **synced copy** of the canonical SQL, picked up by the docker entrypoint (`/docker-entrypoint-initdb.d`, runs after `00_README.sql`). `sql/check-init-sync.sh` guards against drift. |
 | `hba/pg_hba.agent-boundary.conf.template` | **Layer 0** `pg_hba` rules: agent role permitted **only from the proxy host's CIDR**; every other origin `reject`ed. |
 | `hba/render-hba.sh` | Generator that substitutes the template's placeholders (`--proxy-cidr 10.0.0.5/32 …`). Append its output to `$PGDATA/pg_hba.conf` **above** any catch-all. |
@@ -207,11 +207,44 @@ deploy/hba/render-hba.sh --agent-role pgb_agent --proxy-cidr 10.0.0.5/32 >> "$PG
 > the proxy's actual IP/CIDR. See `hba/NETWORK-POLICY.md`.
 
 > **Honest enforcement note.** Some denies (`dblink`/`postgres_fdw`/`COPY … PROGRAM`/
-> `lo_*`/`pg_read_file`/server-files) cannot be expressed as a `REVOKE` because the
-> capability was never granted to a non-superuser, member-of-nothing role — PostgreSQL
-> gates them on a predefined-role membership or the superuser bit this role does not hold.
-> The migration documents these as `[NO-GRANT]` and the harness proves each by **attempting
-> the action as the agent and asserting a permission error** (not by a paper REVOKE).
+> `lo_import`/`lo_export`/`pg_read_file`/server-files) cannot be expressed as a `REVOKE`
+> because the capability was never granted to a non-superuser, member-of-nothing role —
+> PostgreSQL gates them on a predefined-role membership or the superuser bit this role does
+> not hold. The migration documents these as `[NO-GRANT]` and the harness proves each by
+> **attempting the action as the agent and asserting a permission error** (not by a paper
+> REVOKE). The harness's `assert_denied` requires a **permission/insufficient-privilege
+> error class** — a typo or connection error cannot masquerade as a deny.
+
+> **`search_path` honesty (defense-in-depth, NOT immutable).** The role-level `search_path`
+> pin in the migration is **best-effort only**. PostgreSQL lets ANY non-superuser role change
+> its **own** role-level GUCs, so the agent itself can run `ALTER ROLE pgb_agent SET
+> search_path = …` or `RESET ALL` and defeat the pin (until the migration re-applies). **The
+> authoritative search_path pin is the proxy (S1)**, which sets it per session on every
+> brokered connection. The WALL's real guarantee does **not** depend on `search_path`: reads
+> are via fully-qualified **explicit SELECT grants** only, and the agent can neither CREATE
+> schemas/objects (so no trojan-shadowing) nor write anywhere — therefore **no `search_path`
+> the agent chooses can widen its read surface or escalate**. The matrix proves this
+> **invariant** directly (section I): it shows the agent CAN mutate its path + `RESET ALL`
+> (documented PG behavior) yet **STILL** cannot read non-whitelisted data or write anywhere.
+
+> **"No write grant ANYWHERE" — now enforced.** PostgreSQL grants two write paths to PUBLIC
+> by default: `TEMPORARY` on the database (`CREATE TEMP TABLE … INSERT`) and EXECUTE on the
+> in-DB large-object write built-ins (`lo_create`/`lowrite`/`lo_from_bytea`/`lo_put`/…). The
+> migration now **REVOKEs both** (from PUBLIC and the agent), and the matrix asserts
+> `CREATE TEMP TABLE` and `lo_create`/`lowrite`/`lo_from_bytea`/`lo_put` are **DENIED**. The
+> server-file LO paths (`lo_import`/`lo_export`) remain `[NO-GRANT]`-gated as above.
+
+> **Boundary has an independent RED path.** Beyond `--red` (which un-hardens the ROLE only),
+> the harness runs an inline **BOUNDARY-RED** self-test: it swaps in a deliberately-permissive
+> `pg_hba`, proves the agent then CONNECTS from the non-proxy origin (so the strict-boundary
+> assertion *would* fail when misconfigured → it has teeth), then restores the strict rules
+> and re-confirms the reject. This proves the boundary test is not passing vacuously.
+
+> **Catalog/role/DB-name enumeration is readable** by the agent (PostgreSQL default; the
+> system catalogs are world-readable). This is **in-scope-acceptable**: it exposes no
+> application data (other backends' query text correctly shows `<insufficient privilege>`),
+> and the WALL's guarantee is about *non-whitelisted data reads* and *writes/escalation*,
+> not hiding the schema shape. Left as-is by design.
 
 ## §10.8 degraded mode (no replica)
 
