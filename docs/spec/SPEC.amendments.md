@@ -93,3 +93,87 @@ docker compose -f deploy/docker-compose.yml --profile replica --profile dblab do
 When the compose is confirmed live, this amendment can be narrowed to "image bumped to
 `postgres:18`; both substrates supported" — the local-PG substrate remains useful as the
 fast, Docker-free dev/CI path.
+
+---
+
+## S1 proxy — SCRAM terminate-and-originate; TLS to the backend deferred (MVP-minimal)
+
+**SPEC sections touched:** §3 (layer 2 proxy + layer 0 network boundary), §4 (proxy
+enforcement hooks; "un-foolable guarantees = network-boundary + hardened role + read-only
++ statement_timeout + byte-cutoff"), §7 S1 ("pgwire termination incl. SCRAM auth
+passthrough + TLS").
+
+**Issue:** #22 (S1 proxy).
+
+### Deviation
+
+1. **SCRAM is terminated-and-originated, not passed through.** The SPEC's S1 line says
+   "SCRAM auth **passthrough**." The proxy instead **terminates** the agent's
+   SCRAM-SHA-256 handshake (authenticating the agent against the proxy's configured agent
+   credential) and then **originates a separate backend connection** as the WALL role
+   `pgb_agent`. True passthrough (relaying the agent's SCRAM proof to the backend so the
+   backend authenticates the original principal) is not done in the MVP.
+
+2. **Agent-endpoint TLS is *required when configured* (no silent downgrade); the
+   proxy→backend hop is not TLS in the MVP.** The agent endpoint is TLS-terminated with
+   `rustls` (ring). When TLS material (cert+key) is configured, TLS is **required**
+   (`require_tls`, default-on whenever TLS is configured): a client `SSLRequest` is answered
+   `'S'` and the connection proceeds over TLS — the proxy **never** answers `'N'` to
+   downgrade to cleartext — and a client that opens with a **direct `StartupMessage`** (no
+   `SSLRequest`) is **rejected** (FATAL `ErrorResponse` + close) rather than served in
+   plaintext. A post-handshake check additionally refuses to proceed to auth/queries unless
+   the stream is actually encrypted (fail-closed). Requiring TLS with no TLS material
+   configured is a hard startup error.
+   - **Dev-only no-TLS mode (explicit, not a fallback):** `PGB_PROXY_REQUIRE_TLS=false` (or
+     simply running with no cert/key and `require_tls=false`) serves the agent endpoint in
+     plaintext. This is an **opt-in** developer/test mode; it is never a silent downgrade of
+     a TLS-configured deployment. Production sets cert+key and leaves `require_tls` on.
+   - **Backend-hop TLS remains deferred (§3 layer-0 boundary):** the proxy→backend
+     connection is plaintext over loopback, relying on the §3 layer-0 network boundary
+     (pg_hba: only-from-proxy) for confidentiality/integrity on that hop. This is the **only**
+     remaining TLS deferral.
+
+3. **Audit sink is the in-memory hash chain in the binary.** The proxy records every
+   statement (allow/block/reject) on a `pgb_audit` hash chain, but the shipped binary keeps
+   that chain **in-process** (`InMemorySink`). Wiring the Postgres `_meta` sink
+   (`pgb_audit::PgSink`, already built in #21) into the running proxy is a follow-up.
+
+### Rationale
+
+- **Terminate-and-originate is the natural shape of an enforcing proxy** and is what makes
+  the enforcement hooks possible at all: to gate the extended protocol, classify SQL,
+  meter the result stream, and inject `statement_timeout`, the proxy must own both wire
+  sides. Passthrough would hand the backend a connection the proxy cannot fully mediate.
+  The security guarantee does **not** weaken: the agent still proves a SCRAM credential to
+  reach the proxy, and the backend session is the **hardened WALL role** reachable **only**
+  via the proxy (the un-foolable backstops — WALL role + `statement_timeout` + byte/row
+  cutoff — all hold). The agent→backend principal mapping is fixed (agent ⇒ `pgb_agent`),
+  which is exactly the least-privilege intent.
+
+- **Backend TLS is redundant with the network boundary on the loopback/private-link hop**
+  the SPEC already mandates (layer 0). It is a config addition (point `rustls` at the
+  backend) with no enforcement-logic impact, so it is deferred without weakening the model.
+
+- **The in-memory chain proves the audit contract end-to-end** (allow + blocks/rejects
+  recorded, the marquee `COMMIT; DROP SCHEMA` captured verbatim, `verify_chain()` holds —
+  see the issue-#22 integration evidence). Persisting to `_meta` reuses the already-merged,
+  already-tested `PgSink` and changes no proxy logic.
+
+### Un-foolable enforcement actually proven (issue #22, against live PG18)
+
+The classifier is **advisory and foolable** (e.g. `pg_sleep` classifies as a read). The
+proxy therefore relies on the un-foolable backstops, all exercised in the env-gated
+`crates/proxy/tests/proxy_it.rs` against the local-stack WALL role: extended-protocol-only
+(the marquee `COMMIT; DROP SCHEMA public CASCADE` simple-query **BLOCKED**, schema intact),
+read-only gate (UPDATE/DELETE/DDL/COPY blocked), byte/row **mid-stream cutoff** (large
+SELECT cut at the per-role budget), `statement_timeout` (fires on `pg_sleep`), fail-closed
+(parse failure blocked), and the hash-chained audit recording all of it.
+
+The byte/row cutoff is enforced on **every** bulk path, not just `DataRow`: a
+backend-initiated COPY-out (`CopyOutResponse` 'H' / `CopyData` 'd') is metered against the
+**same** per-role budget and cut off (ErrorResponse to the client + the backend COPY torn
+down, fail-closed) the moment it would exceed the cap. So even a classifier-mis-allowed
+`COPY … TO STDOUT`, or a misbehaving/compromised backend, cannot stream bytes outside the
+budget — the cutoff is genuinely un-foolable-via-classifier on the COPY message path
+(`crates/proxy/src/session.rs::relay_until_ready`; unit-tested in `session.rs` and exercised
+end-to-end in `proxy_it.rs`).

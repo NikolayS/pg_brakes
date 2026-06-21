@@ -9,6 +9,10 @@ authors.workspace = true
 rust-version.workspace = true
 publish = false
 
+[lib]
+name = "pgb_proxy"
+path = "src/lib.rs"
+
 [[bin]]
 name = "pgb-proxy"
 path = "src/main.rs"
@@ -17,4 +21,35 @@ path = "src/main.rs"
 pgb-core = { path = "../core" }
 pgb-policy = { path = "../policy" }
 pgb-pgwire = { path = "../pgwire" }
-pgb-audit = { path = "../audit" }
+pgb-audit = { path = "../audit", default-features = false }
+
+# Async runtime + byte-level control of the FE/BE loop (matches pgwire).
+tokio = { version = "1", features = ["io-util", "macros", "rt", "rt-multi-thread", "net", "time", "sync"] }
+bytes = "1"
+thiserror = "2"
+
+# TLS on the agent-facing listener (rustls — Apache-2.0/MIT/ISC; keeps cargo-deny
+# green). `ring` crypto provider. PEM parsing uses rustls-pki-types' PemObject
+# (rustls-pemfile is unmaintained, RUSTSEC-2025-0134; its code now lives here).
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "logging", "tls12"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
+rustls-pki-types = { version = "1.9", features = ["std"] }
+
+# SCRAM-SHA-256 client-side auth (clean-room from RFC 5802 / RFC 7677). HMAC +
+# PBKDF2 over SHA-256, base64 envelope, CSPRNG nonce — all permissive licenses.
+hmac = "0.12"
+sha2 = "0.10"
+pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }
+base64 = "0.22"
+rand = "0.8"
+subtle = "2"
+
+[dev-dependencies]
+# Self-signed cert generation for the TLS integration test.
+rcgen = { version = "0.13", default-features = false, features = ["ring", "pem"] }
+# A synchronous Postgres client to set up integration fixtures (admin grants).
+postgres = "0.19"
+# tokio-postgres through-the-proxy client for the SCRAM+TLS handshake test, with
+# its rustls TLS integration (ring provider — keeps cargo-deny green).
+tokio-postgres = "0.7"
+tokio-postgres-rustls = { version = "0.14", default-features = false, features = ["ring"] }
