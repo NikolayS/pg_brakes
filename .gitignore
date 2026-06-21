@@ -23,3 +23,6 @@ clone-artifacts/
 *.swp
 .idea/
 .vscode/
+
+# Generated GitHub Pages site (assembled by scripts/build-site.sh)
+/site/
