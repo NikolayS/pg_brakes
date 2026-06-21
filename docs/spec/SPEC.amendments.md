@@ -114,10 +114,24 @@ passthrough + TLS").
    `pgb_agent`. True passthrough (relaying the agent's SCRAM proof to the backend so the
    backend authenticates the original principal) is not done in the MVP.
 
-2. **TLS terminates at the proxy; the proxy→backend hop is not TLS in the MVP.** The agent
-   endpoint is TLS-terminated with `rustls` (ring). The backend connection is plaintext
-   over loopback, relying on the §3 layer-0 network boundary (pg_hba: only-from-proxy) for
-   confidentiality/integrity on that hop.
+2. **Agent-endpoint TLS is *required when configured* (no silent downgrade); the
+   proxy→backend hop is not TLS in the MVP.** The agent endpoint is TLS-terminated with
+   `rustls` (ring). When TLS material (cert+key) is configured, TLS is **required**
+   (`require_tls`, default-on whenever TLS is configured): a client `SSLRequest` is answered
+   `'S'` and the connection proceeds over TLS — the proxy **never** answers `'N'` to
+   downgrade to cleartext — and a client that opens with a **direct `StartupMessage`** (no
+   `SSLRequest`) is **rejected** (FATAL `ErrorResponse` + close) rather than served in
+   plaintext. A post-handshake check additionally refuses to proceed to auth/queries unless
+   the stream is actually encrypted (fail-closed). Requiring TLS with no TLS material
+   configured is a hard startup error.
+   - **Dev-only no-TLS mode (explicit, not a fallback):** `PGB_PROXY_REQUIRE_TLS=false` (or
+     simply running with no cert/key and `require_tls=false`) serves the agent endpoint in
+     plaintext. This is an **opt-in** developer/test mode; it is never a silent downgrade of
+     a TLS-configured deployment. Production sets cert+key and leaves `require_tls` on.
+   - **Backend-hop TLS remains deferred (§3 layer-0 boundary):** the proxy→backend
+     connection is plaintext over loopback, relying on the §3 layer-0 network boundary
+     (pg_hba: only-from-proxy) for confidentiality/integrity on that hop. This is the **only**
+     remaining TLS deferral.
 
 3. **Audit sink is the in-memory hash chain in the binary.** The proxy records every
    statement (allow/block/reject) on a `pgb_audit` hash chain, but the shipped binary keeps
@@ -154,3 +168,12 @@ proxy therefore relies on the un-foolable backstops, all exercised in the env-ga
 read-only gate (UPDATE/DELETE/DDL/COPY blocked), byte/row **mid-stream cutoff** (large
 SELECT cut at the per-role budget), `statement_timeout` (fires on `pg_sleep`), fail-closed
 (parse failure blocked), and the hash-chained audit recording all of it.
+
+The byte/row cutoff is enforced on **every** bulk path, not just `DataRow`: a
+backend-initiated COPY-out (`CopyOutResponse` 'H' / `CopyData` 'd') is metered against the
+**same** per-role budget and cut off (ErrorResponse to the client + the backend COPY torn
+down, fail-closed) the moment it would exceed the cap. So even a classifier-mis-allowed
+`COPY … TO STDOUT`, or a misbehaving/compromised backend, cannot stream bytes outside the
+budget — the cutoff is genuinely un-foolable-via-classifier on the COPY message path
+(`crates/proxy/src/session.rs::relay_until_ready`; unit-tested in `session.rs` and exercised
+end-to-end in `proxy_it.rs`).

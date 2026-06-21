@@ -11,7 +11,8 @@
 //!    inject `statement_timeout` (terminate-and-originate);
 //! 4. **the query loop** — read each frontend frame, run the [`Enforcement`]
 //!    gate, forward allowed frames, and relay backend responses while the
-//!    [`Budget`] meters the `DataRow` stream and cuts it off at the cap.
+//!    [`Budget`] meters **every** bulk path — `DataRow` *and* backend-COPY
+//!    `CopyData` — and cuts it off at the cap (fail-closed).
 //!
 //! Everything fails closed: a malformed frame, a failed audit append, a budget
 //! overrun, or a rejected statement all stop the offending statement (or the
@@ -85,7 +86,24 @@ pub async fn serve_connection(
     session_id: String,
 ) -> Result<(), SessionError> {
     tcp.set_nodelay(true).ok();
-    let mut stream = startup_and_tls(tcp, &tls).await?;
+    let (mut stream, encrypted) = startup_and_tls(tcp, &tls, cfg.require_tls).await?;
+
+    // (1b) Post-handshake encryption check (fail-closed): when the deployment
+    // requires TLS, the session must NOT proceed to auth/queries unless the
+    // stream is actually encrypted. This is the belt to the negotiation
+    // suspenders — there is no path to cleartext auth when `require_tls` is on.
+    if cfg.require_tls && !encrypted {
+        send_fatal(
+            &mut stream,
+            "08P01",
+            "TLS is required on the agent endpoint; \
+             this connection is not encrypted — refusing (no cleartext downgrade)",
+        )
+        .await?;
+        return Err(SessionError::Handshake(
+            "require_tls: refused unencrypted session",
+        ));
+    }
 
     // Read the real StartupMessage (post-TLS).
     let body = read_startup_body(&mut stream).await?;
@@ -108,13 +126,26 @@ pub async fn serve_connection(
     query_loop(&mut stream, &mut backend, &cfg, &recorder, &session_id).await
 }
 
-/// Handle the `SSLRequest` negotiation and optionally upgrade to TLS, returning
-/// the (possibly wrapped) agent stream. A client that opens with a plain
-/// `StartupMessage` (no `SSLRequest`) is supported too: we peek the magic code.
+/// Handle the `SSLRequest` negotiation and (when configured) upgrade to TLS.
+///
+/// Returns the (possibly TLS-wrapped) agent stream and a flag indicating whether
+/// the stream is actually **encrypted**. The negotiation enforces the
+/// `require_tls` posture (SPEC §7 S1 — agent-endpoint TLS, no silent downgrade):
+///
+/// - `SSLRequest` + TLS acceptor present ⇒ answer `'S'`, upgrade ⇒ `encrypted`.
+/// - `SSLRequest` + no acceptor:
+///   - `require_tls` ⇒ **refuse** (`'N'` then close; the caller never sees a
+///     plaintext stream because TLS was promised but cannot be provided).
+///   - else (dev no-TLS) ⇒ answer `'N'`, continue in plaintext (not encrypted).
+/// - **direct `StartupMessage`** (no `SSLRequest`):
+///   - `require_tls` ⇒ **reject** (FATAL ErrorResponse + close) — a plaintext
+///     client must not be served when TLS is required.
+///   - else ⇒ continue in plaintext (not encrypted).
 async fn startup_and_tls(
     tcp: TcpStream,
     tls: &Option<Arc<tokio_rustls::TlsAcceptor>>,
-) -> Result<AgentStream, SessionError> {
+    require_tls: bool,
+) -> Result<(AgentStream, bool), SessionError> {
     let mut tcp = tcp;
     // Peek the first 8 bytes: an SSLRequest is exactly `00 00 00 08 <magic>`.
     let mut head = [0u8; 8];
@@ -130,18 +161,43 @@ async fn startup_and_tls(
                 tcp.write_all(b"S").await?;
                 tcp.flush().await?;
                 let tls_stream = acceptor.accept(tcp).await?;
-                Ok(Box::new(tls_stream))
+                Ok((Box::new(tls_stream), true))
             }
-            None => {
-                // No TLS configured → tell the client plaintext, continue.
+            None if require_tls => {
+                // TLS is required but no acceptor is configured: refuse rather
+                // than fall back to cleartext (fail-closed — should be caught at
+                // startup by validate_tls, but never downgrade here either).
                 tcp.write_all(b"N").await?;
                 tcp.flush().await?;
-                Ok(Box::new(tcp))
+                Err(SessionError::Handshake(
+                    "require_tls: no TLS acceptor configured; refusing plaintext",
+                ))
+            }
+            None => {
+                // Explicit dev no-TLS mode → tell the client plaintext, continue.
+                tcp.write_all(b"N").await?;
+                tcp.flush().await?;
+                Ok((Box::new(tcp), false))
             }
         }
+    } else if require_tls {
+        // Direct StartupMessage (no SSLRequest) while TLS is required: a
+        // plaintext client must NOT be served. Emit a FATAL ErrorResponse and
+        // close (no cleartext auth, no query loop).
+        send_fatal(
+            &mut tcp,
+            "08P01",
+            "TLS is required on the agent endpoint; \
+             connect with sslmode=require (a direct cleartext StartupMessage is refused)",
+        )
+        .await?;
+        tcp.flush().await?;
+        Err(SessionError::Handshake(
+            "require_tls: rejected direct plaintext StartupMessage",
+        ))
     } else {
-        // Direct StartupMessage (no SSLRequest) — plaintext.
-        Ok(Box::new(tcp))
+        // Explicit dev no-TLS mode: direct StartupMessage, plaintext.
+        Ok((Box::new(tcp), false))
     }
 }
 
@@ -533,10 +589,30 @@ where
     }
 }
 
+/// Build the human-readable cutoff message + machine code for an exceeded
+/// budget, given the breaching stream's pre-row totals.
+fn cutoff_message(cap: crate::budget::Cap, bytes: u64, rows: u64) -> String {
+    format!(
+        "result cut off at the {} budget after {} rows / {} bytes \
+         (single-shot cap exceeded)",
+        match cap {
+            crate::budget::Cap::Bytes => "byte",
+            crate::budget::Cap::Rows => "row",
+        },
+        rows,
+        bytes
+    )
+}
+
 /// Relay backend frames to the agent until `ReadyForQuery`, applying the
-/// per-statement byte/row cutoff to `DataRow` frames. On a cutoff we stop
-/// forwarding rows, emit an `ErrorResponse` to the agent, record the block, and
-/// cancel/drain the backend.
+/// per-statement byte/row cutoff. **Both** `DataRow` ('D') and backend-COPY
+/// `CopyData` ('d') payloads are metered against the same per-role budget — the
+/// byte-cutoff is the un-foolable §4 guarantee and must hold on **every** bulk
+/// path, not just the `DataRow` path (a classifier-mis-allowed `COPY … TO
+/// STDOUT`, or a misbehaving backend, must not be able to stream bytes outside
+/// the budget). On a cutoff we stop forwarding, emit an `ErrorResponse` to the
+/// agent, record the block, and fail-closed (tearing down a backend COPY rather
+/// than proxying it unmetered).
 async fn relay_until_ready<S>(
     agent: &mut S,
     backend: &mut TcpStream,
@@ -549,11 +625,30 @@ where
 {
     let mut budget = Budget::for_role(&cfg.budget);
     let mut cut_off = false;
+    // Whether the backend has begun a COPY-out stream ('H'/'G'/'W'). In copy
+    // mode the 'd' CopyData payloads are metered exactly like DataRows, and a
+    // cutoff fails the whole session closed (a COPY-out cannot be cleanly
+    // cancelled mid-stream from the FE without a side-channel CancelRequest).
+    let mut in_copy = false;
 
     loop {
         let frame = read_tagged_frame(backend)
             .await?
             .ok_or_else(|| SessionError::Backend("backend closed mid-result".into()))?;
+
+        // Detect a backend-initiated COPY-out start ('H'/'G'/'W'). The proxy
+        // never legitimately drives COPY for an agent, but the byte-cutoff must
+        // still hold on this path, so we enter metered copy mode rather than
+        // forwarding the bulk stream verbatim.
+        if pgb_pgwire::backend_starts_copy(&frame) {
+            in_copy = true;
+            // Forward the CopyOutResponse header so the agent's protocol state
+            // tracks; the 'd' payloads that follow are what we meter.
+            if !cut_off {
+                forward_frame(agent, &frame).await?;
+            }
+            continue;
+        }
 
         match frame.tag {
             // ReadyForQuery — the terminator. After a cutoff we already sent an
@@ -562,38 +657,47 @@ where
                 forward_frame(agent, &frame).await?;
                 return Ok(());
             }
-            // DataRow — the only metered frame. Before a cutoff, charge it; once
-            // cut off, the remaining rows are suppressed (not forwarded).
-            b'D' if !cut_off => match budget.charge_row(frame.body.len() as u64) {
-                BudgetOutcome::Within { .. } => forward_frame(agent, &frame).await?,
-                BudgetOutcome::Exceeded { cap, bytes, rows } => {
-                    cut_off = true;
-                    let message = format!(
-                        "result cut off at the {} budget after {} rows / {} bytes \
-                         (single-shot cap exceeded)",
-                        match cap {
-                            crate::budget::Cap::Bytes => "byte",
-                            crate::budget::Cap::Rows => "row",
-                        },
-                        rows,
-                        bytes
-                    );
-                    recorder
-                        .block(
-                            session_id,
-                            "<result stream>",
-                            cap.code(),
-                            Some(message.clone()),
-                        )
-                        .map_err(SessionError::Audit)?;
-                    // Tell the agent the stream was cut; keep draining the
-                    // backend so the connection ends in a clean (Z) state.
-                    write_frame(agent, &error_response("53400", &message).encode()).await?;
+            // CopyDone ('c') from the backend ends the copy stream.
+            b'c' if in_copy => {
+                in_copy = false;
+                if !cut_off {
+                    forward_frame(agent, &frame).await?;
                 }
-            },
-            // Suppressed after a cutoff: remaining DataRows + the now-redundant
-            // CommandComplete (we already emitted our ErrorResponse).
-            b'D' | b'C' if cut_off => {}
+            }
+            // DataRow ('D') and backend CopyData ('d') are BOTH metered against
+            // the same budget. Before a cutoff, charge the payload bytes as one
+            // "row"; once cut off, the remaining payloads are suppressed.
+            b'D' | b'd' if !cut_off => {
+                match budget.charge_row(frame.body.len() as u64) {
+                    BudgetOutcome::Within { .. } => forward_frame(agent, &frame).await?,
+                    BudgetOutcome::Exceeded { cap, bytes, rows } => {
+                        cut_off = true;
+                        let message = cutoff_message(cap, bytes, rows);
+                        recorder
+                            .block(
+                                session_id,
+                                "<result stream>",
+                                cap.code(),
+                                Some(message.clone()),
+                            )
+                            .map_err(SessionError::Audit)?;
+                        // Tell the agent the stream was cut.
+                        write_frame(agent, &error_response("53400", &message).encode()).await?;
+                        // On a metered COPY-out the only safe cutoff is to fail
+                        // the session closed: tear the backend down so the bulk
+                        // stream cannot continue draining the DB unmetered.
+                        if in_copy {
+                            backend.shutdown().await.ok();
+                            return Err(SessionError::Backend(format!(
+                                "backend COPY-out cut off at the budget: {message}"
+                            )));
+                        }
+                    }
+                }
+            }
+            // Suppressed after a cutoff: remaining DataRows/CopyData + the
+            // now-redundant CommandComplete (we already emitted our error).
+            b'D' | b'd' | b'C' if cut_off => {}
             // Everything else (RowDescription, ParseComplete, BindComplete,
             // CommandComplete pre-cutoff, NoticeResponse, ErrorResponse, …)
             // passes through verbatim.
@@ -680,4 +784,190 @@ fn diag(fields: &[(u8, String)]) -> String {
         .map(|(_, v)| v.as_str())
         .unwrap_or("?");
     format!("{msg} ({code})")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pgb_audit::{Decision, InMemorySink, Sink};
+    use pgb_core::{Clock, MockClock};
+    use pgb_policy::{RoleBudget, WindowBudget};
+    use std::sync::Mutex;
+    use tokio::net::TcpListener;
+
+    fn tiny_budget_cfg(max_bytes: u64, max_rows: u64) -> ProxyConfig {
+        ProxyConfig {
+            listen: "127.0.0.1:0".parse().unwrap(),
+            tls: None,
+            require_tls: false,
+            backend: BackendTarget {
+                host: "127.0.0.1".into(),
+                port: 54321,
+                database: "postgres".into(),
+                role: "pgb_agent".into(),
+                password: "x".into(),
+            },
+            agent_user: "pgb_agent".into(),
+            agent_password: "x".into(),
+            policy_role: "analytics".into(),
+            budget: RoleBudget {
+                max_bytes,
+                max_rows,
+                per_window: WindowBudget {
+                    window_secs: 60,
+                    max_bytes: max_bytes * 100,
+                    max_rows: max_rows * 100,
+                },
+            },
+            statement_timeout_ms: 30_000,
+        }
+    }
+
+    fn recorder() -> (Recorder, Arc<Mutex<InMemorySink>>) {
+        let inner = Arc::new(Mutex::new(InMemorySink::new()));
+        let as_trait: Arc<Mutex<dyn Sink + Send>> = inner.clone();
+        let clock: Arc<dyn Clock> = Arc::new(MockClock::starting_at(1_700_000_000_000));
+        (Recorder::new(as_trait, clock, "pgb_agent"), inner)
+    }
+
+    /// Drive `relay_until_ready` against a simulated backend that produces a
+    /// COPY-out stream (CopyOutResponse + oversized CopyData) — no live PG
+    /// needed. Proves the un-foolable byte-cutoff holds on the COPY message path:
+    /// the `CopyData` payload bytes ARE metered, the stream is cut at ≤ B, an
+    /// ErrorResponse reaches the agent, the cutoff is audited, and the session
+    /// fails closed (the backend COPY is torn down, not proxied unmetered).
+    #[tokio::test]
+    async fn copy_out_copydata_is_metered_and_cut_at_budget() {
+        // Budget: 50 bytes / 1000 rows. The single CopyData payload (100 bytes)
+        // exceeds the BYTE cap → must be cut before forwarding.
+        let cfg = tiny_budget_cfg(50, 1000);
+        let (rec, sink) = recorder();
+
+        // A loopback "backend": it accepts one connection and writes the
+        // COPY-out frames the proxy must meter.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let backend_addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut s, _) = listener.accept().await.unwrap();
+            // CopyOutResponse ('H') — starts the copy.
+            let h = BackendMessage::CopyOutResponse {
+                format: 0,
+                column_formats: vec![],
+            };
+            write_frame(&mut s, &h.encode()).await.unwrap();
+            // CopyData ('d') with a 100-byte payload — over the 50-byte budget.
+            let d = BackendMessage::CopyData {
+                data: Bytes::from(vec![b'Z'; 100]),
+            };
+            write_frame(&mut s, &d.encode()).await.unwrap();
+            // The backend would keep streaming; we let the proxy tear us down.
+            // Read until the proxy shuts the connection (cutoff fail-closed).
+            let mut buf = [0u8; 64];
+            let _ = s.read(&mut buf).await;
+        });
+
+        let mut backend = TcpStream::connect(backend_addr).await.unwrap();
+        backend.set_nodelay(true).ok();
+
+        // The agent side: an in-memory duplex stream we can read back.
+        let (agent_proxy_side, mut agent_client_side) = tokio::io::duplex(64 * 1024);
+
+        let mut agent = agent_proxy_side;
+        let result = relay_until_ready(&mut agent, &mut backend, &cfg, &rec, "copy-test").await;
+
+        // The session fails closed on the metered-COPY cutoff.
+        let err = result.expect_err("metered COPY-out cutoff must fail the session closed");
+        assert!(
+            matches!(err, SessionError::Backend(ref m) if m.contains("COPY-out cut off")),
+            "expected a fail-closed Backend cutoff error, got {err:?}"
+        );
+
+        // The agent received the CopyOutResponse header then a cutoff
+        // ErrorResponse (53400) — NOT the 100-byte payload.
+        drop(agent);
+        let mut received = Vec::new();
+        agent_client_side.read_to_end(&mut received).await.unwrap();
+        // The 'H' header is forwarded; the oversized 'd' payload is not.
+        assert!(received.contains(&b'H'), "CopyOutResponse header forwarded");
+        assert!(
+            !received.windows(4).any(|w| w == b"ZZZZ"),
+            "the over-budget CopyData payload must NOT have been forwarded"
+        );
+        // The cutoff ErrorResponse code 53400 is present.
+        assert!(
+            String::from_utf8_lossy(&received).contains("53400"),
+            "cutoff ErrorResponse (53400) must reach the agent"
+        );
+        assert!(
+            String::from_utf8_lossy(&received).contains("cut off"),
+            "cutoff message must reach the agent"
+        );
+
+        // The cutoff was audited as a BLOCK against the byte budget.
+        let chain = sink.lock().unwrap().chain().records().to_vec();
+        assert_eq!(chain.len(), 1, "exactly one block record for the cutoff");
+        assert_eq!(chain[0].payload.decision, Decision::Block);
+        assert_eq!(chain[0].payload.reason_code, "byte_budget_exceeded");
+
+        server.await.unwrap();
+    }
+
+    /// Companion to the integration cutoff: a `CopyData` payload that FITS the
+    /// budget is metered (charged) and forwarded, proving the metering is on the
+    /// 'd' path, not a blanket refusal.
+    #[tokio::test]
+    async fn copy_out_copydata_within_budget_is_forwarded() {
+        let cfg = tiny_budget_cfg(1_000, 1_000);
+        let (rec, _sink) = recorder();
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let backend_addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut s, _) = listener.accept().await.unwrap();
+            let h = BackendMessage::CopyOutResponse {
+                format: 0,
+                column_formats: vec![],
+            };
+            write_frame(&mut s, &h.encode()).await.unwrap();
+            let d = BackendMessage::CopyData {
+                data: Bytes::from(vec![b'A'; 10]),
+            };
+            write_frame(&mut s, &d.encode()).await.unwrap();
+            write_frame(&mut s, &BackendMessage::CopyDone.encode())
+                .await
+                .unwrap();
+            // CommandComplete + ReadyForQuery to terminate cleanly.
+            let cc = BackendMessage::CommandComplete {
+                tag: "COPY 1".to_string(),
+            };
+            write_frame(&mut s, &cc.encode()).await.unwrap();
+            write_frame(
+                &mut s,
+                &BackendMessage::ReadyForQuery {
+                    status: TransactionStatus::Idle,
+                }
+                .encode(),
+            )
+            .await
+            .unwrap();
+        });
+
+        let mut backend = TcpStream::connect(backend_addr).await.unwrap();
+        let (agent_proxy_side, mut agent_client_side) = tokio::io::duplex(64 * 1024);
+        let mut agent = agent_proxy_side;
+
+        relay_until_ready(&mut agent, &mut backend, &cfg, &rec, "copy-ok")
+            .await
+            .expect("within-budget COPY-out relays cleanly");
+
+        drop(agent);
+        let mut received = Vec::new();
+        agent_client_side.read_to_end(&mut received).await.unwrap();
+        // The within-budget payload IS forwarded.
+        assert!(
+            received.windows(4).any(|w| w == b"AAAA"),
+            "within-budget CopyData payload must be forwarded"
+        );
+        server.await.unwrap();
+    }
 }

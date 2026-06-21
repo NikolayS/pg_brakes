@@ -153,6 +153,8 @@ async fn spawn_proxy(
     let cfg = Arc::new(ProxyConfig {
         listen: "127.0.0.1:0".parse().unwrap(),
         tls: Some(tls_cfg.clone()),
+        // TLS configured ⇒ TLS REQUIRED (no silent cleartext downgrade).
+        require_tls: true,
         backend: BackendTarget {
             host,
             port,
@@ -407,4 +409,64 @@ async fn proxy_enforcement_end_to_end_against_pg18() {
         "the marquee COMMIT; DROP SCHEMA must be captured in the audit chain"
     );
     eprintln!("[ok] MARQUEE COMMIT; DROP SCHEMA captured verbatim in the audit chain");
+}
+
+/// TLS is **required** when configured (no silent cleartext downgrade — review
+/// item 1). Proven end-to-end against the live proxy:
+///   * `sslmode=disable` (a direct plaintext StartupMessage, no SSLRequest) is
+///     **REJECTED** — it never reaches auth/queries;
+///   * `sslmode=require` (SSLRequest → TLS upgrade) **works** — a real SELECT
+///     succeeds over the encrypted socket.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tls_is_required_when_configured() {
+    if !it_enabled() {
+        eprintln!(
+            "[skip] set PG_BUMPERS_IT=1 (+ deploy/local-stack.sh up) for the TLS-required IT"
+        );
+        return;
+    }
+    tokio::task::spawn_blocking(setup_fixtures)
+        .await
+        .expect("fixture setup thread");
+
+    let budget = RoleBudget {
+        max_bytes: 50_000,
+        max_rows: 100,
+        per_window: WindowBudget {
+            window_secs: 60,
+            max_bytes: 50_000_000,
+            max_rows: 1_000_000,
+        },
+    };
+    // The proxy is spawned with TLS configured ⇒ require_tls = true.
+    let (addr, _sink, cert_der, _paths) = spawn_proxy(budget, 30_000).await;
+
+    // ---- (a) sslmode=disable is REJECTED (cleartext refused) ----
+    // `NoTls` + sslmode=disable ⇒ the driver sends a direct StartupMessage with
+    // no SSLRequest; the proxy must refuse it (no cleartext auth path).
+    let disable_dsn = format!(
+        "host=127.0.0.1 port={} user={} password={} dbname=postgres sslmode=disable",
+        addr.port(),
+        AGENT_USER,
+        AGENT_PASSWORD,
+    );
+    let disabled = tokio_postgres::connect(&disable_dsn, tokio_postgres::NoTls).await;
+    // The Ok variant's Connection isn't Debug, so match rather than expect_err.
+    let err = match disabled {
+        Ok(_) => panic!("sslmode=disable MUST be rejected when TLS is required"),
+        Err(e) => e,
+    };
+    eprintln!("[ok] sslmode=disable REJECTED (TLS required): {err}");
+
+    // ---- (b) sslmode=require works (TLS upgrade + SCRAM + a real SELECT) ----
+    let client = connect_client(addr, &cert_der).await;
+    let rows = client
+        .query("SELECT id, note FROM public.rca_read ORDER BY id", &[])
+        .await
+        .expect("sslmode=require must succeed over TLS");
+    assert_eq!(rows.len(), 3, "TLS SELECT returned wrong row count");
+    eprintln!(
+        "[ok] sslmode=require works over TLS: SELECT returned {} rows",
+        rows.len()
+    );
 }

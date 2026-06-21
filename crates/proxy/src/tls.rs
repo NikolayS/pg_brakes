@@ -5,8 +5,12 @@
 //! green; `ring` crypto provider). PostgreSQL's TLS is *negotiated*: the client
 //! sends an `SSLRequest` (a magic untagged frame) and the server answers with a
 //! single byte `S` (use TLS) or `N` (plaintext) **before** the TLS handshake.
-//! The session loop handles that one-byte negotiation; this module just builds
-//! the `ServerConfig` from configured PEM material.
+//! The session loop ([`crate::session`]) handles that one-byte negotiation and
+//! **enforces the `require_tls` posture** — when TLS is configured it is
+//! required: answer `'S'` and upgrade, reject a direct cleartext
+//! `StartupMessage`, never silently downgrade to `'N'`, and verify the stream is
+//! encrypted before auth. This module just builds the `ServerConfig` from the
+//! configured PEM material.
 //!
 //! PEM is parsed via `rustls-pki-types`' [`PemObject`] (the maintained home of
 //! the parser that used to live in the now-unmaintained `rustls-pemfile`,
