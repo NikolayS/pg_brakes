@@ -1,0 +1,80 @@
+# pg_bumpers — example policy.yaml  (SPEC §10.10, §12.2, §15.1)
+#
+# The single source of per-role policy: the SELECT whitelist, byte/row budgets
+# (single-shot + per-window cumulative), and the autonomy level (L0–L2 in the
+# MVP). Plus the §12.2 component config (replica / clone / pitr), the §14.3
+# approver-set placeholder (CLI signing key), and the §10.9 audit anchor.
+#
+# Validation (see `PolicyConfig::validate`) rejects:
+#   * an autonomy level above L2 (L3+ is out of MVP scope),
+#   * any zero / negative budget,
+#   * a per-window cumulative cap below the single-shot cap.
+#
+# This file loads and validates in the crate's test-suite.
+
+version: 1
+
+roles:
+  # An application write role: human-in-the-loop (L1), tight budgets, may read
+  # only its own tables.
+  app_writer:
+    select_whitelist:
+      - public.orders
+      - public.order_items
+    budget:
+      max_bytes: 1048576        # 1 MiB single-shot
+      max_rows: 10000           # 10k rows single-shot
+      per_window:
+        window_secs: 60         # rolling 60s window
+        max_bytes: 10485760     # 10 MiB cumulative / window
+        max_rows: 100000        # 100k rows cumulative / window
+    autonomy: L1
+
+  # An analytics role: bigger reads, broader whitelist, bounded autonomy (L2)
+  # so routine certified reads run without a human in the loop.
+  analytics:
+    select_whitelist:
+      - public.orders
+      - public.order_items
+      - public.customers
+      - analytics.daily_rollup
+    budget:
+      max_bytes: 268435456      # 256 MiB single-shot
+      max_rows: 5000000         # 5M rows single-shot
+      per_window:
+        window_secs: 300        # rolling 5m window
+        max_bytes: 1073741824   # 1 GiB cumulative / window
+        max_rows: 50000000      # 50M rows cumulative / window
+    autonomy: L2
+
+  # A locked-down migration role: no autonomy (L0) — every action needs human
+  # approval; reads nothing by default.
+  migration:
+    select_whitelist: []
+    budget:
+      max_bytes: 1048576
+      max_rows: 10000
+      per_window:
+        window_secs: 60
+        max_bytes: 10485760
+        max_rows: 100000
+    autonomy: L0
+
+# §12.2 — optional components (runtime-detected; never silently downgraded).
+replica:
+  dsn: "postgresql://reader@replica.internal:5432/app"
+
+clone:
+  provider: dblab            # none | dblab
+
+pitr:
+  enabled: true
+
+# §14.3 — MVP approval mechanism: a CLI-held signing key. The public key is
+# resolved out-of-band (KMS / keyring, §10.9); this is just the reference id.
+approvers:
+  cli_signing_key_id: "kms://pg-bumpers/approval-key/v1"
+
+# §10.9 — external append-only / WORM audit anchor (wired in S4).
+audit:
+  anchor_endpoint: "https://audit-anchor.internal/v1/append"
