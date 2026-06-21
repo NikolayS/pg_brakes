@@ -1,6 +1,6 @@
 [package]
 name = "pgb-policy"
-description = "pg_bumpers policy library: policy.yaml model, certified-action-set, and the RiskEngine seam."
+description = "pg_bumpers policy library: policy.yaml model, certified-action-set, the RiskEngine seam, T0–T2 intent capture, and the §14.3 proposal-bound grant token."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -11,3 +11,16 @@ publish = false
 
 [lib]
 name = "pgb_policy"
+
+[dependencies]
+pgb-core = { path = "../core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml_ng = "0.10"
+sha2 = "0.10"
+hex = "0.4"
+thiserror = "2"
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+
+[dev-dependencies]
+rand_core = { version = "0.6", features = ["getrandom"] }
