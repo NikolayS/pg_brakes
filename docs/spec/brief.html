@@ -1,0 +1,318 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>pg_bumpers — brief</title>
+<style>
+  :root{
+    --bg:#0b0f17; --panel:#0f1623; --card:#121b2b; --line:#1e2a3e;
+    --ink:#e7edf6; --muted:#9aa9bf; --soft:#6f7e96;
+    --accent:#3ddc97; --accent2:#5b8cff; --warn:#ffb454; --danger:#ff6b6b;
+    --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Roboto,Helvetica,Arial,sans-serif;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);
+       line-height:1.6;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:920px;margin:0 auto;padding:0 22px}
+  a{color:var(--accent2);text-decoration:none}
+  code,.mono{font-family:var(--mono);font-size:.9em}
+
+  /* hero */
+  .hero{background:
+      radial-gradient(900px 400px at 80% -10%,rgba(91,140,255,.18),transparent 60%),
+      radial-gradient(700px 380px at 0% 0%,rgba(61,220,151,.16),transparent 55%),
+      linear-gradient(180deg,#0d1320,#0b0f17);
+     border-bottom:1px solid var(--line);padding:54px 0 40px}
+  .eyebrow{font-family:var(--mono);font-size:12.5px;letter-spacing:.12em;text-transform:uppercase;
+     color:var(--accent)}
+  h1{font-size:46px;line-height:1.05;margin:12px 0 8px;letter-spacing:-.02em}
+  h1 .tld{color:var(--soft);font-weight:600}
+  .tagline{font-size:20px;color:var(--muted);max-width:680px;margin:0 0 22px}
+  .tagline b{color:var(--ink)}
+  .badges{display:flex;flex-wrap:wrap;gap:8px}
+  .badge{font-family:var(--mono);font-size:12px;padding:5px 10px;border:1px solid var(--line);
+     border-radius:999px;color:var(--muted);background:rgba(255,255,255,.02)}
+  .badge.ok{color:var(--accent);border-color:rgba(61,220,151,.35)}
+  .badge.blue{color:var(--accent2);border-color:rgba(91,140,255,.35)}
+
+  /* sections */
+  section{padding:34px 0;border-bottom:1px solid var(--line)}
+  h2{font-size:13px;font-family:var(--mono);letter-spacing:.14em;text-transform:uppercase;
+     color:var(--soft);margin:0 0 18px}
+  h3{font-size:18px;margin:0 0 6px}
+  p{margin:0 0 14px;color:#cdd7e6}
+  .lead{font-size:18px;color:var(--ink)}
+  .muted{color:var(--muted)}
+
+  .grid{display:grid;gap:14px}
+  .g2{grid-template-columns:1fr 1fr}
+  .g3{grid-template-columns:repeat(3,1fr)}
+  @media(max-width:720px){.g2,.g3{grid-template-columns:1fr}}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:18px 18px}
+  .card h3{display:flex;align-items:center;gap:8px}
+  .pill{font-family:var(--mono);font-size:11px;padding:2px 8px;border-radius:999px;
+     background:rgba(91,140,255,.12);color:var(--accent2);border:1px solid rgba(91,140,255,.25)}
+
+  /* why-now quote */
+  .quote{border-left:3px solid var(--accent);padding:6px 0 6px 16px;color:var(--muted);font-size:15px}
+  .quote b{color:var(--ink)}
+
+  /* architecture stack */
+  .layer{display:flex;gap:14px;align-items:flex-start;background:var(--card);
+     border:1px solid var(--line);border-radius:14px;padding:14px 16px;margin-bottom:10px;position:relative}
+  .layer .n{flex:none;width:34px;height:34px;border-radius:9px;display:grid;place-items:center;
+     font-family:var(--mono);font-weight:700;color:#06281c;background:var(--accent)}
+  .layer.l0 .n{background:var(--warn);color:#3a2600}
+  .layer.l2 .n{background:var(--accent2);color:#06173f}
+  .layer.l4 .n{background:#c79bff;color:#240a45}
+  .layer .t{flex:1}
+  .layer .t b{font-size:15px}
+  .layer .t span{display:block;color:var(--muted);font-size:14px;margin-top:2px}
+  .tag{font-family:var(--mono);font-size:11px;color:var(--soft);border:1px solid var(--line);
+     padding:2px 7px;border-radius:6px;white-space:nowrap}
+
+  /* steps */
+  .steps{display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px}
+  @media(max-width:720px){.steps{grid-template-columns:1fr}}
+  .step{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:16px}
+  .step .k{font-family:var(--mono);font-size:12px;color:var(--accent)}
+  .step h3{font-size:16px;margin:6px 0 6px}
+  .step p{font-size:14px;margin:0;color:var(--muted)}
+  .arrow{color:var(--soft);text-align:center;font-family:var(--mono)}
+
+  /* levels */
+  .levels{display:flex;flex-wrap:wrap;gap:10px}
+  .lvl{flex:1;min-width:150px;background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px}
+  .lvl .l{font-family:var(--mono);font-weight:700;color:var(--accent)}
+  .lvl.future{opacity:.5}
+  .lvl small{display:block;color:var(--muted);margin-top:4px;font-size:13px}
+
+  /* two-col lists */
+  ul.clean{list-style:none;margin:0;padding:0}
+  ul.clean li{padding:7px 0 7px 24px;position:relative;color:#cdd7e6;font-size:15px;border-bottom:1px solid rgba(30,42,62,.6)}
+  ul.clean li:last-child{border-bottom:0}
+  ul.clean li:before{content:"";position:absolute;left:2px;top:14px;width:8px;height:8px;border-radius:50%}
+  ul.in li:before{background:var(--accent)}
+  ul.out li:before{background:var(--soft)}
+  ul.no li:before{background:var(--warn)}
+
+  /* timeline */
+  .tl{display:grid;grid-template-columns:repeat(6,1fr);gap:8px}
+  @media(max-width:720px){.tl{grid-template-columns:1fr 1fr}}
+  .sp{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px}
+  .sp .s{font-family:var(--mono);font-weight:700;color:var(--accent2)}
+  .sp .w{font-family:var(--mono);font-size:11px;color:var(--soft)}
+  .sp p{font-size:12.5px;color:var(--muted);margin:6px 0 0}
+  .sp.spike{border-color:rgba(61,220,151,.4)}
+
+  /* metrics */
+  .stat{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:18px;text-align:center}
+  .stat .v{font-size:26px;font-weight:800;color:var(--accent)}
+  .stat .v.blue{color:var(--accent2)}
+  .stat small{color:var(--muted);font-size:13px}
+
+  .callout{background:linear-gradient(180deg,rgba(255,180,84,.08),transparent);
+     border:1px solid rgba(255,180,84,.3);border-radius:14px;padding:16px 18px}
+  .callout b{color:var(--warn)}
+
+  footer{padding:30px 0 60px;color:var(--soft);font-size:13px}
+  .kbd{font-family:var(--mono);font-size:12px;background:#0c1320;border:1px solid var(--line);
+     padding:2px 7px;border-radius:6px;color:var(--muted)}
+</style>
+</head>
+<body>
+
+<header class="hero">
+  <div class="wrap">
+    <div class="eyebrow">Working title · brand TBD</div>
+    <h1>pg_bumpers</h1>
+    <p class="tagline">Let AI agents read &amp; write <b>production Postgres</b> — safely. Run them with
+      <code>--dangerously-skip-permissions</code> and they can't cause disaster.
+      <b>Your database has nine lives.</b></p>
+    <div class="badges">
+      <span class="badge ok">Apache-2.0</span>
+      <span class="badge blue">SPEC v0.7 · converged</span>
+      <span class="badge ok">4 review rounds</span>
+      <span class="badge warn">status: awaiting founder review before code</span>
+    </div>
+  </div>
+</header>
+
+<div class="wrap">
+
+  <section>
+    <h2>The problem · why now</h2>
+    <p class="lead">AI agents now touch production databases — coding agents, text-to-SQL, internal
+      copilots — often in YOLO / <code>--dangerously-skip-permissions</code> modes. Nobody has a safe
+      way to let them.</p>
+    <div class="quote" style="margin-bottom:14px">
+      The Replit agent <b>deleted SaaStr's production database</b>. The official Anthropic Postgres MCP's
+      read-only mode was bypassed by statement-stacking (<code>COMMIT; DROP SCHEMA…</code>).
+      Datadog's lesson: <b>app-layer protection isn't enough — you need native Postgres RBAC.</b>
+    </div>
+    <p class="muted">Everyone else decides <i>whether</i> an action runs (allow/deny, masking, JIT).
+      Nobody predicts <i>what a write will do.</i></p>
+  </section>
+
+  <section>
+    <h2>What it is</h2>
+    <p class="lead">A self-hostable control plane between an AI agent and production Postgres.
+      Reads are cost-gated &amp; audited. Writes are <b>rehearsed on an instant clone of prod</b>, blast
+      radius measured, then applied reversibly under guards.</p>
+    <div class="grid g3" style="margin-top:6px">
+      <div class="card"><h3>🪞 The moat</h3><p class="muted">We don't <i>guess</i> if a write is safe —
+        we <b>run it on a clone of prod first</b>, measure exactly what it touches, then apply with an undo.</p></div>
+      <div class="card"><h3>🐈 Nine lives</h3><p class="muted">An agent can do its worst and the database
+        <b>lands on its feet</b>: row-count guard, restore-point fence, typed-inverse.</p></div>
+      <div class="card"><h3>🧱 Trust, not theater</h3><p class="muted">The security wall is <b>native
+        Postgres roles</b> — unbypassable even if our smart layer is wrong.</p></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Architecture · four layers + a boundary</h2>
+    <div class="layer l0"><div class="n">0</div><div class="t"><b>Network boundary</b>
+      <span>The agent role reaches Postgres <b>only via the proxy</b> (pg_hba + network). No bypass, no audit holes.</span></div>
+      <span class="tag">mandatory</span></div>
+    <div class="layer l1"><div class="n">1</div><div class="t"><b>The Wall — native Postgres roles</b>
+      <span>Hardened least-priv role: no write grant, SELECT-whitelist, member of nothing, dangerous
+      primitives revoked. A hostile raw client <i>physically</i> can't write or read denied data.</span></div>
+      <span class="tag">unbypassable</span></div>
+    <div class="layer l2"><div class="n">2</div><div class="t"><b>Enforcement — Apache Rust proxy + out-of-band warden</b>
+      <span>Inline (agent-only endpoint, fails closed): read-only, cost-gate, byte cutoff, timeouts, audit.
+      Warden watches the DB and kills runaways · owns the circuit breaker.</span></div>
+      <span class="tag">our IP</span></div>
+    <div class="layer l3"><div class="n">3</div><div class="t"><b>Intent / UX — MCP server (cooperative)</b>
+      <span>What the agent talks to. Executes <i>through</i> the proxy. Every block returns a recoverable
+      next step — so the safe path is the easy path.</span></div>
+      <span class="tag">agent-facing</span></div>
+    <div class="layer l4"><div class="n">4</div><div class="t"><b>Write-safety — thin-clone dry-run (DBLab)</b>
+      <span>The moat. Rehearse the write on an instant copy-on-write clone of prod, measure blast radius,
+      apply to prod only under guards.</span></div>
+      <span class="tag">the moat</span></div>
+  </section>
+
+  <section>
+    <h2>How a write works</h2>
+    <div class="steps">
+      <div class="step"><div class="k">01 · propose</div><h3>Declare intent</h3>
+        <p>Agent submits the SQL + expected rows. Nothing touches prod.</p></div>
+      <div class="step"><div class="k">02 · dry-run</div><h3>Rehearse on a clone</h3>
+        <p>Run the exact statement on an instant clone of prod. Measure rows (incl. cascades/triggers),
+        locks, duration, the affected-PK set, reversibility.</p></div>
+      <div class="step"><div class="k">03 · apply</div><h3>Guarded apply</h3>
+        <p>Restore-point fence → row/PK-set guard (abort on drift) → commit → typed-inverse captured.
+        <code>confirm_rows</code> forces the agent to own the blast radius.</p></div>
+    </div>
+    <p class="muted" style="margin-top:14px">Killer demo: <code>UPDATE accounts SET balance=0</code>
+      (no <code>WHERE</code>) → dry-run reports <b>4,823,901 rows</b> → guard blocks it before prod.
+      Then a slipped write → <b>auto-reversed</b>, with a verifiable row-diff.</p>
+  </section>
+
+  <section>
+    <h2>Autonomy levels</h2>
+    <div class="levels">
+      <div class="lvl"><span class="l">L0 · observe</span><small>Dry-run &amp; measure only. Always on.</small></div>
+      <div class="lvl"><span class="l">L1 · human-in-loop</span><small>Agent proposes; a human approves each apply.</small></div>
+      <div class="lvl"><span class="l">L2 · narrow auto</span><small>Auto-apply only within a closed, certified, reversible action set.</small></div>
+      <div class="lvl future"><span class="l">L3 · full auto</span><small>Deferred — earned later, by published track record.</small></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Scope</h2>
+    <div class="grid g2">
+      <div class="card">
+        <h3 style="color:var(--accent)">In the MVP</h3>
+        <ul class="clean in">
+          <li>Thin-clone write-safety (the moat) — DML, closed action set</li>
+          <li>Own Apache Rust proxy + out-of-band warden</li>
+          <li>Native-role wall + mandatory proxy-only network path</li>
+          <li>MCP server (cooperative intent layer)</li>
+          <li>Read path: cost-gated, budgeted, audited (on a replica)</li>
+          <li>Autonomy L0 → L2 · tamper-resistant audit</li>
+          <li>Focused frozen safety benchmark + the why-now bypass repro</li>
+        </ul>
+      </div>
+      <div class="card">
+        <h3 class="muted">Deferred (fast-follow)</h3>
+        <ul class="clean out">
+          <li>DDL &amp; multi-statement interactive transactions</li>
+          <li>L3 full-auto beyond the certified set</li>
+          <li>Full ~120-scenario set + public multi-competitor leaderboard</li>
+          <li>Multi-DB · cloud / multi-tenant · web console</li>
+          <li>Open-core cloud tier (post-experiment)</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>The plan · ~12–15 weeks (solo + AI agents)</h2>
+    <div class="tl">
+      <div class="sp spike"><div class="s">S0</div><div class="w">2w</div><p>Skeleton + Wall + <b>fidelity spike</b> (red-test the moat first)</p></div>
+      <div class="sp"><div class="s">S1</div><div class="w">3–4w</div><p>Proxy + read enforcement</p></div>
+      <div class="sp"><div class="s">S2</div><div class="w">2.5w</div><p>Clone dry-run + blast radius <span class="muted">(the demo)</span></p></div>
+      <div class="sp"><div class="s">S3</div><div class="w">2.5w</div><p>Guarded apply + typed-inverse</p></div>
+      <div class="sp"><div class="s">S4</div><div class="w">2w</div><p>Warden + full MCP + policy + audit anchor</p></div>
+      <div class="sp"><div class="s">S5</div><div class="w">1.5w</div><p>Focused benchmark + launch</p></div>
+    </div>
+    <p class="muted" style="margin-top:14px">Riskiest assumption first: <b>does the clone actually predict
+      prod, and does the inverse truly restore it?</b> Red-tested in week 1–2. If it fails, we learn the
+      moat is invalid in week 2 — not week 10.</p>
+  </section>
+
+  <section>
+    <h2>Testing — 0 false negatives, minimal false positives</h2>
+    <div class="grid g3">
+      <div class="stat"><div class="v">0</div><small>data-loss false-negatives — <b>by construction</b> (writes bounded + reversible)</small></div>
+      <div class="stat"><div class="v blue">≤ B</div><small>bounded disclosure for reads — exfil capped + detected, <i>not</i> "impossible"</small></div>
+      <div class="stat"><div class="v" style="color:var(--warn)">y.y%</div><small>false-positive rate, minimized via calibration (95% CI)</small></div>
+    </div>
+    <p class="muted" style="margin-top:14px">Honest by class: the <b>deterministic floor</b> guarantees the
+      write FN=0 and bounds read disclosure; the LLM detection layer is measured statistically over
+      labeled corpora (metamorphic + mutation, "100k runs"). Deterministic, third-party-runnable, with a
+      public <b>KNOWN_BYPASSES</b> ledger that <i>counts against</i> the headline. Plus the marquee repro:
+      <i>"I deleted a database through the Anthropic MCP — here's how."</i></p>
+  </section>
+
+  <section>
+    <h2>What we deliberately do <em>not</em> claim</h2>
+    <div class="callout">
+      <ul class="clean no" style="margin:0">
+        <li>Not "physically impossible to break" — claims are assertions over the frozen adversarial suite + the public bypass ledger.</li>
+        <li><b>Reads can't be un-disclosed</b> — exfiltration is <b>bounded + detected</b>, not prevented. (Writes are prevented/reversible.)</li>
+        <li>Full-auto write is <b>narrow</b> (a certified, reversible action set), not open-ended — for years.</li>
+        <li>The <b>LLM</b> reduces friction &amp; catches more, but is never the safety guarantee — the deterministic floor is. It can block, never grant.</li>
+        <li><b>PITR</b> needs the customer's WAL archiving; the <b>typed-inverse</b> is the cheap default undo. We don't conflate them.</li>
+      </ul>
+    </div>
+  </section>
+
+  <section>
+    <h2>What success looks like (90-day experiment)</h2>
+    <div class="grid g2">
+      <div class="card"><h3>Resonance</h3><p class="muted">Benchmark cited by others · ≥1 HN front page ·
+        ~1k stars · <b>≥500 owned-audience signups</b> (today: zero) · ≥3 "can I run this on <i>my</i> DB?" inbounds.</p></div>
+      <div class="card"><h3>Pull to the moat</h3><p class="muted">A concierge-pilot customer asks
+        <b>"can it fix the data too?"</b> · then 3–5 design partners · ≥1 non-GitLab logo at human-in-loop
+        <i>write</i> autonomy (the investor trigger).</p></div>
+    </div>
+  </section>
+
+  <footer>
+    <p><b style="color:var(--ink)">Status:</b> SPEC v0.7 — converged across 4 review rounds; MVP
+      build-ready, awaiting founder review + 1 decision (LLM posture sequencing). <b>No code until the
+      spec is approved.</b><br>
+    Full spec: <span class="kbd">samo/spec/pg_bumpers/SPEC.md</span> · decisions:
+      <span class="kbd">samo/spec/pg_bumpers/decisions.md</span> · working title <span class="kbd">pg_bumpers</span>
+      (brand TBD; nine-lives / Felis leads).<br>
+    Next: <span class="kbd">policy.yaml</span> + closed-action-set · the S0 fidelity spike (runnable red test).</p>
+  </footer>
+
+</div>
+</body>
+</html>
