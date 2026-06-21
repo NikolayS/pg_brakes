@@ -79,12 +79,23 @@ fn backend_host_port_db() -> (String, u16, String) {
 
 /// Apply test fixtures as admin: a small whitelisted table + a wide table for
 /// the cutoff test, both SELECT-granted to the WALL role.
+///
+/// Wraps the fixture block in `pg_advisory_xact_lock` with a fixed key so that
+/// when the two `#[tokio::test]` cases call this concurrently (parallel test
+/// runner) they serialize on the lock rather than racing on
+/// `pg_type_typname_nsp_index` (SQLSTATE 23505) during `CREATE TABLE IF NOT
+/// EXISTS`. The lock is automatically released at transaction end.
 fn setup_fixtures() {
     use postgres::{Client, NoTls};
     let mut admin = Client::connect(&admin_dsn(), NoTls).expect("admin connect");
+    // A stable arbitrary advisory-lock key scoped to this fixture.
+    // pg_advisory_xact_lock auto-releases when the transaction ends.
     admin
         .batch_execute(
-            "CREATE TABLE IF NOT EXISTS public.rca_read (id int PRIMARY KEY, note text);
+            "BEGIN;
+             SELECT pg_advisory_xact_lock(7067626669780000);
+
+             CREATE TABLE IF NOT EXISTS public.rca_read (id int PRIMARY KEY, note text);
              INSERT INTO public.rca_read VALUES (1,'incident-1'),(2,'incident-2'),(3,'incident-3')
                ON CONFLICT (id) DO NOTHING;
              GRANT SELECT ON public.rca_read TO pgb_agent;
@@ -92,7 +103,9 @@ fn setup_fixtures() {
              DROP TABLE IF EXISTS public.proxy_wide_read;
              CREATE TABLE public.proxy_wide_read AS
                SELECT g AS id, repeat('x', 200) AS payload FROM generate_series(1, 5000) g;
-             GRANT SELECT ON public.proxy_wide_read TO pgb_agent;",
+             GRANT SELECT ON public.proxy_wide_read TO pgb_agent;
+
+             COMMIT;",
         )
         .expect("apply fixtures");
 }
