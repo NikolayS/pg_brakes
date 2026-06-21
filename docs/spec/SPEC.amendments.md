@@ -169,11 +169,29 @@ read-only gate (UPDATE/DELETE/DDL/COPY blocked), byte/row **mid-stream cutoff** 
 SELECT cut at the per-role budget), `statement_timeout` (fires on `pg_sleep`), fail-closed
 (parse failure blocked), and the hash-chained audit recording all of it.
 
-The byte/row cutoff is enforced on **every** bulk path, not just `DataRow`: a
-backend-initiated COPY-out (`CopyOutResponse` 'H' / `CopyData` 'd') is metered against the
-**same** per-role budget and cut off (ErrorResponse to the client + the backend COPY torn
-down, fail-closed) the moment it would exceed the cap. So even a classifier-mis-allowed
-`COPY … TO STDOUT`, or a misbehaving/compromised backend, cannot stream bytes outside the
-budget — the cutoff is genuinely un-foolable-via-classifier on the COPY message path
-(`crates/proxy/src/session.rs::relay_until_ready`; unit-tested in `session.rs` and exercised
-end-to-end in `proxy_it.rs`).
+**COPY-out cutoff — delivered, not deferred (label correction):** the byte/row cutoff is
+enforced on **every** bulk path, not just `DataRow`. A backend-initiated COPY-out
+(`CopyOutResponse` 'H' / `CopyData` 'd') is metered against the **same** per-role budget
+and cut off (ErrorResponse to the client + the backend COPY torn down, fail-closed) the
+moment it would exceed the cap. So even a classifier-mis-allowed `COPY … TO STDOUT`, or a
+misbehaving/compromised backend, cannot stream bytes outside the budget — the cutoff is
+genuinely un-foolable-via-classifier on the COPY message path
+(`crates/proxy/src/session.rs::relay_until_ready`; unit-tested in `session.rs` and
+exercised end-to-end in `proxy_it.rs`). Any prior reference to "CopyData-cutoff deferral"
+is stale and should be disregarded.
+
+**`per_window` budget caps — loaded into config, inert in S1:** the `RoleBudget::per_window`
+struct fields (`window_secs`, `max_bytes`, `max_rows`) are parsed from config and appear in
+the policy type, but the S1 proxy applies **only the single-shot per-query cutoff**
+(`max_bytes` / `max_rows` on the `RoleBudget` root). The cumulative rolling-window
+enforcement is a **Sprint 4 (S4) feature**; no session-level byte/row accumulator exists
+yet. Demos and descriptions must not claim per-window enforcement is active in S1.
+
+**SCRAM implementation notes (S1, in `crates/proxy/src/auth.rs`):** the proxy stores the
+agent password as configured cleartext and derives the `SaltedPassword` / `StoredKey` /
+`ServerKey` per-handshake (RFC 5802 §3). A production deployment should store **only the
+SCRAM verifier** (salt + `StoredKey` + `ServerKey`), never the plaintext password; that
+hardening is noted as a follow-up, not done in S1. Channel binding is not negotiated: the
+`gs2-cbind-flag` in the `client-first-message` is `n` (no binding, per RFC 5802 §6), which
+is correct since TLS is terminated at the proxy and the agent→proxy hop is already
+encrypted at the transport layer — there is no inner `tls-server-end-point` to bind.
