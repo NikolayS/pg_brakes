@@ -1,23 +1,145 @@
-# `deploy/` — local dev stack & deployment assets (placeholder)
+# `deploy/` — local dev/test stack & deployment assets
 
-This directory will hold the local development and deployment assets for
-pg_bumpers, per `docs/spec/SPEC.md` §3.
+The dev/test substrate for pg_bumpers (SPEC §3, §7, §12). There are **two paths**:
 
-## What lands here next (issue #4)
+1. **`docker-compose.yml`** — the **shipped artifact** for real users (and CI on a
+   docker-healthy machine). Postgres **18**, primary + optional replica + `_meta`
+   audit DB + a DBLab placeholder, behind compose **profiles**.
+2. **`local-stack.sh`** — the **live dev/CI substrate used here**. It builds the same
+   topology out of local Postgres 18 clusters (`initdb` / `pg_basebackup` / `pg_ctl`),
+   no Docker. This exists because `docker pull` is non-functional in the build
+   environment (host-level daemon networking fault). See
+   [`docs/spec/SPEC.amendments.md`](../docs/spec/SPEC.amendments.md) → *"S0 integration
+   substrate"* for the deviation, rationale, and how to re-validate compose live.
 
-- **`docker-compose.yml`** — the dev stack: Postgres **primary** + **replica** +
-  a `_meta` **audit DB**, with the **replica** and **DBLab** behind compose
-  **profiles** so the bare-primary baseline runs without them (SPEC §3, §12;
-  process spec #1: "prove the bare-primary baseline").
-- Role-hardening / `pg_hba` bootstrap for the **WALL** (issue #5, SPEC §3 layer 0–1).
-- Seed/fixtures and teardown helpers for clone governance (SPEC §4: clones are
-  prod-classified — encryption-at-rest, RLS/column-grant parity, mandatory
-  teardown after dry-run).
+Both paths model the same shape: a streaming-replication **primary**, an OPTIONAL
+streaming **replica** (off by default → proves the bare-primary baseline, SPEC §12),
+and a separate append-only **`_meta`** audit DB (SPEC §4).
 
-## What is intentionally NOT here yet
+---
 
-S0's foundation issue (#3) does **not** build the compose — that is issue #4.
-Integration/docker tests are gated behind an env var so the cargo CI stays fast,
-but are run for real with evidence on the relevant PRs (process spec #1).
+## Path A — docker-compose (shipped artifact, for users)
 
-> Source of truth: `docs/spec/SPEC.md` (v0.8). License: Apache-2.0.
+Image: `postgres:18`. Services: `primary` + `meta` (always on), `replica` (profile
+`replica`), `dblab` (profile `dblab`, a documented placeholder — a real Database Lab
+Engine is OPTIONAL per §12 and lands in S2).
+
+```sh
+# Baseline — proves the bare-primary path (primary + meta only):
+docker compose -f deploy/docker-compose.yml up -d
+
+# With the streaming replica:
+docker compose -f deploy/docker-compose.yml --profile replica up -d
+
+# With the dblab placeholder:
+docker compose -f deploy/docker-compose.yml --profile dblab up -d
+
+# Static validation (parses config; does NOT pull images):
+docker compose -f deploy/docker-compose.yml config -q && echo COMPOSE_OK
+
+# Tear down (and drop volumes):
+docker compose -f deploy/docker-compose.yml --profile replica --profile dblab down -v
+```
+
+| Service | Profile    | Host port | Role |
+|---------|------------|-----------|------|
+| primary | (always)   | **5432**  | primary, `wal_level=replica`, replication+PITR-ready |
+| meta    | (always)   | **5433**  | separate instance hosting the `_meta` audit DB (§4) |
+| replica | `replica`  | **5434**  | streaming standby of `primary` (`pg_basebackup -R`) |
+| dblab   | `dblab`    | —         | clone-provider PLACEHOLDER (OPTIONAL; S2) |
+
+> **Live container runs are blocked in the pg_bumpers build environment** (`docker pull`
+> hangs at zero blob bytes — host-level daemon fault). Here, the compose is only
+> **statically validated** (`docker compose config -q`). It must be re-validated with a
+> live `up` on a docker-healthy machine. The live substrate in this env is **Path B**.
+
+Init hooks live in `deploy/init/` and run once on first boot of `primary`
+(`/docker-entrypoint-initdb.d`). The hardened-role WALL SQL (issue #5, SPEC §3 layer
+0–1) drops in there at a clearly-marked include point — see `deploy/init/00_README.sql`.
+
+---
+
+## Path B — `local-stack.sh` (live dev/CI substrate here)
+
+Uses the keg-only Homebrew Postgres 18 binaries
+(`/opt/homebrew/opt/postgresql@18/bin`; override with `PGBIN=`). Brings up isolated,
+throwaway clusters under a git-ignored `./.localstack/` dir, on **dedicated high
+ports** that never touch any cluster already running on 5432.
+
+```sh
+deploy/local-stack.sh up      # initdb + start primary + meta; pg_basebackup + stream replica
+deploy/local-stack.sh status  # pg_isready snapshot for all three
+deploy/local-stack.sh down    # stop all clusters, remove ./.localstack/ (clean teardown)
+```
+
+| Cluster | Port      | Role |
+|---------|-----------|------|
+| primary | **54321** | `wal_level=replica`, `max_wal_senders=10`, `wal_keep_size=128MB`, replication+PITR-ready |
+| replica | **54322** | streaming standby (`pg_basebackup -R` → `standby.signal` + `primary_conninfo`) |
+| meta    | **54323** | separate cluster hosting the append-only `_meta` audit DB (§4) |
+
+Connection strings (trust auth, loopback only — throwaway dev clusters):
+
+```sh
+psql -X "host=localhost port=54321 user=postgres dbname=postgres"   # primary
+psql -X "host=localhost port=54322 user=postgres dbname=postgres"   # replica (read-only)
+psql -X "host=localhost port=54323 user=postgres dbname=_meta"      # meta / audit
+```
+
+> Use `psql -X` to bypass any user `~/.psqlrc` that might inject banners/timing into
+> scripted output (the smoke harness and the script already do this).
+
+The hardened-role WALL SQL (issue #5) attaches at a marked include point in
+`start_primary` — this script intentionally does the WAL/replication wiring only and
+does **not** duplicate the role work.
+
+`./.localstack/` is git-ignored (root `.gitignore`), so `git status` stays clean.
+
+---
+
+## Integration tests: the `PG_BUMPERS_IT` gate
+
+Integration tests are **env-gated** so plain test runs and the cargo CI job stay fast
+and DB-independent. The convention for the whole project:
+
+- `PG_BUMPERS_IT` unset / `!= 1` → integration assertions are **skipped** (exit 0).
+- `PG_BUMPERS_IT=1` → they **run for real** against a live stack.
+
+### Smoke harness — `deploy/smoke.sh`
+
+Asserts: (1) primary reachable, (2) meta reachable + `_meta` queryable, (3) replica
+reachable **and in recovery** (`pg_is_in_recovery() = t`), (4) primary reports a
+**streaming** standby in `pg_stat_replication`, (5) a row written on the primary is
+**replicated** to the standby within a bounded wait. Exits non-zero on any failure.
+
+```sh
+# RED — with the stack DOWN, the assertions fail (exit 1):
+PG_BUMPERS_IT=1 bash deploy/smoke.sh
+
+# GREEN — bring the stack up, then the smoke passes (exit 0):
+bash deploy/local-stack.sh up
+PG_BUMPERS_IT=1 bash deploy/smoke.sh
+
+# (Gate proof) — with PG_BUMPERS_IT unset, it SKIPS and exits 0:
+bash deploy/smoke.sh
+```
+
+The smoke harness targets the **Path B** ports by default; override via
+`PG_BUMPERS_PRIMARY_PORT` / `PG_BUMPERS_REPLICA_PORT` / `PG_BUMPERS_META_PORT` (and
+`PGBIN`) to point it at any equivalent stack.
+
+---
+
+## §10.8 degraded mode (no replica)
+
+The replica is **OPTIONAL** (SPEC §12). With **no replica** (the default baseline `up`
+without the `replica` profile / before `local-stack.sh` builds the standby), the system
+runs in **degraded mode** (SPEC §10.8): reads route to the **primary** under *stricter*
+budgets + `statement_timeout` + warden, and the write path (clone/guarded-apply) is
+unchanged. The bounded-blast-radius + reversibility guarantee is **invariant** across
+every configuration (SPEC §12.1) — only the preview/isolation experience improves when
+a replica (and DBLab) are present. Run the baseline (no `replica` profile) to exercise
+this path.
+
+> Source of truth: `docs/spec/SPEC.md` (v0.8). Deviation log:
+> `docs/spec/SPEC.amendments.md`. License: Apache-2.0.

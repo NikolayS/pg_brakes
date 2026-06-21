@@ -18,6 +18,10 @@ mcp/server/dist/
 *.restore-point
 clone-artifacts/
 
+# Local dev/test substrate — throwaway Postgres 18 clusters created by
+# deploy/local-stack.sh (initdb/pg_basebackup data dirs + logs). Never commit.
+/.localstack/
+
 # OS / editor
 .DS_Store
 *.swp

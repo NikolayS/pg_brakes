@@ -1,0 +1,182 @@
+# pg_bumpers — dev/test stack (the SHIPPED artifact for real users)
+#
+# Source of truth: docs/spec/SPEC.md (v0.8) §7 (S0: "compose primary+replica+dblab"),
+# §12 (graceful degradation — replica/DBLab/PITR all OPTIONAL), §10.8 (degraded mode,
+# no replica), §4 (append-only audit in the `_meta` DB).
+#
+# Topology
+#   primary  (always on)  — Postgres 18, wal_level=replica, replication-ready, PITR-ready.
+#   meta     (always on)  — separate Postgres 18 instance hosting the append-only `_meta`
+#                            audit DB (§4). Kept on its own instance so the audited
+#                            principal can be REVOKEd from writing audit (§10.9).
+#   replica  (profile: replica) — streaming standby of `primary`. OFF by default so the
+#                            bare-primary baseline (§12) is what runs by default.
+#   dblab    (profile: dblab)   — placeholder for the clone provider (§3, §12). OPTIONAL;
+#                            runtime-detected `clone.provider: none|dblab`. Not a working
+#                            DBLab — a documented stand-in exercised for real in S2.
+#
+# Usage
+#   Baseline (proves bare-primary):   docker compose -f deploy/docker-compose.yml up -d
+#   With streaming replica:           docker compose -f deploy/docker-compose.yml --profile replica up -d
+#   With dblab placeholder:           docker compose -f deploy/docker-compose.yml --profile dblab up -d
+#   Static validation (no pulls):     docker compose -f deploy/docker-compose.yml config -q
+#
+# NOTE (build-env caveat): live container runs are BLOCKED in the pg_bumpers build
+# environment — `docker pull` hangs at zero blob bytes (host-level daemon networking
+# fault; see docs/spec/SPEC.amendments.md "S0 integration substrate"). This compose is
+# statically validated here (`docker compose config -q`); it must be re-validated with a
+# live `up` on a docker-healthy machine. The live S0 substrate in this env is
+# deploy/local-stack.sh (local Postgres 18 via initdb/pg_basebackup).
+
+name: pg_bumpers
+
+# ---------------------------------------------------------------------------
+# Shared knobs reused by primary + replica via YAML anchors.
+# ---------------------------------------------------------------------------
+x-pg-image: &pg-image postgres:18
+
+x-pg-healthcheck: &pg-healthcheck
+  # pg_isready against the in-container superuser/db; -q keeps logs quiet.
+  test: ["CMD-SHELL", "pg_isready -U postgres -d postgres -q"]
+  interval: 5s
+  timeout: 5s
+  retries: 12
+  start_period: 10s
+
+services:
+  # -------------------------------------------------------------------------
+  # primary — always on. wal_level=replica + replication slots make it a
+  # streaming-replication source and keep it PITR-ready (archive_mode is
+  # documented/optional below; left off by default to keep the dev stack light).
+  # -------------------------------------------------------------------------
+  primary:
+    image: *pg-image
+    container_name: pgb-primary
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+      # Replication role used by the standby (see command: below).
+      REPL_USER: replicator
+      REPL_PASSWORD: replicator
+    command:
+      - postgres
+      - -c
+      - wal_level=replica
+      - -c
+      - max_wal_senders=10
+      - -c
+      - max_replication_slots=10
+      - -c
+      - wal_keep_size=128MB
+      - -c
+      - hot_standby=on
+      - -c
+      - listen_addresses=*
+      # archive_mode is intentionally OFF by default (PITR is OPTIONAL per §12);
+      # to make this PITR-ready, set: -c archive_mode=on -c archive_command='...'.
+    ports:
+      - "5432:5432"
+    volumes:
+      # Init hooks run once on first boot (alphabetical). The hardened-role SQL
+      # (issue #5, SPEC §3 layer 0-1) lands under deploy/init/ — see the marker
+      # in deploy/init/00_README.sql. Mounted read-only.
+      - ./init:/docker-entrypoint-initdb.d:ro
+      - primary-data:/var/lib/postgresql/data
+    healthcheck: *pg-healthcheck
+    restart: unless-stopped
+
+  # -------------------------------------------------------------------------
+  # meta — always on. Hosts the append-only `_meta` audit DB (§4). Separate
+  # instance so the audited principal can be REVOKEd from writing audit (§10.9).
+  # -------------------------------------------------------------------------
+  meta:
+    image: *pg-image
+    container_name: pgb-meta
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      # The audit database. Created by the entrypoint on first boot.
+      POSTGRES_DB: _meta
+    command:
+      - postgres
+      - -c
+      - listen_addresses=*
+    ports:
+      - "5433:5432"
+    volumes:
+      - meta-data:/var/lib/postgresql/data
+    healthcheck: *pg-healthcheck
+    # meta has no dependency on primary, but order it after so a single `up`
+    # brings the audit sink up alongside the source it records.
+    depends_on:
+      primary:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # -------------------------------------------------------------------------
+  # replica — streaming standby of `primary`. Behind profile `replica` so the
+  # default `up` runs the bare-primary baseline (§12). Built from a fresh
+  # pg_basebackup at container start, then started as a hot standby.
+  # -------------------------------------------------------------------------
+  replica:
+    image: *pg-image
+    container_name: pgb-replica
+    profiles: ["replica"]
+    environment:
+      PGPASSWORD: replicator
+    user: postgres
+    # Wait for primary healthy, then base-backup and start as a standby.
+    # -R writes standby.signal + primary_conninfo into the data dir.
+    entrypoint:
+      - bash
+      - -c
+      - |
+        set -euo pipefail
+        DATA=/var/lib/postgresql/data
+        if [ ! -s "$$DATA/PG_VERSION" ]; then
+          echo "replica: taking base backup from primary..."
+          rm -rf "$${DATA:?}/"* || true
+          pg_basebackup -h primary -p 5432 -U replicator \
+            -D "$$DATA" -Fp -Xs -P -R -C -S replica_slot
+        fi
+        echo "port = 5432" >> "$$DATA/postgresql.auto.conf"
+        echo "hot_standby = on" >> "$$DATA/postgresql.auto.conf"
+        exec postgres -D "$$DATA"
+    ports:
+      - "5434:5432"
+    volumes:
+      - replica-data:/var/lib/postgresql/data
+    depends_on:
+      primary:
+        condition: service_healthy
+    healthcheck: *pg-healthcheck
+    restart: unless-stopped
+
+  # -------------------------------------------------------------------------
+  # dblab — PLACEHOLDER for the clone provider (§3, §12). OPTIONAL and
+  # runtime-detected (`clone.provider: none|dblab`). This is NOT a working
+  # Database Lab Engine; it is a documented stand-in that keeps the topology
+  # honest. A real DBLab is wired and exercised for real in S2.
+  # -------------------------------------------------------------------------
+  dblab:
+    image: *pg-image
+    container_name: pgb-dblab-placeholder
+    profiles: ["dblab"]
+    entrypoint:
+      - bash
+      - -c
+      - |
+        echo "pg_bumpers: dblab is a PLACEHOLDER (clone.provider=none by default)."
+        echo "A real Database Lab Engine is OPTIONAL (SPEC §12) and lands in S2."
+        echo "Sleeping; this service exists only to reserve the topology slot."
+        exec sleep infinity
+    depends_on:
+      primary:
+        condition: service_healthy
+    restart: "no"
+
+volumes:
+  primary-data:
+  meta-data:
+  replica-data:
