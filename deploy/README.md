@@ -257,5 +257,71 @@ every configuration (SPEC §12.1) — only the preview/isolation experience impr
 a replica (and DBLab) are present. Run the baseline (no `replica` profile) to exercise
 this path.
 
+---
+
+## Audit anchor, KMS key separation & secret store (SPEC §3, §4, §10.9; issue #54)
+
+S1 shipped the append-only, hash-chained `_meta` audit log (`crates/audit`:
+`chain.rs`/`record.rs`/`sink.rs`/`pg.rs`) and the `REVOKE` that makes the audited
+principal unable to write audit. S1's hash chain detects *within-chain* tampering — but
+an attacker who **owns the audit table** can rewrite the *entire* chain consistently
+(re-hash + re-link every record), and that rewritten chain verifies clean on its own.
+
+**S4 closes that gap** with three seams in `crates/audit` (all clean-room; no pgDog code):
+
+1. **External WORM/transparency anchor of the chain head** (`anchor.rs`). On an interval
+   driven by `core::Clock` (monotonic, mockable — **no wall-clock in tests**), the current
+   chain **head** (`record_hash` of the last record) is signed and published to an
+   append-only/WORM sink with **independent retention**. To pass off a rewritten chain an
+   attacker would need an anchor entry signing *their* head — they cannot mint a valid
+   signature (no key) and cannot delete/replace the already-published honest entry
+   (append-only). `verify_against_anchor()` flags the rewrite as `HeadMismatch`.
+   - **Local stand-in (MVP):** `WormAnchor` — an in-memory, append-only log, optionally
+     backed by an append-only **file** (`WormAnchor::open_file`) that survives restarts.
+     It exposes **no** mutate/delete method, modelling object-lock.
+   - **Production target (documented, not built here):** an **S3 bucket with Object Lock
+     (compliance mode)** or a **transparency log** (append-only Merkle log), retention
+     **independent of the DB operator**.
+
+2. **KMS-backed signing key, separated from the DB operator** (`kms.rs`). The chain head is
+   signed by a key modeled as held by a KMS — **never on the DB host**, and the audited
+   (DB-operator) principal **cannot sign**. Key separation is enforced two ways:
+   - **Type-level:** the signing capability (`LocalKms`) has **no public byte constructor,
+     no `Default`, no `Serialize`/`Deserialize`** — it can only be obtained by loading the
+     key from the secret store, and the wrapped key never serializes out.
+   - **Runtime:** `LocalKms::for_principal(.., OPERATOR_PRINCIPAL)` is **rejected**
+     (`OperatorPrincipalDenied`) — the operator principal can never obtain the signer.
+   - **Dev impl:** HMAC-SHA256 over a domain-separated `(head, seq, ts)` input.
+     **Production target:** an **asymmetric KMS** (AWS KMS / GCP KMS / Vault transit) whose
+     private half never leaves the HSM; the DB host sees only the *signature*, and the
+     *public* key verifies. The `Kms` trait is that seam — swapping a real KMS in does not
+     touch the anchor logic.
+
+3. **Secret store for DSNs + the audit signing key** (`secret.rs`), with **rotation**.
+   - **Dev impl:** `LocalSecretStore` — in-memory; `Debug` **redacts** every value so a
+     secret never lands in a log/panic. `put` is create-only; `rotate` replaces existing
+     material (a re-derived capability immediately uses the new key).
+   - **Rotation (documented):** rotate the audit signing key by `rotate()`-ing
+     `audit/signing-key` (or bumping the KMS key **version** in production). Anchors carry
+     the **`key_id`** they were signed under, so anchors published before a rotation stay
+     verifiable against the matching key/version. DSNs rotate the same way; the proxy reads
+     them at boot and the in-memory copy is zeroized after connecting (SPEC §4 "proxy
+     memory-handling noted").
+   - **Production target:** a cloud secret manager (Vault / AWS Secrets Manager / GCP
+     Secret Manager) addressed by id; the audit signing key is never materialized as raw
+     bytes (KMS performs the signature itself).
+
+**Where the property is proven:** `crates/audit/tests/anchor.rs` —
+`anchored_head_detects_full_chain_rewrite` (the headline: a fully-rewritten,
+internally-consistent chain is caught by the anchored head; an honest chain verifies),
+`operator_principal_cannot_obtain_the_signer` (runtime key separation),
+`tampered_anchor_signature_is_rejected` (a head swapped into the WORM sink without a valid
+signature is rejected), `anchoring_respects_the_injected_clock_interval` (clock-driven
+cadence, no wall clock), and `worm_file_anchor_persists_and_reloads` (independent retention
+across restart). All DB-free and deterministic; the `_meta` PgSink path stays env-gated
+(`PG_BUMPERS_IT=1`).
+
+---
+
 > Source of truth: `docs/spec/SPEC.md` (v0.8). Deviation log:
 > `docs/spec/SPEC.amendments.md`. License: Apache-2.0.

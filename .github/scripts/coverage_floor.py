@@ -30,6 +30,12 @@ import sys
 #                                     gating logic is fully DB-free unit-tested;
 #                                     main.rs is the thin binary wiring exercised
 #                                     under the env-gated PG18 integration test)
+#   pgb-audit               82.84%   (S4; the chain + anchor + KMS key-separation
+#                                     + secret store are fully DB-free unit/IT
+#                                     tested — anchor 92.9%, kms 97.0%, secret
+#                                     99.0%; only pg.rs, the `_meta` sink, is 0%
+#                                     DB-free because it runs under the env-gated
+#                                     PG18 integration test, like pgb-proxy)
 #
 # Floors sit a couple of points under current so normal churn stays green while
 # a genuine drop trips CI. RATCHET UP, never down.
@@ -40,6 +46,7 @@ FLOORS = {
     "crates/clone-orchestrator/": ("pgb-clone-orchestrator", 79.0),
     "crates/proxy/": ("pgb-proxy", 54.0),
     "crates/warden/": ("pgb-warden", 90.0),
+    "crates/audit/": ("pgb-audit", 80.0),
 }
 
 

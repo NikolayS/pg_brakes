@@ -616,6 +616,7 @@ name = "pgb-audit"
 version = "0.0.0"
 dependencies = [
  "hex",
+ "hmac 0.12.1",
  "pgb-core",
  "pgb-policy",
  "postgres",
