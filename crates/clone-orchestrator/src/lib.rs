@@ -31,21 +31,34 @@
 //! - Non-certified shape (DDL/`TRUNCATE`/`INSERT`/…) → REFUSED (default-deny,
 //!   §10.3).
 //!
-//! # Guarded apply seam
+//! # Guarded apply (S3, [`apply`])
 //!
-//! [`guard_decision`] is the drift-decision seam the guarded-apply path (S3)
-//! uses: it compares the dry-run affected-PK-set checksum to the apply-time
-//! checksum and **aborts on any mismatch** — the guard is the PK-set checksum,
-//! not the row count.
+//! [`guarded_apply`] is the **reversible half of the moat**: once a proposal has
+//! passed the dry-run, it applies the write on the primary under the §4 guards —
+//! PITR fence (when enabled; else the typed-inverse is the undo, §1) → `BEGIN` +
+//! `statement_timeout ≈ 3× dry-run` → [`pgb_core::ApplyBarrier`] seam → apply with
+//! `RETURNING` (capturing the pre-image + the actual written-PK set) →
+//! **apply-time PK-set re-check** (0-tolerance drift abort) → **`RETURNING`
+//! written-set check** (catches a post-snapshot trigger writing outside the
+//! predicate) → `COMMIT`, returning the captured **typed-inverse** for the revert
+//! (#37). Anything outside the closed certified action set is refused and never
+//! applied. [`guard_decision`] below is the low-level drift-decision primitive the
+//! engine's PK-set check builds on.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod apply;
 pub mod dry_run;
 pub mod predicate;
 pub mod proposal;
 pub mod provider;
 
+pub use apply::{
+    guarded_apply, statement_timeout_ms, AppliedWrite, ApplyConn, ApplyError, CapturedRow,
+    ForwardResult, PitrConfig, RecoveryFence, MIN_STATEMENT_TIMEOUT_MS,
+    STATEMENT_TIMEOUT_MULTIPLIER,
+};
 pub use dry_run::{
     classify, dry_run, AffectedTable, DryRunError, Measurement, Rehearsal, WriteKind,
 };
