@@ -29,9 +29,25 @@ sqlparser = { version = "0.62", features = ["visitor"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
+# §14.3 grant consumption at apply (#66): the production apply caller takes the
+# approver's Ed25519 VerifyingKey in its signature. The grant CRYPTO (sign/verify,
+# binding hash, NonceStore) is REUSED from pgb-policy; this crate only references
+# the public key TYPE. Same v2 (BSD-3-Clause) that pgb-policy pins — no second
+# crypto impl. Default features off (we only touch the key type), so this adds no
+# RNG/serde surface.
+ed25519-dalek = { version = "2", default-features = false }
 
 [dev-dependencies]
 # Synchronous Postgres client for the env-gated (PG_BUMPERS_IT=1) real-PG18
 # integration tests. MIT/Apache (keeps cargo-deny green); the sync client keeps
 # the rehearsal harness linear and readable, matching the S0 fidelity spike.
 postgres = "0.19"
+# Unit/IT tests mint a signing key to sign the §14.3 grant they then verify at the
+# real apply path. `rand_core` provides the OsRng `SigningKey::generate` needs;
+# the `ed25519-dalek` `rand_core` feature wires the key generator. Same versions
+# pgb-policy pins (no new license surface).
+rand_core = { version = "0.6", features = ["getrandom"] }
+# Re-declare ed25519-dalek for tests WITH the `rand_core` feature so the test
+# `SigningKey::generate(&mut OsRng)` compiles (cargo unions features across the
+# normal + dev dep). The library dep stays default-features = false.
+ed25519-dalek = { version = "2", features = ["rand_core"] }

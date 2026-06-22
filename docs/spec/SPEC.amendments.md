@@ -409,3 +409,76 @@ tense, each pointing here and at the tracking issue. **No runtime logic was touc
 The §10.1 BlastRadius "grant" that `guarded_apply` (`crates/clone-orchestrator/src/apply.rs`)
 **does** cross-check at apply time is a *different* artifact and that claim is accurate;
 it was **not** changed. (The unwired one is the §14.3 *signed* `GrantToken`.)
+
+---
+
+## S5 — the §14.3 signed grant is now consumed at a REAL apply path (closes the "approval-theater" gap; updates the S4 disclosure point 4)
+
+**SPEC sections touched:** §14.3 (the signed, single-use, time-boxed, proposal-bound
+grant — now re-verified at a production apply), §10.1 (the apply-time PK-set checksum the
+grant is bound to), §12.2 (`clone.provider` / `pitr.enabled` bridged from one
+`policy.yaml` onto the apply engine).
+
+**Issue:** #66 (S5: production apply path + §14.3 grant consumption at apply). Subsumes
+the #45 generic-schema `ApplyConn` follow-up for the apply-caller surface.
+
+### What changed (this is a behavior addition, not a doc-only correction)
+
+S4's disclosure (point 4 above) recorded that `pgb_policy::GrantToken` was minted +
+verified **only** in the CLI's in-process demo and that **no production apply path
+consumed it** — `guarded_apply` had no caller threading a `GrantToken`, so an
+attacker-minted or absent grant was never checked on a real apply ("approval theater").
+
+This sprint adds **`pgb_clone_orchestrator::guarded_apply_with_grant`**
+(`crates/clone-orchestrator/src/apply_grant.rs`) — a generic-schema production apply
+caller that:
+
+1. **bridges one `pgb_policy::PolicyConfig`** onto the apply engine's knobs:
+   `clone.provider` → `ProviderKind` (via the existing, previously-unused
+   `From<CloneProvider>`) and `pitr.enabled` → the apply's `PitrConfig` (via a new
+   `From<pgb_policy::PitrConfig>` bridge). Single source of truth: those two §12.2 bits
+   cross from policy into the engine in exactly one place;
+2. **consumes the §14.3 grant at apply time** — it recomputes the **apply-time target
+   PK-set checksum** via the same `ApplyConn::recompute_pk_checksum` seam `guarded_apply`
+   uses, re-derives the *live* `GrantBinding` from the live request + that checksum, and
+   calls **`pgb_policy::GrantToken::verify_for_apply`** (the existing Ed25519 verify +
+   binding-hash match + single-use nonce + expiry — **reused, no crypto reimplemented**).
+   The signed `blast_radius_checksum` is thereby **bound to the exact proposal**: a
+   swapped statement / param / session / proposal, a reused nonce, an expired TTL, **or a
+   drifted data set** (a row in/out of the predicate since signing) all REJECT;
+3. only on a valid, single-use, unexpired, proposal-bound grant does it reach
+   `guarded_apply`, whose own §10.1 apply-time PK-set re-check re-pins the same checksum
+   **inside** the apply txn (defense in depth).
+
+The grant gate is **tighten-only / fail-closed**: it can only ADD an abort condition; it
+never loosens a `guarded_apply` guard. **No valid grant ⇒ abort, no mutation** — the apply
+txn is never opened (the grant is checked before any `begin`). A shared/durable
+`NonceStore` and the policy-resolved approver `VerifyingKey` are injected, so the same
+single-use store and the trusted approver key gate every apply.
+
+Proven red→green with unit tests (`apply_grant.rs`) **and** real-PG18 integration tests
+(`crates/clone-orchestrator/tests/apply_grant_it.rs`, env-gated `PG_BUMPERS_IT=1`): a
+CLI-minted grant verifies at the real apply and the bounded write commits **reversibly**
+(revert restores the pre-state); the **5 T-grant-\* tamper cases**
+(sql-swap/param-swap/cross-session/proposal-swap → `BindingMismatch`; nonce reuse →
+`ReplayedNonce`; past-expiry → `Expired`), **no-grant** (attacker key → `BadSignature`),
+and **apply-time data-drift** (→ `BindingMismatch`) all ABORT end-to-end with **no
+mutation**; and the S3 guards still fire under the grant path (a barrier-injected
+post-gate drift still trips `guarded_apply`'s apply-time PK-set re-check → abort).
+
+### What is now true vs. what REMAINS a gap (honest scope)
+
+**Now true:** a §14.3 signed grant is a real, enforced gate at a production apply path —
+`guarded_apply_with_grant` is a non-test caller that fails closed without a valid grant.
+The "approval theater" gap (an absent/forged grant never checked on a real apply) is
+**closed** at the apply-caller boundary. S4 disclosure point 4 is **superseded** by this
+section for the apply path.
+
+**Still a documented gap (deferred):** the wiring **above** this caller — the live agent →
+MCP → proxy path that would *invoke* `guarded_apply_with_grant` with the live statement,
+params, session, role, and the policy-resolved approver key — is **not** built yet. No
+running proxy/MCP binary calls this function today; it is exercised by the unit + real-PG18
+integration tests, not yet by a served transport. That end-to-end assembly (and unifying
+the audit chain that records the grant decision) stays under the S5 assembly EPIC (#63),
+with the audit unification under #64. So: the grant is now a real gate **at the apply
+seam**; making the whole running system route through that seam is the remaining S5 wiring.
