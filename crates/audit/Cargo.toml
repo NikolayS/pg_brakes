@@ -29,6 +29,11 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # Cryptographic chain hash (MIT/Apache — keeps cargo-deny green).
 sha2 = "0.10"
+# HMAC-SHA256 for the dev KMS signer over the chain head (RustCrypto, MIT/Apache;
+# already in the workspace tree transitively — keeps cargo-deny green). The
+# production target is an asymmetric KMS signature; the `Kms` trait abstracts
+# that seam, so swapping in a real KMS does not touch the anchor logic.
+hmac = "0.12"
 hex = "0.4"
 thiserror = "2"
 # Synchronous Postgres client for the `_meta` sink (MIT/Apache). Matches the

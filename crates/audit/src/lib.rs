@@ -11,17 +11,26 @@
 //!
 //! The chain lives in the `_meta` DB on an append-only table whose grants
 //! `REVOKE` write from the audited principal — "the audited cannot write audit"
-//! (SPEC §3/§4/§10.9). The external WORM **anchor** + KMS **key-separation** are
-//! S4 (this S1 crate ships the chain + recording + the `_meta` schema + the
-//! REVOKE).
+//! (SPEC §3/§4/§10.9). S1 shipped the chain + recording + the `_meta` schema +
+//! the REVOKE. **S4 (this addition)** closes the full-chain-rewrite gap with an
+//! external WORM **anchor** of the chain head, signed by a **KMS-separated** key
+//! the DB operator cannot reach, loaded from a **secret store** with documented
+//! rotation (SPEC §10.9).
 //!
 //! # Modules
 //! - [`record`] — the [`AuditRecord`]/[`AuditPayload`], the [`Decision`] enum
 //!   (`ALLOW`/`BLOCK`/`REJECT`), the canonical encoding, and the chain hash.
 //! - [`chain`] — the append-only [`AuditChain`] builder and
-//!   [`verify_chain`](chain::verify_chain) (the tamper detector).
+//!   [`verify_chain`](chain::verify_chain) (the within-chain tamper detector).
 //! - [`sink`] — the append-only [`Sink`] trait + the [`InMemorySink`].
 //! - [`pg`] — the Postgres `_meta` sink (behind the default-on `pg` feature).
+//! - [`secret`] — the [`SecretStore`](secret::SecretStore) seam for DSNs + the
+//!   audit signing key, with rotation (S4).
+//! - [`kms`] — the [`Kms`](kms::Kms) signing seam; the signer is **separated
+//!   from the DB operator** at the type level and by principal check (S4).
+//! - [`anchor`] — the interval-driven external WORM/transparency anchor of the
+//!   chain head; [`verify_against_anchor`](anchor::verify_against_anchor) catches
+//!   a *full-chain rewrite* that the within-chain check cannot (S4).
 //!
 //! Time is always read from `core::Clock` upstream and passed in as a
 //! millisecond stamp, so no part of the crate touches a wall clock and tests
@@ -30,17 +39,26 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod anchor;
 pub mod chain;
+pub mod kms;
 pub mod record;
+pub mod secret;
 pub mod sink;
 
 #[cfg(feature = "pg")]
 pub mod pg;
 
+pub use anchor::{
+    verify_against_anchor, verify_against_anchor_with, AnchorEntry, AnchorError,
+    AnchorVerification, Anchored, Anchorer, WormAnchor, WormAnchorError,
+};
 pub use chain::{verify_chain, AuditChain, ChainBreak, NewEntry};
+pub use kms::{HeadSignature, Kms, KmsError, LocalKms, OPERATOR_PRINCIPAL};
 pub use record::{
     AuditPayload, AuditRecord, Decision, IntentTiers, Principal, WriteSafetyRefs, GENESIS_PREV_HASH,
 };
+pub use secret::{LocalSecretStore, SecretError, SecretStore, AUDIT_SIGNING_KEY_ID};
 pub use sink::{InMemorySink, Sink, SinkError};
 
 #[cfg(feature = "pg")]
