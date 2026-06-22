@@ -9,9 +9,23 @@ authors.workspace = true
 rust-version.workspace = true
 publish = false
 
+[lib]
+name = "pgb_warden"
+path = "src/lib.rs"
+
 [[bin]]
 name = "pgb-warden"
 path = "src/main.rs"
 
 [dependencies]
 pgb-core = { path = "../core" }
+pgb-policy = { path = "../policy" }
+serde = { version = "1", features = ["derive"] }
+serde_yaml_ng = "0.10"
+thiserror = "2"
+
+[dev-dependencies]
+# A synchronous Postgres client for the env-gated real-PG18 integration test
+# (spawns agent-tagged backends, creates a replication slot, asserts the warden
+# detects + kills only agent-tagged sessions). Same client the proxy IT uses.
+postgres = "0.19"
