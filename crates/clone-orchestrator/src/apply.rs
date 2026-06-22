@@ -68,7 +68,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use pgb_core::inverse::{certify, InversePlanBuilder, Operation};
 use pgb_core::{
-    ApplyBarrier, BlastRadius, Clock, InverseKind, InversePlan, InverseRow, PkChecksum,
+    ApplyBarrier, BlastRadius, Clock, InverseKind, InversePlan, InverseRow, OpCounts, PkChecksum,
     PkSetBuilder, PkTuple, RefusedOp,
 };
 
@@ -159,27 +159,37 @@ pub enum ApplyError {
         del: u64,
     },
 
-    /// **A predicted relation changed MORE than predicted** (step 6, the symmetric
-    /// reconciliation): a relation in the dry-run blast radius shows more in-txn
-    /// tuple changes than the dry-run measured. Catches an out-of-predicate write
-    /// to the *target* table (an AFTER trigger `DELETE`/`UPDATE` of a same-table
-    /// row the `RETURNING` set happens to still match) and **cascade drift** —
-    /// post-snapshot child rows that swelled the cascade beyond the prediction.
-    /// Those excess rows have no pre-image in the inverse → irreversible. → ROLLBACK.
-    #[error("GUARD ABORT (relation `{relation}` changed more than predicted): predicted={predicted} actual={actual} (ins={ins} upd={upd} del={del})")]
+    /// **A predicted relation changed MORE than predicted on some op channel**
+    /// (step 6, the symmetric **per-op-type** reconciliation): a relation in the
+    /// dry-run blast radius shows more in-txn tuples changed on at least one of the
+    /// `ins` / `upd` / `del` channels than the dry-run measured for that channel.
+    /// Catches an out-of-predicate write to the *target* table (an AFTER trigger
+    /// `DELETE`/`UPDATE` of a same-table row the `RETURNING` set happens to still
+    /// match), **cascade drift** (post-snapshot child rows that swelled the cascade
+    /// beyond the prediction), AND — critically — an **op-type substitution**: a
+    /// relation predicted to only `ins` that the apply `del`s/`upd`s instead (same
+    /// *total*, opposite destructive op). Those excess/substituted rows have no
+    /// pre-image in the inverse → irreversible. The reconciliation compares each op
+    /// channel **independently** (never a collapsed total). → ROLLBACK.
+    #[error("GUARD ABORT (relation `{relation}` changed more than predicted on the `{channel}` channel): predicted=(ins={p_ins} upd={p_upd} del={p_del}) actual=(ins={a_ins} upd={a_upd} del={a_del})")]
     RelationOverWrite {
-        /// The predicted relation whose actual change count exceeded the prediction.
+        /// The predicted relation whose actual change exceeded the prediction.
         relation: String,
-        /// The dry-run-predicted change count for the relation (rows affected).
-        predicted: u64,
-        /// The actual in-txn change count (ins+upd+del).
-        actual: u64,
-        /// In-txn `pg_stat_xact_n_tup_ins`.
-        ins: u64,
-        /// In-txn `pg_stat_xact_n_tup_upd`.
-        upd: u64,
-        /// In-txn `pg_stat_xact_n_tup_del`.
-        del: u64,
+        /// The op channel that drifted (`"ins"`, `"upd"`, or `"del"`) — the first
+        /// channel found to exceed its prediction.
+        channel: &'static str,
+        /// Predicted `pg_stat_xact_n_tup_ins` for the relation.
+        p_ins: u64,
+        /// Predicted `pg_stat_xact_n_tup_upd` for the relation.
+        p_upd: u64,
+        /// Predicted `pg_stat_xact_n_tup_del` for the relation.
+        p_del: u64,
+        /// Actual in-txn `pg_stat_xact_n_tup_ins`.
+        a_ins: u64,
+        /// Actual in-txn `pg_stat_xact_n_tup_upd`.
+        a_upd: u64,
+        /// Actual in-txn `pg_stat_xact_n_tup_del`.
+        a_del: u64,
     },
 
     /// **A committed change could not be captured as a reversible pre-image**
@@ -288,8 +298,18 @@ pub struct RelationChange {
 
 impl RelationChange {
     /// Total tuples changed in the relation within the txn (`ins + upd + del`).
+    /// Display / cross-check only — the guard reconciles **per op type** (see
+    /// [`as_op_counts`](RelationChange::as_op_counts)), so a substitution that
+    /// keeps the total but flips the op (an INSERT prediction met by a DELETE)
+    /// still aborts.
     pub fn total(&self) -> u64 {
         self.ins.saturating_add(self.upd).saturating_add(self.del)
+    }
+
+    /// This relation's measured deltas as a typed [`OpCounts`], for per-channel
+    /// reconciliation against the prediction.
+    pub fn as_op_counts(&self) -> OpCounts {
+        OpCounts::new(self.ins, self.upd, self.del)
     }
 }
 
@@ -534,11 +554,14 @@ struct PredictedBlastRadius {
     /// apply re-checks the PK-set of each AND captures their pre-images for the
     /// full inverse.
     cascades: Vec<(String, String)>,
-    /// The FULL per-relation predicted change footprint (`effect_by_table`): every
-    /// relation the dry-run's `pg_stat_xact_*` measured, mapped to its predicted
-    /// in-txn change count. The apply reconciles its own deltas against this
-    /// (0-tolerance over-write; any relation outside it is unpredicted).
-    effect_by_table: BTreeMap<String, u64>,
+    /// The FULL per-relation, **per-op-type** predicted change footprint
+    /// (`effect_by_table`): every relation the dry-run's `pg_stat_xact_*` measured,
+    /// mapped to its predicted in-txn [`OpCounts`]. The apply reconciles its own
+    /// deltas against this **per op channel** (0-tolerance over-write on any of
+    /// `ins`/`upd`/`del`; any relation outside it is unpredicted). Per-op-type is
+    /// load-bearing: a predicted INSERT footprint can NOT be satisfied by an
+    /// apply-time DELETE of the same total.
+    effect_by_table: BTreeMap<String, OpCounts>,
 }
 
 impl PredictedBlastRadius {
@@ -673,11 +696,14 @@ fn guarded_body(
     //     certifiably reversible → ABORT.
     if kind == WriteKind::Delete {
         for (cascade_rel, _) in &predicted.cascades {
+            // A DELETE cascade destroys child rows → the predicted `del` channel is
+            // exactly the number of pre-images the inverse must hold to be revertible.
             let predicted_n = predicted
                 .effect_by_table
                 .get(cascade_rel)
                 .copied()
-                .unwrap_or(0);
+                .unwrap_or_default()
+                .del;
             let captured = forward
                 .cascade_preimages
                 .get(cascade_rel)
@@ -699,51 +725,72 @@ fn guarded_body(
 }
 
 /// Reconcile the apply txn's per-relation `pg_stat_xact_*` tuple deltas against
-/// the predicted full blast radius (SPEC §4). Fail-closed:
+/// the predicted full blast radius (SPEC §4), **per op type** (`ins`/`upd`/`del`
+/// reconciled independently — never a collapsed total). Fail-closed:
 ///
 /// - ANY relation with a non-zero in-txn change that is **not** in the predicted
 ///   blast radius → [`ApplyError::UnpredictedRelationWrite`] (the AFTER-trigger
 ///   out-of-predicate `DELETE`, or the separate-table `mirror` wipe — both
 ///   invisible to `RETURNING`).
-/// - ANY predicted relation whose actual change count **exceeds** the prediction →
-///   [`ApplyError::RelationOverWrite`] (an out-of-predicate write to the target
-///   table, or cascade drift on a child).
+/// - ANY predicted relation whose actual change **on any op channel exceeds** the
+///   prediction for that channel → [`ApplyError::RelationOverWrite`]. This catches
+///   an out-of-predicate write to the target table, cascade drift on a child, AND
+///   the **op-type substitution** the collapsed-total guard missed: a relation
+///   predicted to only `ins` (e.g. an audit table) that the apply `del`s/`upd`s
+///   instead trips the `del`/`upd` channel even though the *total* is unchanged —
+///   the silent irreversible destructive write is now refused.
 ///
-/// (A predicted relation changing *less* than predicted cannot under-destroy data,
-/// and the PK-set re-check + RETURNING check already pin the exact target set; the
-/// over-write direction is the data-loss direction this guards.)
+/// (A predicted relation changing *less* than predicted on a channel cannot
+/// under-destroy data, and the PK-set re-check + RETURNING check already pin the
+/// exact target set; the per-channel over-write is the data-loss direction this
+/// guards. Checking each channel — rather than the sum — is what makes a
+/// destructive op substituted for a predicted-only-insert op impossible to commit.)
 fn reconcile_full_effect(
     predicted: &PredictedBlastRadius,
     deltas: &[RelationChange],
 ) -> Result<(), ApplyError> {
     let in_radius = predicted.relations();
     for change in deltas {
-        let total = change.total();
-        if total == 0 {
+        if change.total() == 0 {
             continue;
         }
         if !in_radius.contains(change.relation.as_str()) {
             return Err(ApplyError::UnpredictedRelationWrite {
                 relation: change.relation.clone(),
-                changed: total,
+                changed: change.total(),
                 ins: change.ins,
                 upd: change.upd,
                 del: change.del,
             });
         }
-        let predicted_n = predicted
+        let p = predicted
             .effect_by_table
             .get(&change.relation)
             .copied()
-            .unwrap_or(0);
-        if total > predicted_n {
+            .unwrap_or_default();
+        let a = change.as_op_counts();
+        // Compare each op channel INDEPENDENTLY. The first channel that exceeds its
+        // prediction aborts — including the data-loss direction where the predicted
+        // channel was 0 (e.g. an `ins`-only relation showing any `del`).
+        let channel = if a.ins > p.ins {
+            Some("ins")
+        } else if a.upd > p.upd {
+            Some("upd")
+        } else if a.del > p.del {
+            Some("del")
+        } else {
+            None
+        };
+        if let Some(channel) = channel {
             return Err(ApplyError::RelationOverWrite {
                 relation: change.relation.clone(),
-                predicted: predicted_n,
-                actual: total,
-                ins: change.ins,
-                upd: change.upd,
-                del: change.del,
+                channel,
+                p_ins: p.ins,
+                p_upd: p.upd,
+                p_del: p.del,
+                a_ins: a.ins,
+                a_upd: a.upd,
+                a_del: a.del,
             });
         }
     }
@@ -828,10 +875,12 @@ mod tests {
         let mut by_table = std::collections::BTreeMap::new();
         by_table.insert(rel.to_string(), ids.len() as u64);
         // The measured full footprint: by default just the target changed exactly
-        // its affected-row count (no cascades / trigger side-effects in the base
-        // grant; tests that need them use `grant_with_cascade` / set it directly).
+        // its affected-row count, as an UPDATE (`upd`) — matching the MockConn's
+        // default `tuple_deltas`. (No cascades / trigger side-effects in the base
+        // grant; DELETE tests use `grant_with_cascade`, which rewrites the channel
+        // to `del`; trigger tests set the deltas directly.)
         let mut effect_by_table = std::collections::BTreeMap::new();
-        effect_by_table.insert(rel.to_string(), ids.len() as u64);
+        effect_by_table.insert(rel.to_string(), OpCounts::new(0, ids.len() as u64, 0));
         BlastRadius {
             proposal_id: proposal_id.to_string(),
             clone_lsn: "0/0".into(),
@@ -1229,10 +1278,17 @@ mod tests {
             cascade_rel.to_string(),
             checksum_of(cascade_rel, cascade_ids).as_prefixed(),
         );
-        // The cascade child is part of the measured full footprint.
+        // This is a DELETE-with-cascade grant: the target and the cascade child are
+        // both DELETEs in the measured footprint (the base `grant_for` typed the
+        // target as `upd`; rewrite it to `del` so the per-op-type reconciliation
+        // matches the DELETE deltas these tests inject).
         g.affected
             .effect_by_table
-            .insert(cascade_rel.to_string(), cascade_ids.len() as u64);
+            .insert(rel.to_string(), OpCounts::new(0, 0, ids.len() as u64));
+        g.affected.effect_by_table.insert(
+            cascade_rel.to_string(),
+            OpCounts::new(0, 0, cascade_ids.len() as u64),
+        );
         g.affected.total_rows = ids.len() as u64 + cascade_ids.len() as u64;
         g.inverse_kind = InverseKind::Insert;
         g
@@ -1289,8 +1345,9 @@ mod tests {
     fn out_of_predicate_trigger_write_to_target_aborts_via_overwrite() {
         // BLOCKER 1 (same-table out-of-predicate): UPDATE id%2=0 RETURNING={2,4,6,8}
         // == grant, but an AFTER trigger also DELETEs id=7 (odd → out of predicate).
-        // RETURNING never surfaces id=7. The target's in-txn delta is 4 upd + 1 del
-        // = 5 > predicted 4 → RelationOverWrite ABORT (id=7 would be irreversible).
+        // RETURNING never surfaces id=7. The target's predicted footprint is upd=4,
+        // del=0; the apply's delta is upd=4, del=1 → the `del` channel (actual 1 >
+        // predicted 0) ABORTs (id=7 would be irreversible).
         let mut conn = MockConn::new(REL, &[2, 4, 6, 8]);
         conn.inner().tuple_deltas = Some(vec![RelationChange {
             relation: REL.to_string(),
@@ -1314,13 +1371,18 @@ mod tests {
         match err {
             ApplyError::RelationOverWrite {
                 relation,
-                predicted,
-                actual,
+                channel,
+                p_del,
+                a_del,
                 ..
             } => {
                 assert_eq!(relation, REL);
-                assert_eq!(predicted, 4);
-                assert_eq!(actual, 5);
+                assert_eq!(
+                    channel, "del",
+                    "the out-of-predicate DELETE tripped the del channel"
+                );
+                assert_eq!(p_del, 0);
+                assert_eq!(a_del, 1);
             }
             other => panic!("expected RelationOverWrite, got {other:?}"),
         }
@@ -1343,7 +1405,7 @@ mod tests {
             // the grant pinned; here we model the cascade checksum drifting too).
             vec![20, 40, 60, 80],
         );
-        // Predicted cascade = {20,40,60,80} (8 rows recorded), but at apply time the
+        // Predicted cascade = {20,40,60,80} (4 rows recorded), but at apply time the
         // cascade destroyed 54.
         conn.inner().tuple_deltas = Some(vec![
             RelationChange {
@@ -1385,18 +1447,219 @@ mod tests {
         match err {
             ApplyError::RelationOverWrite {
                 relation,
-                predicted,
-                actual,
+                channel,
+                p_del,
+                a_del,
                 ..
             } => {
                 assert_eq!(relation, cascade);
-                assert_eq!(predicted, 4);
-                assert_eq!(actual, 54);
+                assert_eq!(channel, "del");
+                assert_eq!(p_del, 4);
+                assert_eq!(a_del, 54);
             }
             other => panic!("expected cascade RelationOverWrite, got {other:?}"),
         }
         assert!(probe.inner().rolled_back);
         assert!(!probe.inner().committed);
+    }
+
+    // ---- op-type substitution (THE third BLOCKER) --------------------------
+
+    /// THE BLOCKER: a predicted **INSERT** footprint of N into a side / trigger-
+    /// written relation, but the post-snapshot trigger actually **DELETEs** N
+    /// pre-existing rows of that same relation. The *total* is identical (N), so a
+    /// collapsed-total guard would PASS and commit an irreversible destructive
+    /// write. The per-op-type reconciliation sees `del=N > predicted del=0` on that
+    /// relation → ABORT.
+    #[test]
+    fn op_type_substitution_predicted_insert_actual_delete_aborts() {
+        let audit = "public.account_audit";
+        let mut conn = MockConn::new(REL, &[2, 4, 6, 8]);
+        // target changed exactly as predicted (upd=4). The audit relation was
+        // predicted to INSERT 4 rows; at apply time the swapped trigger DELETEd 4
+        // PRE-EXISTING audit rows instead — same total (4), opposite op.
+        conn.inner().tuple_deltas = Some(vec![
+            RelationChange {
+                relation: REL.to_string(),
+                ins: 0,
+                upd: 4,
+                del: 0,
+            },
+            RelationChange {
+                relation: audit.to_string(),
+                ins: 0,
+                upd: 0,
+                del: 4, // destructive DELETE substituted for the predicted INSERT
+            },
+        ]);
+        let probe = conn.clone();
+        // Grant predicts: target upd=4, audit INSERT 4 (ins=4, del=0).
+        let mut grant = grant_for("p-opsub", REL, &[2, 4, 6, 8], 5);
+        grant
+            .affected
+            .effect_by_table
+            .insert(audit.to_string(), OpCounts::new(4, 0, 0));
+        let err = guarded_apply(
+            "p-opsub",
+            WriteKind::Update,
+            REL,
+            &grant,
+            PitrConfig::disabled(),
+            &mut conn,
+            &NoopBarrier::new(),
+            &MockClock::new(),
+        )
+        .unwrap_err();
+        match err {
+            ApplyError::RelationOverWrite {
+                relation,
+                channel,
+                p_ins,
+                p_del,
+                a_del,
+                ..
+            } => {
+                assert_eq!(relation, audit);
+                assert_eq!(channel, "del", "the substituted DELETE tripped the del channel");
+                assert_eq!(p_ins, 4, "the prediction was an INSERT of 4");
+                assert_eq!(p_del, 0, "the prediction had NO deletes");
+                assert_eq!(a_del, 4, "the apply DELETEd 4 pre-existing rows");
+            }
+            other => panic!(
+                "op-type substitution (predicted ins, actual del, same total) MUST abort, got {other:?}"
+            ),
+        }
+        let p = probe.inner();
+        assert!(
+            p.rolled_back,
+            "the destructive op substitution must ROLLBACK"
+        );
+        assert!(
+            !p.committed,
+            "it must NOT commit — the 4 audit rows are intact"
+        );
+    }
+
+    /// The upd-for-ins substitution: a relation predicted to only INSERT that the
+    /// apply UPDATEs instead (same total). Caught on the `upd` channel → ABORT.
+    #[test]
+    fn op_type_substitution_predicted_insert_actual_update_aborts() {
+        let side = "public.side_table";
+        let mut conn = MockConn::new(REL, &[2, 4, 6, 8]);
+        conn.inner().tuple_deltas = Some(vec![
+            RelationChange {
+                relation: REL.to_string(),
+                ins: 0,
+                upd: 4,
+                del: 0,
+            },
+            RelationChange {
+                relation: side.to_string(),
+                ins: 0,
+                upd: 3, // UPDATE substituted for the predicted INSERT
+                del: 0,
+            },
+        ]);
+        let probe = conn.clone();
+        let mut grant = grant_for("p-updsub", REL, &[2, 4, 6, 8], 5);
+        grant
+            .affected
+            .effect_by_table
+            .insert(side.to_string(), OpCounts::new(3, 0, 0));
+        let err = guarded_apply(
+            "p-updsub",
+            WriteKind::Update,
+            REL,
+            &grant,
+            PitrConfig::disabled(),
+            &mut conn,
+            &NoopBarrier::new(),
+            &MockClock::new(),
+        )
+        .unwrap_err();
+        match err {
+            ApplyError::RelationOverWrite {
+                relation, channel, ..
+            } => {
+                assert_eq!(relation, side);
+                assert_eq!(channel, "upd");
+            }
+            other => panic!("expected RelationOverWrite on the upd channel, got {other:?}"),
+        }
+        assert!(probe.inner().rolled_back);
+        assert!(!probe.inner().committed);
+    }
+
+    /// A relation predicted to INSERT N that the apply INSERTs N of → no drift, the
+    /// same-op-type happy path still commits (the guard does not over-fire).
+    #[test]
+    fn predicted_insert_matched_by_insert_commits() {
+        let audit = "public.account_audit";
+        let mut conn = MockConn::new(REL, &[2, 4, 6, 8]);
+        conn.inner().tuple_deltas = Some(vec![
+            RelationChange {
+                relation: REL.to_string(),
+                ins: 0,
+                upd: 4,
+                del: 0,
+            },
+            RelationChange {
+                relation: audit.to_string(),
+                ins: 4, // matches the predicted INSERT
+                upd: 0,
+                del: 0,
+            },
+        ]);
+        let probe = conn.clone();
+        let mut grant = grant_for("p-okins", REL, &[2, 4, 6, 8], 5);
+        grant
+            .affected
+            .effect_by_table
+            .insert(audit.to_string(), OpCounts::new(4, 0, 0));
+        guarded_apply(
+            "p-okins",
+            WriteKind::Update,
+            REL,
+            &grant,
+            PitrConfig::disabled(),
+            &mut conn,
+            &NoopBarrier::new(),
+            &MockClock::new(),
+        )
+        .expect("a predicted INSERT met by an INSERT of the same count must COMMIT");
+        assert!(probe.inner().committed);
+        assert!(!probe.inner().rolled_back);
+    }
+
+    /// The stale-grant unit test the reviewer flagged: a grant whose
+    /// `effect_by_table` is empty (a legacy §10.1 record, or a measurement that
+    /// recorded no footprint) cannot authorize a write — there is no predicted
+    /// footprint to reconcile against → `InvalidGrant`, fail-closed, BEFORE any DB
+    /// work (no txn opened).
+    #[test]
+    fn stale_grant_with_empty_effect_by_table_is_refused() {
+        let mut conn = MockConn::new(REL, &[2, 4, 6, 8]);
+        let probe = conn.clone();
+        let mut grant = grant_for("p-stale", REL, &[2, 4, 6, 8], 5);
+        grant.affected.effect_by_table.clear(); // models a legacy / unmeasured grant
+        let err = guarded_apply(
+            "p-stale",
+            WriteKind::Update,
+            REL,
+            &grant,
+            PitrConfig::disabled(),
+            &mut conn,
+            &NoopBarrier::new(),
+            &MockClock::new(),
+        )
+        .unwrap_err();
+        assert!(matches!(err, ApplyError::InvalidGrant(_)), "{err:?}");
+        let p = probe.inner();
+        assert!(
+            p.began_with_timeout.is_none(),
+            "a stale grant must be refused before the apply txn opens"
+        );
+        assert!(!p.forward_ran && !p.committed && !p.rolled_back);
     }
 
     #[test]

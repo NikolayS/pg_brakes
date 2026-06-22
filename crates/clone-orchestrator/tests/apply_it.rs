@@ -36,8 +36,8 @@ use pgb_clone_orchestrator::apply::{
 use pgb_clone_orchestrator::{guarded_apply, PitrConfig, RecoveryFence, WriteKind};
 use pgb_core::inverse::ImageValue;
 use pgb_core::{
-    BlastRadius, ClosureBarrier, InverseKind, NoopBarrier, PkChecksum, PkSetBuilder, PkTuple,
-    PkValue, SystemClock,
+    BlastRadius, ClosureBarrier, InverseKind, NoopBarrier, OpCounts, PkChecksum, PkSetBuilder,
+    PkTuple, PkValue, SystemClock,
 };
 use postgres::error::SqlState;
 use postgres::{Client, NoTls};
@@ -517,20 +517,27 @@ fn grant_for_forward(
 }
 
 /// Rehearse `forward_sql` in a `BEGIN … ROLLBACK` txn and return the full
-/// per-relation change footprint from `pg_stat_xact_user_tables` (SPEC §4). This
-/// is exactly what the dry-run measures; it captures the audit-table trigger
-/// writes that are a deterministic, predicted side-effect (so they are NOT drift).
-fn measure_full_effect(url: &str, forward_sql: &str) -> BTreeMap<String, u64> {
-    let read_raw = |txn: &mut postgres::Transaction| -> BTreeMap<String, i64> {
+/// per-relation, **per-op-type** change footprint from `pg_stat_xact_user_tables`
+/// (SPEC §4). This is exactly what the dry-run measures; it captures the
+/// audit-table trigger writes that are a deterministic, predicted side-effect (so
+/// they are NOT drift) — keeping `ins`/`upd`/`del` separate so the apply reconciles
+/// each channel (an audit INSERT footprint can NOT be satisfied by a DELETE).
+fn measure_full_effect(url: &str, forward_sql: &str) -> BTreeMap<String, OpCounts> {
+    let read_raw = |txn: &mut postgres::Transaction| -> BTreeMap<String, (i64, i64, i64)> {
         txn.query(
             "SELECT schemaname || '.' || relname AS rel, \
-                    (n_tup_ins + n_tup_upd + n_tup_del) AS changed \
+                    n_tup_ins, n_tup_upd, n_tup_del \
              FROM pg_stat_xact_user_tables",
             &[],
         )
         .expect("measure stat")
         .iter()
-        .map(|r| (r.get::<_, String>(0), r.get::<_, i64>(1)))
+        .map(|r| {
+            (
+                r.get::<_, String>(0),
+                (r.get::<_, i64>(1), r.get::<_, i64>(2), r.get::<_, i64>(3)),
+            )
+        })
         .collect()
     };
     let mut c = Client::connect(url, NoTls).expect("measure connect");
@@ -541,11 +548,13 @@ fn measure_full_effect(url: &str, forward_sql: &str) -> BTreeMap<String, u64> {
     let after = read_raw(&mut txn);
     txn.rollback().expect("measure rollback");
     let mut out = BTreeMap::new();
-    for (rel, changed) in after {
-        let base = baseline.get(&rel).copied().unwrap_or(0);
-        let delta = (changed - base).max(0) as u64;
-        if delta > 0 {
-            out.insert(rel, delta);
+    for (rel, (ins, upd, del)) in after {
+        let (b_ins, b_upd, b_del) = baseline.get(&rel).copied().unwrap_or((0, 0, 0));
+        let d_ins = (ins - b_ins).max(0) as u64;
+        let d_upd = (upd - b_upd).max(0) as u64;
+        let d_del = (del - b_del).max(0) as u64;
+        if d_ins + d_upd + d_del > 0 {
+            out.insert(rel, OpCounts::new(d_ins, d_upd, d_del));
         }
     }
     out
@@ -1003,27 +1012,29 @@ fn t_after_trigger_deletes_out_of_predicate_row_aborts_id7_intact() {
             &SystemClock::new(),
         )
     };
-    // The out-of-predicate DELETE id=7 makes `accounts` change 5 rows (>4) AND the
-    // audit trigger fire 5 times (>4 predicted). Either over-write ABORTS — both
-    // are the same irreversible drift; what matters is id=7 survives.
+    // The out-of-predicate DELETE id=7 makes `accounts` show del=1 (predicted del=0)
+    // AND the audit trigger fire 5 INSERTs (>4 predicted ins). Either per-channel
+    // over-write ABORTS — both are the same irreversible drift; what matters is id=7
+    // survives.
     match result {
         Err(ApplyError::RelationOverWrite {
             relation,
-            predicted,
-            actual,
-            ..
+            channel,
+            p_ins,
+            p_upd,
+            p_del,
+            a_ins,
+            a_upd,
+            a_del,
         }) => {
             assert!(
                 relation == "public.accounts" || relation == "public.account_audit",
                 "abort on the over-written relation, got {relation}"
             );
-            assert!(
-                actual > predicted,
-                "the trigger's out-of-predicate DELETE made a relation change MORE than predicted"
-            );
             eprintln!(
                 "T-after-trigger-kill7 PASS: out-of-predicate trigger DELETE id=7 caught by \
-                 pg_stat_xact reconciliation on `{relation}` (predicted={predicted} actual={actual}) → ABORTED"
+                 per-op-type pg_stat_xact reconciliation on `{relation}` channel=`{channel}` \
+                 (predicted ins={p_ins} upd={p_upd} del={p_del}; actual ins={a_ins} upd={a_upd} del={a_del}) → ABORTED"
             );
         }
         other => panic!("expected RelationOverWrite (out-of-predicate trigger), got {other:?}"),
@@ -1035,6 +1046,132 @@ fn t_after_trigger_deletes_out_of_predicate_row_aborts_id7_intact() {
     assert_eq!(
         before, after,
         "the whole apply rolled back — DB byte-for-byte unchanged, id=7 destroyed-and-restored never happened"
+    );
+    drop_db(&admin, &dbname);
+}
+
+/// BLOCKER 3 — OP-TYPE SUBSTITUTION (the reviewer's EXACT repro): the audit table
+/// `public.account_audit` is pre-seeded with 20 real rows. The grant is measured
+/// while the benign audit trigger INSERTs on UPDATE → predicted footprint
+/// `account_audit = (ins=4, upd=0, del=0)`. Post-snapshot the trigger is swapped to
+/// **DELETE 4 pre-existing audit rows** on UPDATE. The forward op's target
+/// `RETURNING` is still {2,4,6,8} == grant, the target footprint still upd=4, and
+/// the audit relation's *total* delta is still 4 — so a collapsed-total guard would
+/// PASS and COMMIT, destroying 4 real audit rows irreversibly (the relation is
+/// neither target nor cascade → no PK-set check, no captured inverse). The
+/// per-op-type reconciliation sees `del=4 > predicted del=0` on `account_audit` →
+/// ABORT. Audit table stays 20→20, primary byte-for-byte unchanged.
+#[test]
+fn t_op_type_substitution_predicted_insert_actual_delete_on_audit_aborts() {
+    let Some((admin, dbname, _c)) = setup("op_substitution") else {
+        return;
+    };
+    let url = url_for(&admin, &dbname);
+
+    // Pre-seed the audit table with 20 REAL rows (pre-existing data the swapped
+    // trigger will try to destroy).
+    {
+        let mut c = Client::connect(&url, NoTls).unwrap();
+        c.batch_execute(
+            "INSERT INTO public.account_audit(account_id, op) \
+             SELECT (g % 8) + 1, 'SEED' FROM generate_series(1, 20) g;",
+        )
+        .expect("pre-seed 20 audit rows");
+    }
+    let audit_before: i64 = {
+        let mut c = Client::connect(&url, NoTls).unwrap();
+        c.query_one("SELECT count(*) FROM public.account_audit", &[])
+            .unwrap()
+            .get(0)
+    };
+    assert_eq!(audit_before, 20, "audit table pre-seeded with 20 rows");
+
+    // Grant measured with the BENIGN (insert-on-update) audit trigger → predicts
+    // account_audit = (ins=4, upd=0, del=0).
+    let grant = grant_for("p-opsub", &url, EVEN_WHERE, 50);
+    let predicted_audit = grant.affected.effect_by_table["public.account_audit"];
+    assert_eq!(
+        predicted_audit,
+        OpCounts::new(4, 0, 0),
+        "the dry-run predicted 4 audit INSERTs, NO deletes"
+    );
+
+    // Swap the audit trigger function POST-snapshot: on UPDATE it now DELETEs 4
+    // pre-existing audit rows instead of inserting (same total magnitude, opposite
+    // destructive op). DELETE path unchanged so the seed-FK stays valid.
+    {
+        let mut c = Client::connect(&url, NoTls).unwrap();
+        c.batch_execute(
+            "CREATE OR REPLACE FUNCTION public.accounts_audit() RETURNS trigger \
+             LANGUAGE plpgsql AS $$ \
+             BEGIN \
+               IF (TG_OP = 'UPDATE') THEN \
+                 DELETE FROM public.account_audit \
+                  WHERE audit_id IN (SELECT audit_id FROM public.account_audit \
+                                     ORDER BY audit_id LIMIT 1); \
+                 RETURN NEW; \
+               ELSIF (TG_OP = 'DELETE') THEN \
+                 INSERT INTO public.account_audit(account_id, op) VALUES (OLD.id, TG_OP); \
+                 RETURN OLD; \
+               ELSE RETURN NEW; END IF; \
+             END; $$;",
+        )
+        .expect("swap audit trigger to delete-on-update");
+    }
+
+    let forward = "UPDATE public.accounts SET balance = 0 WHERE id % 2 = 0";
+    let mut client = Client::connect(&url, NoTls).expect("apply connect");
+    let result = {
+        let mut conn = PgApplyConn::new(&mut client, forward, EVEN_WHERE, WriteKind::Update);
+        guarded_apply(
+            "p-opsub",
+            WriteKind::Update,
+            "public.accounts",
+            &grant,
+            PitrConfig::disabled(),
+            &mut conn,
+            &NoopBarrier::new(),
+            &SystemClock::new(),
+        )
+    };
+    // The substituted DELETE trips the `del` channel of account_audit (actual del>0,
+    // predicted del=0) — NOT a collapsed total (which would have matched 4==4).
+    match result {
+        Err(ApplyError::RelationOverWrite {
+            relation,
+            channel,
+            p_ins,
+            p_del,
+            a_del,
+            ..
+        }) => {
+            assert_eq!(relation, "public.account_audit");
+            assert_eq!(channel, "del", "the op substitution tripped the del channel");
+            assert_eq!(p_ins, 4, "the prediction was 4 audit INSERTs");
+            assert_eq!(p_del, 0, "the prediction had ZERO audit deletes");
+            assert!(a_del > 0, "the swapped trigger DELETEd pre-existing audit rows");
+            eprintln!(
+                "T-op-substitution PASS: predicted INSERT-of-4 on `public.account_audit` \
+                 satisfied at apply time by a DELETE of {a_del} pre-existing rows (same total, \
+                 opposite op) — caught by PER-OP-TYPE reconciliation (del {a_del} > predicted {p_del}) \
+                 → ABORTED. A collapsed-total guard would have COMMITTED this irreversible destruction."
+            );
+        }
+        other => panic!(
+            "op-type substitution (predicted ins, apply-time del, same total) MUST abort, got {other:?}"
+        ),
+    }
+
+    // The 20 audit rows are INTACT and the primary is byte-for-byte unchanged.
+    let audit_after: i64 = {
+        let mut c = Client::connect(&url, NoTls).unwrap();
+        c.query_one("SELECT count(*) FROM public.account_audit", &[])
+            .unwrap()
+            .get(0)
+    };
+    assert_eq!(
+        audit_after, 20,
+        "audit table MUST stay 20→20 (apply aborted; the 4 pre-existing rows were NOT destroyed)"
     );
     drop_db(&admin, &dbname);
 }
@@ -1173,15 +1310,17 @@ fn t_cascade_drift_more_children_than_predicted_aborts() {
         }
         Err(ApplyError::RelationOverWrite {
             relation,
-            predicted,
-            actual,
+            channel,
+            p_del,
+            a_del,
             ..
         }) => {
             assert_eq!(relation, "public.entries");
-            assert!(actual > predicted);
+            assert_eq!(channel, "del");
+            assert!(a_del > p_del);
             eprintln!(
-                "T-cascade-drift PASS: cascade destroyed {actual} children > predicted {predicted} \
-                 (pg_stat_xact reconciliation) → ABORTED"
+                "T-cascade-drift PASS: cascade destroyed {a_del} children > predicted {p_del} \
+                 (per-op-type pg_stat_xact reconciliation, del channel) → ABORTED"
             );
         }
         other => panic!("expected cascade PkSetDrift / RelationOverWrite, got {other:?}"),

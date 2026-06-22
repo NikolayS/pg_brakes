@@ -34,7 +34,7 @@ use pgb_clone_orchestrator::dry_run::{
     AffectedTable, Measurement, Rehearsal, RelationEffect, WriteKind,
 };
 use pgb_clone_orchestrator::Volatility;
-use pgb_core::blast_radius::ConstraintViolation;
+use pgb_core::blast_radius::{ConstraintViolation, OpCounts};
 use pgb_core::{Clock, LockHeld, LockMode, PkSetBuilder, PkTuple, PkValue, TriggerFired};
 use postgres::types::Type;
 use postgres::{Client, NoTls, Row, Transaction};
@@ -595,42 +595,52 @@ fn locks_on(txn: &mut Transaction, relation: &str) -> Result<Vec<LockHeld>, Stri
     Ok(out)
 }
 
-/// Raw per-relation `n_tup_ins+n_tup_upd+n_tup_del` from `pg_stat_xact_user_tables`
-/// (cumulative within the session). Keyed by `schema.table`.
-fn xact_raw(txn: &mut Transaction) -> Result<BTreeMap<String, i64>, String> {
+/// Raw per-relation `(n_tup_ins, n_tup_upd, n_tup_del)` from
+/// `pg_stat_xact_user_tables` (cumulative within the session). Keyed by
+/// `schema.table`. The three op channels are kept SEPARATE so the dry-run records a
+/// per-op-type footprint (an INSERT footprint must not be conflated with a DELETE).
+fn xact_raw(txn: &mut Transaction) -> Result<BTreeMap<String, (i64, i64, i64)>, String> {
     let rows = txn
         .query(
             "SELECT schemaname || '.' || relname AS rel, \
-                    (n_tup_ins + n_tup_upd + n_tup_del) AS changed \
+                    n_tup_ins, n_tup_upd, n_tup_del \
              FROM pg_stat_xact_user_tables",
             &[],
         )
         .map_err(|e| e.to_string())?;
     Ok(rows
         .iter()
-        .map(|r| (r.get::<_, String>(0), r.get::<_, i64>(1)))
+        .map(|r| {
+            (
+                r.get::<_, String>(0),
+                (r.get::<_, i64>(1), r.get::<_, i64>(2), r.get::<_, i64>(3)),
+            )
+        })
         .collect())
 }
 
-/// The FULL per-relation in-txn change footprint, from `pg_stat_xact_user_tables`
-/// as the DELTA against `baseline` (SPEC §4). One entry per user relation the
-/// rehearsal's forward op changed — target, cascade children, AND trigger-written
-/// tables (e.g. an audit table). The delta cancels prior-session writes (the seed)
-/// that also sit in the cumulative counter. This is the dry-run side of the
-/// symmetric measurement the guarded apply reconciles against.
+/// The FULL per-relation, **per-op-type** in-txn change footprint, from
+/// `pg_stat_xact_user_tables` as the DELTA against `baseline` (SPEC §4). One entry
+/// per user relation the rehearsal's forward op changed — target, cascade children,
+/// AND trigger-written tables (e.g. an audit table) — each with its `ins`/`upd`/
+/// `del` counts. The delta cancels prior-session writes (the seed) that also sit in
+/// the cumulative counter. This is the dry-run side of the symmetric measurement the
+/// guarded apply reconciles against per op channel.
 fn xact_full_effect(
     txn: &mut Transaction,
-    baseline: &BTreeMap<String, i64>,
+    baseline: &BTreeMap<String, (i64, i64, i64)>,
 ) -> Result<Vec<RelationEffect>, String> {
     let after = xact_raw(txn)?;
     let mut out = Vec::new();
-    for (rel, changed) in &after {
-        let base = baseline.get(rel).copied().unwrap_or(0);
-        let delta = (changed - base).max(0) as u64;
-        if delta > 0 {
+    for (rel, (ins, upd, del)) in &after {
+        let (b_ins, b_upd, b_del) = baseline.get(rel).copied().unwrap_or((0, 0, 0));
+        let d_ins = (ins - b_ins).max(0) as u64;
+        let d_upd = (upd - b_upd).max(0) as u64;
+        let d_del = (del - b_del).max(0) as u64;
+        if d_ins + d_upd + d_del > 0 {
             out.push(RelationEffect {
                 relation: rel.clone(),
-                changed: delta,
+                counts: OpCounts::new(d_ins, d_upd, d_del),
             });
         }
     }

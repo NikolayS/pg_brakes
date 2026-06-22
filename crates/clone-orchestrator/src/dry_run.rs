@@ -43,7 +43,7 @@
 
 use std::collections::BTreeMap;
 
-use pgb_core::blast_radius::{Affected, ConstraintViolation};
+use pgb_core::blast_radius::{Affected, ConstraintViolation, OpCounts};
 use pgb_core::{BlastRadius, Clock, InverseKind, LockHeld, LockMode, PkChecksum, TriggerFired};
 
 use crate::predicate::{predicate_volatile_reason, FunctionVolatility, VolatileReason, Volatility};
@@ -68,6 +68,18 @@ impl WriteKind {
         match self {
             WriteKind::Update => InverseKind::for_update(),
             WriteKind::Delete => InverseKind::for_delete(),
+        }
+    }
+
+    /// The op-type footprint of `n` directly-written rows of this kind — `UPDATE`
+    /// ⇒ `upd = n`, `DELETE` ⇒ `del = n`. Used only when the backend did not
+    /// measure the full `pg_stat_xact_*` footprint (older mock), to synthesize a
+    /// per-op-type prediction rather than a collapsed total (cascades of a DELETE
+    /// are also deletes).
+    pub const fn op_counts(self, n: u64) -> OpCounts {
+        match self {
+            WriteKind::Update => OpCounts::new(0, n, 0),
+            WriteKind::Delete => OpCounts::new(0, 0, n),
         }
     }
 }
@@ -134,20 +146,22 @@ pub struct AffectedTable {
     pub rows: u64,
 }
 
-/// One relation's full in-txn change footprint, measured from the rehearsal txn's
-/// `pg_stat_xact_n_tup_{ins,upd,del}` deltas (SPEC §4). This captures the **FULL**
-/// effect of the forward op — target, cascades, **and every relation a fired
-/// trigger wrote to** (e.g. an audit table) — which the guarded apply reconciles
-/// its own deltas against (the "0 catastrophic data-loss FN by construction"
-/// mechanism). A relation the apply touches that is absent here, or with more
-/// changes than recorded here, is drift and aborts the apply.
+/// One relation's full, **per-op-type** in-txn change footprint, measured from the
+/// rehearsal txn's `pg_stat_xact_n_tup_{ins,upd,del}` deltas (SPEC §4). This
+/// captures the **FULL** effect of the forward op — target, cascades, **and every
+/// relation a fired trigger wrote to** (e.g. an audit table) — which the guarded
+/// apply reconciles its own deltas against **per op channel** (the "0 catastrophic
+/// data-loss FN by construction" mechanism). A relation the apply touches that is
+/// absent here, with more changes of any op type than recorded here, or with an op
+/// type the prediction never had, is drift and aborts the apply. Carrying the op
+/// type (not a collapsed total) is what prevents an INSERT-of-N prediction being
+/// silently satisfied by a destructive DELETE of N pre-existing rows.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RelationEffect {
     /// `schema.table`.
     pub relation: String,
-    /// Total rows changed in the relation within the rehearsal txn
-    /// (`n_tup_ins + n_tup_upd + n_tup_del`).
-    pub changed: u64,
+    /// The per-op-type rows changed in the relation within the rehearsal txn.
+    pub counts: OpCounts,
 }
 
 /// Everything the rehearsal measured for one proposed write, before the engine
@@ -407,20 +421,26 @@ fn assemble(
         total_rows = total_rows.saturating_add(cascade.rows);
     }
 
-    // The FULL per-relation change footprint the guarded apply reconciles against
-    // (SPEC §4 `pg_stat_xact_*`): prefer the backend's measured `full_effect`
-    // (target + cascades + trigger-written tables); if the backend did not measure
-    // it, synthesize it from target+cascades so the field is never empty for a
-    // real record (an empty footprint makes the apply refuse, fail-closed).
-    let mut effect_by_table: BTreeMap<String, u64> = BTreeMap::new();
+    // The FULL per-relation, per-op-type change footprint the guarded apply
+    // reconciles against (SPEC §4 `pg_stat_xact_*`): prefer the backend's measured
+    // `full_effect` (target + cascades + trigger-written tables, each as typed
+    // `OpCounts`); if the backend did not measure it, synthesize it from
+    // target+cascades — keyed by the write's op type (an UPDATE writes `upd`, a
+    // DELETE + its cascades write `del`) so the field is never empty AND never
+    // collapses op type (a collapsed total would let an apply-time DELETE satisfy a
+    // predicted INSERT footprint). An empty footprint makes the apply refuse
+    // (fail-closed).
+    let mut effect_by_table: BTreeMap<String, OpCounts> = BTreeMap::new();
     if m.full_effect.is_empty() {
-        effect_by_table.insert(m.target.relation.clone(), m.target.rows);
+        effect_by_table.insert(m.target.relation.clone(), kind.op_counts(m.target.rows));
         for cascade in &m.cascades {
-            effect_by_table.insert(cascade.relation.clone(), cascade.rows);
+            // A cascade of a DELETE deletes the children; for an UPDATE cascade
+            // (ON UPDATE CASCADE) the children are updated — both follow `kind`.
+            effect_by_table.insert(cascade.relation.clone(), kind.op_counts(cascade.rows));
         }
     } else {
         for e in &m.full_effect {
-            effect_by_table.insert(e.relation.clone(), e.changed);
+            effect_by_table.insert(e.relation.clone(), e.counts);
         }
     }
 
@@ -739,9 +759,12 @@ mod tests {
             .pk_set_checksum
             .contains_key("public.order_items"));
         // With no measured full_effect, the footprint is synthesized from
-        // target+cascades so the guarded apply always has something to reconcile.
-        assert_eq!(br.affected.effect_by_table["public.orders"], 2);
-        assert_eq!(br.affected.effect_by_table["public.order_items"], 4);
+        // target+cascades so the guarded apply always has something to reconcile —
+        // keyed by the write's op type (a DELETE writes `del`, NOT a collapsed
+        // total) so the channel reconciliation is well-formed.
+        assert_eq!(br.affected.effect_by_table["public.orders"].del, 2);
+        assert_eq!(br.affected.effect_by_table["public.orders"].upd, 0);
+        assert_eq!(br.affected.effect_by_table["public.order_items"].del, 4);
     }
 
     #[test]
@@ -753,25 +776,29 @@ mod tests {
         let p = propose("DELETE FROM public.orders WHERE id = 1", None, &clock);
         let mut backend = MockRehearsal::with_target("public.orders", &[1]);
         backend.measurement.full_effect = vec![
+            // target + cascade are DELETEs; the audit trigger INSERTs — recorded
+            // per op type so the apply reconciles each channel.
             RelationEffect {
                 relation: "public.orders".into(),
-                changed: 1,
+                counts: OpCounts::new(0, 0, 1),
             },
             RelationEffect {
                 relation: "public.order_items".into(),
-                changed: 3,
+                counts: OpCounts::new(0, 0, 3),
             },
             RelationEffect {
                 relation: "public.orders_audit".into(),
-                changed: 1,
+                counts: OpCounts::new(1, 0, 0),
             },
         ];
         let br = dry_run(&p, &mut backend, &clock).unwrap();
-        assert_eq!(br.affected.effect_by_table["public.orders"], 1);
-        assert_eq!(br.affected.effect_by_table["public.order_items"], 3);
+        assert_eq!(br.affected.effect_by_table["public.orders"].del, 1);
+        assert_eq!(br.affected.effect_by_table["public.order_items"].del, 3);
+        let audit = br.affected.effect_by_table["public.orders_audit"];
         assert_eq!(
-            br.affected.effect_by_table["public.orders_audit"], 1,
-            "the trigger-written audit table is in the measured footprint"
+            audit.ins, 1,
+            "the trigger-written audit table's INSERT is in the measured footprint, typed as ins"
         );
+        assert_eq!(audit.del, 0, "the audit table is INSERT-only, not deleted");
     }
 }
