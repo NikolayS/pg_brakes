@@ -14,6 +14,7 @@
  * Postgres endpoint and is exercised in the integration test; see pgProxy.ts.
  */
 import type { BlockBody } from "../blockContract.js";
+import { isReadOnly } from "../classifier.js";
 import type { IntentTiers } from "../intent.js";
 import type {
   ApplyResult,
@@ -84,6 +85,19 @@ export class FakeProxyTransport implements ProxyTransport {
   }
 
   async explain(sql: string): Promise<PlanResult | { blocked: BlockBody }> {
+    // Defence-in-depth, mirroring PgProxyTransport.explain: the transport refuses
+    // anything not provably a pure read so a write/stacked statement can never
+    // reach the `EXPLAIN ... ${sql}` path (which would execute it on the wire).
+    if (!isReadOnly(sql)) {
+      return {
+        blocked: {
+          code: "READ_ONLY",
+          reason: "the proxy explain path plans read-only statements",
+          remedy: "use propose_write → dry_run → apply_write for changes",
+          retryable: false,
+        },
+      };
+    }
     if (this.nextBlock) {
       const b = this.nextBlock;
       this.nextBlock = undefined;

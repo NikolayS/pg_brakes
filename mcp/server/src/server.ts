@@ -204,6 +204,19 @@ export function createServer(config: ServerConfig): McpServer {
   }
 
   async function explainPlan(args: { sql: string }): Promise<ToolResult<PlanData>> {
+    // explain_plan "plans, never executes" (its contract). Mirror the query tool
+    // EXACTLY: a write/DDL or a stacked statement must NEVER reach the proxy's
+    // `EXPLAIN ... ${sql}` path (which would EXECUTE the second statement). The
+    // classifier is fail-closed: anything not provably a pure read is blocked
+    // here with the same recoverable contract the query tool returns.
+    if (!isReadOnly(args.sql)) {
+      return block(
+        "READ_ONLY",
+        "explain_plan plans read-only statements; this looks like a write/DDL or stacked statement",
+        "use propose_write → dry_run → apply_write for changes",
+        false,
+      );
+    }
     const res = await transport.explain(args.sql);
     if ("blocked" in res) return blockFrom(res.blocked);
     return ok<PlanData>({ plan: res.plan, cost: res.cost });

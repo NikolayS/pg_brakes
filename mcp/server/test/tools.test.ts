@@ -115,14 +115,40 @@ describe("discover_schema + explain_plan (reads through the proxy)", () => {
     expect(res.data.columns[0].table).toBe("orders");
   });
 
-  it("explain_plan returns a plan, never executing the statement", async () => {
+  it("explain_plan returns a plan for a read, never executing the statement", async () => {
     const { server, proxy } = newServer();
-    proxy.setPlan("UPDATE orders SET total = 0", { plan: "Update on orders", cost: 1234 });
-    const res = await server.call("explain_plan", { sql: "UPDATE orders SET total = 0" });
+    proxy.setPlan("SELECT * FROM orders WHERE id = 1", { plan: "Index Scan on orders", cost: 1234 });
+    const res = await server.call("explain_plan", { sql: "SELECT * FROM orders WHERE id = 1" });
     expect(res.status).toBe("ok");
     if (res.status !== "ok") return;
     expect(res.data.cost).toBe(1234);
-    // EXPLAIN must NOT have run the UPDATE as a real query.
+    // EXPLAIN must NOT have run anything as a real query.
+    expect(proxy.executedWrites).toHaveLength(0);
+  });
+
+  it("explain_plan blocks a plain write (mirror the query read-only guard)", async () => {
+    const { server, proxy } = newServer();
+    // The tool's contract is "plans, never executes" — a write must never reach
+    // `EXPLAIN ... ${sql}` (which would execute DDL/DML), so it is blocked here
+    // exactly as the query tool blocks it.
+    const res = await server.call("explain_plan", { sql: "DROP TABLE orders" });
+    expect(isBlock(res)).toBe(true);
+    if (!isBlock(res)) return;
+    expect(res.code).toBe("READ_ONLY");
+    // Recoverable: it points at the write path, not a dead end.
+    expect(res.remedy).toContain("propose_write");
+    // Nothing was forwarded to the proxy as a plan/execution.
+    expect(proxy.executedWrites).toHaveLength(0);
+  });
+
+  it("explain_plan blocks a stacked statement (anti statement-stacking)", async () => {
+    const { server, proxy } = newServer();
+    // The classic hole: a stacked arg whose SECOND statement is a write. The raw
+    // string must never reach `EXPLAIN (FORMAT JSON) SELECT 1; DROP TABLE orders`.
+    const res = await server.call("explain_plan", { sql: "SELECT 1; DROP TABLE orders" });
+    expect(isBlock(res)).toBe(true);
+    if (!isBlock(res)) return;
+    expect(res.code).toBe("READ_ONLY");
     expect(proxy.executedWrites).toHaveLength(0);
   });
 });

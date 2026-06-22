@@ -106,6 +106,21 @@ export class PgProxyTransport implements ProxyTransport {
   }
 
   async explain(sql: string): Promise<PlanResult | { blocked: import("./blockContract.js").BlockBody }> {
+    // Defence-in-depth (mirrors `query` above): the raw caller SQL is about to be
+    // interpolated into `EXPLAIN (FORMAT JSON) ${sql}`. Postgres runs that as a
+    // simple-query string, so a stacked second statement (`SELECT 1; DROP TABLE
+    // victim`) — or a write — WOULD EXECUTE. Refuse anything not provably a pure
+    // read before it can reach the wire. The real guarantee is the proxy/WALL.
+    if (!isReadOnly(sql)) {
+      return {
+        blocked: {
+          code: "READ_ONLY",
+          reason: "the proxy explain path plans read-only statements",
+          remedy: "use propose_write → dry_run → apply_write for changes",
+          retryable: false,
+        },
+      };
+    }
     // EXPLAIN, never EXPLAIN ANALYZE — the statement is planned, not executed.
     const res = await this.client.query(`EXPLAIN (FORMAT JSON) ${sql}`);
     const planRow = res.rows[0] as Record<string, unknown> | undefined;
