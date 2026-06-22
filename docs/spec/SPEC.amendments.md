@@ -380,7 +380,9 @@ seams that connect agent → MCP → proxy → `guarded_apply` → audit, and wa
    `crates/proxy/src/main.rs`); the persistent, anchored `_meta` chain is **not** injected
    into the running proxy (or shared with the CLI). This is the open **S1 follow-up #26**,
    now also an **S4 carry**; unifying + persisting + anchoring one chain across proxy/CLI
-   is **deferred to S5** (#64).
+   is **deferred to S5** (#64). **→ RESOLVED in S5 (#64): see the `## S5` section below —
+   the proxy + CLI now share ONE persistent, anchored `_meta` chain, with a fail-closed
+   startup verify; this S4 deferral no longer holds.**
 
 ### Rationale
 
@@ -566,3 +568,79 @@ deferred (authorized in #52); #65 makes the warden *trip and audit* the breaker,
 running proxy reads that state yet. Unifying the warden/proxy/CLI onto one persisted +
 anchored `_meta` chain is #64 (the warden already appends via the shared `crates/audit`
 API to the same table, so it rebases cleanly onto #64).
+
+---
+
+## S5 audit — ONE shared, persistent, anchored `_meta` chain wired into the proxy + CLI (S4 deferral #5 CLOSED)
+
+**SPEC sections touched:** §3 (hash-chained AUDIT, external anchor, "audited cannot write
+audit"), §4 (`_meta` DB append-only hash-chain), §10.9 (root-of-trust: external WORM anchor,
+KMS key separation, audited principal REVOKEd from writing audit). Build target: §7 S5.
+
+**Issues:** #64 (this work — unify + persist + anchor the audit chain), epic #63. This
+**closes** the S4 disclosure item 5 above (audit `_meta` `PgSink`/anchor were library-only)
+and the S1 follow-up #26 (wire `PgSink` `_meta` into the proxy).
+
+### What this changed — the wiring is now real (not a deferral)
+
+The S4 amendment (item 5) honestly recorded that the `PgSink`/anchor/KMS were **library-only**:
+the proxy (`crates/proxy/src/main.rs`) and the CLI (`crates/cli/src/main.rs`) each built a
+**separate** ephemeral `InMemorySink` chain with an **independent genesis**, the `pg`
+feature/`PgSink` were **not compiled in**, and the external WORM anchor pinned nothing real.
+S5 (#64) wires those known-good libraries into the running binaries:
+
+1. **One shared, persistent chain.** A new `pgb_audit::AuditBoot` (behind the audit crate's
+   `pg` feature, now enabled on both consumers) constructs a single `PgSink`-backed `_meta`
+   chain and wraps it in a new cloneable `pgb_audit::SharedSink`. The proxy `Recorder` is
+   injected with the **exact** `Arc<Mutex<dyn Sink + Send>>` the boot handle wraps
+   (`AuditBoot::sink_arc()`), and the CLI `ApprovalFlow` takes a **clone** of the same
+   `SharedSink` (`AuditBoot::shared_sink()`). A proxy reject and a CLI approve therefore
+   hash-chain into the **same** `_meta` table — **one genesis** (proven end-to-end in
+   `crates/cli/tests/shared_meta_it.rs`: a real proxy `Recorder` REJECT + a real
+   `ApprovalFlow` approve land on one chain with contiguous seqs from a single genesis;
+   `verify_chain` passes).
+
+2. **The chain is anchored.** `AuditBoot` runs the existing `Anchorer` over the **records
+   read back from `_meta`** (a new slice-based `Anchorer::maybe_anchor_records` +
+   `pgb_audit::verify_records_against_anchor`, sharing the identical head extraction
+   `head_of` so an in-memory and a persisted chain pin the same head). The proxy spawns a
+   background tick loop driven by `core::Clock::monotonic_millis` on the configured interval
+   (`PGB_ANCHOR_INTERVAL_MS`, default 60 s); the cadence is mockable (no wall clock — proven
+   in the `AuditBoot` unit tests).
+
+3. **Fail-closed startup verification.** On boot the proxy/CLI anchor a baseline, then call
+   `AuditBoot::startup_verify`: it loads the persisted chain, checks within-chain integrity,
+   and checks the head matches the validly-signed WORM-anchored head. A **full-chain
+   rewrite** (every row re-linked in the table so the within-chain check is blind) is caught
+   as a head mismatch → `BootError::AnchorHeadMismatch` → **refuse to start** (proven against
+   real PG18 in `crates/proxy/tests/audit_meta_it.rs`). A missing anchor is likewise
+   fail-closed.
+
+### S1 invariants preserved
+
+The "audited principal cannot write audit" REVOKE (SPEC §3/§10.9), the within-chain
+tamper detection, and the canonical-JSON hashing are **unchanged**: the `_meta` schema
+(`crates/audit/sql/10_audit_meta.sql`), the `PgSink` INSERT-as-writer path, and
+`AuditPayload::canonical_bytes`/`compute_hash` were **not** touched. The existing
+`crates/audit/tests/pg_meta_it.rs` (including the 42501 REVOKE proof) and the S4 anchor
+tests all stay green. The deterministic floor is untouched — this is audit-coverage
+wiring, it weakens no enforcement.
+
+### Configuration added (proxy `main.rs`; fail-closed)
+
+- `PGB_META_DSN` — the `_meta` **writer** DSN (`pgb_audit_writer` role; never the audited
+  agent). **Required**, no literal default — the proxy refuses to start without somewhere to
+  persist + anchor the canonical chain.
+- `PGB_AUDIT_SIGNING_KEY` — the chain-head signing key material (secret-store seam; prod
+  addresses a KMS key version under the same id). **Required**, no literal default.
+- `PGB_ANCHOR_INTERVAL_MS` — the WORM anchoring cadence in millis (default 60000).
+
+The CLI `demo` runs against the shared `_meta` chain when `PGB_META_DSN` +
+`PGB_AUDIT_SIGNING_KEY` are set (otherwise it stays an in-memory DB-free smoke, unchanged).
+
+### What remains (honest scope)
+
+The local `WormAnchor` is still the in-memory/file append-only **stand-in**; the production
+S3-Object-Lock / transparency-log target and the asymmetric KMS remain the documented
+production swaps behind the `WormAnchor`/`Kms` seams (unchanged from S4). The anchor is now
+**driven by the running binary over the real `_meta` chain**, which is the gap #64 closed.
