@@ -27,6 +27,7 @@
 use std::collections::BTreeMap;
 
 use pgb_clone_orchestrator::dry_run::{AffectedTable, Measurement, Rehearsal, WriteKind};
+use pgb_clone_orchestrator::Volatility;
 use pgb_core::blast_radius::ConstraintViolation;
 use pgb_core::{Clock, LockHeld, LockMode, PkSetBuilder, PkTuple, PkValue, TriggerFired};
 use postgres::types::Type;
@@ -171,9 +172,76 @@ impl<'c, C: Clock> PgRehearsal<'c, C> {
     pub fn new(client: &'c mut Client, clock: &'c C) -> Self {
         PgRehearsal { client, clock }
     }
+
+    /// Look up `pg_proc.provolatile` for `name`, folding overloads to the most
+    /// volatile class. Reads `pg_proc` only (never executes the candidate).
+    ///
+    /// The query bins each matching overload's `provolatile` and asks for the
+    /// most-volatile present (`v` > `s` > `i`), so an overloaded name with any
+    /// volatile overload comes back `VOLATILE`. A schema-qualified name pins the
+    /// namespace; a bare name matches across the schemas on `search_path` via
+    /// `pg_function_is_visible`, mirroring planner resolution.
+    fn resolve_provolatile(&mut self, name: &str) -> Result<Volatility, String> {
+        let (schema, proc_name) = match name.rsplit_once('.') {
+            Some((s, p)) => (Some(s.to_string()), p.to_string()),
+            None => (None, name.to_string()),
+        };
+
+        // Aggregate the most-volatile class among all matching overloads.
+        // bool_or over provolatile letters via a CASE ordering keeps it one query.
+        let sql = r#"
+            SELECT
+                bool_or(p.provolatile = 'v') AS any_volatile,
+                count(*)                      AS n
+            FROM pg_proc p
+            JOIN pg_namespace n ON n.oid = p.pronamespace
+            WHERE p.proname = $1
+              AND ( $2::text IS NULL AND pg_function_is_visible(p.oid)
+                    OR n.nspname = $2::text )
+        "#;
+        let row = self
+            .client
+            .query_one(sql, &[&proc_name, &schema])
+            .map_err(|e| e.to_string())?;
+        let n: i64 = row.get("n");
+        if n == 0 {
+            // No such function visible → cannot prove determinism.
+            return Ok(Volatility::Unknown);
+        }
+        let any_volatile: bool = row.get("any_volatile");
+        if any_volatile {
+            Ok(Volatility::Volatile)
+        } else {
+            // Every matching overload is immutable or stable → safe. We only need
+            // the binary "volatile or not"; collapse the rest to Stable.
+            Ok(Volatility::Stable)
+        }
+    }
 }
 
 impl<C: Clock> Rehearsal for PgRehearsal<'_, C> {
+    /// Resolve a predicate function's `pg_proc.provolatile` class on the live
+    /// connection — the real backing for the §4 volatile-refusal check. `name` is
+    /// the lowercase, dot-joined name as written in the predicate
+    /// (`now`, `pg_catalog.now`, `public.evil_now`).
+    ///
+    /// Resolution rules (fail-closed):
+    /// - schema-qualified `schema.fn` → look up that schema's `fn` only;
+    /// - bare `fn` → resolve against the session `search_path` (`pg_catalog`
+    ///   implicitly included), matching what the planner would pick;
+    /// - **overloaded** name → if *any* matching overload is `VOLATILE` we return
+    ///   [`Volatility::Volatile`] (a single volatile overload is enough to make
+    ///   the predicate unsafe; we cannot know which overload the apply binds);
+    /// - name resolves to no `pg_proc` row → [`Volatility::Unknown`] so the engine
+    ///   refuses (fail-closed) rather than guess.
+    fn volatility_of(&mut self, name: &str) -> Volatility {
+        match self.resolve_provolatile(name) {
+            Ok(v) => v,
+            // A lookup error (bad name / DB error) cannot prove determinism.
+            Err(_) => Volatility::Unknown,
+        }
+    }
+
     fn rehearse(
         &mut self,
         statement: &str,
@@ -601,21 +669,39 @@ fn split_relation(relation: &str) -> (String, String) {
     }
 }
 
-/// Pull the `WHERE …` clause out of a statement (everything after the first
-/// top-level `WHERE`, before any `RETURNING`). Returns `"true"` if there is no
-/// WHERE (a no-WHERE write affects every row). Used to scope cascade capture to
-/// the same rows the forward op will touch.
+/// Extract the **top-level WHERE predicate** of a `DELETE`/`UPDATE` from its
+/// parsed AST and render it back to SQL. Returns `"true"` when there is no WHERE
+/// (a no-WHERE write affects every row). Used to scope cascade capture to exactly
+/// the rows the forward op will touch.
+///
+/// AST-derived (not a `" where "` text slice), so it is robust to a `WHERE` token
+/// that appears inside a subquery / `USING` / a string literal: the parser hands
+/// us the *statement's own* `selection`, never a nested one. Falls back to
+/// `"true"` only if the statement does not parse to a `DELETE`/`UPDATE` (the
+/// engine has already classified it as exactly that before we are called, so this
+/// is defensive).
 fn extract_where(statement: &str) -> String {
-    let lower = statement.to_lowercase();
-    let where_pos = lower.find(" where ");
-    match where_pos {
-        Some(p) => {
-            let after = &statement[p + " where ".len()..];
-            // Trim a trailing RETURNING if present.
-            let after_lower = after.to_lowercase();
-            let end = after_lower.find(" returning ").unwrap_or(after.len());
-            after[..end].trim().to_string()
-        }
+    use sqlparser::ast::{SetExpr, Statement};
+    use sqlparser::dialect::PostgreSqlDialect;
+    use sqlparser::parser::Parser;
+
+    let dialect = PostgreSqlDialect {};
+    let Ok(parsed) = Parser::parse_sql(&dialect, statement) else {
+        return "true".to_string();
+    };
+    let selection = match parsed.first() {
+        Some(Statement::Delete(d)) => d.selection.as_ref(),
+        Some(Statement::Update(u)) => u.selection.as_ref(),
+        // A data-modifying CTE etc. would arrive as a Query; we never reach here
+        // for one (classify refuses non-DELETE/UPDATE), but be defensive.
+        Some(Statement::Query(q)) => match q.body.as_ref() {
+            SetExpr::Select(s) => s.selection.as_ref(),
+            _ => None,
+        },
+        _ => None,
+    };
+    match selection {
+        Some(expr) => expr.to_string(),
         None => "true".to_string(),
     }
 }

@@ -20,10 +20,13 @@
 //!
 //! # Refusals (fail-closed)
 //!
-//! - Volatile predicate (`now()`/`random()`/`clock_timestamp()` …) → REFUSED,
-//!   never executed (SPEC §4) — see [`predicate`].
-//! - PK-less / no-replica-identity target → REFUSED, **no `ctid` fallback**
-//!   (SPEC §10.2).
+//! - Volatile predicate → REFUSED, never executed (SPEC §4) — the WHERE clause is
+//!   AST-walked; non-deterministic special keywords (`now()`/`CURRENT_TIMESTAMP`
+//!   /…) are refused by name and every other function is resolved against
+//!   `pg_proc.provolatile` (volatile/unknown ⇒ refuse, fail-closed). See
+//!   [`predicate`].
+//! - No usable PK / unique-not-null identity → REFUSED, **no `ctid` fallback**
+//!   (SPEC §10.2; `REPLICA IDENTITY` is orthogonal — see [`dry_run::DryRunError::PkLess`]).
 //! - Non-certified shape (DDL/`TRUNCATE`/`INSERT`/…) → REFUSED (default-deny,
 //!   §10.3).
 //!
@@ -44,7 +47,10 @@ pub mod proposal;
 pub use dry_run::{
     classify, dry_run, AffectedTable, DryRunError, Measurement, Rehearsal, WriteKind,
 };
-pub use predicate::{is_volatile, volatile_reason, VolatileReason, VOLATILE_FUNCTIONS};
+pub use predicate::{
+    predicate_volatile_reason, FunctionVolatility, NoFunctionVolatility, VolatileReason,
+    Volatility, NONDETERMINISTIC_KEYWORDS,
+};
 pub use proposal::{propose, propose_with_ttl, Proposal, DEFAULT_TTL_MILLIS};
 
 /// The outcome of comparing the dry-run affected-PK set against the apply-time set.

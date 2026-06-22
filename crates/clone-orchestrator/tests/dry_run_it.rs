@@ -16,6 +16,11 @@
 //!   rows are **UNCHANGED** afterward (the rehearsal rolled back).
 //! - a `DELETE` cascade → child PKs + counts measured.
 //! - a volatile predicate (`… WHERE … > now()`) → **REFUSED**, never executed.
+//! - the AST + `pg_proc.provolatile` refusal vectors (SPEC §4): parenless
+//!   `CURRENT_TIMESTAMP`/`LOCALTIMESTAMP`/`CURRENT_DATE`, a volatile UDF wrapping
+//!   `clock_timestamp()`, and `random()`/`nextval()`/`timeofday()` nested in
+//!   `CASE`/subquery → all **REFUSED** before execution (DB untouched); an
+//!   immutable predicate (`id = 5`, `lower(owner)`) still **proceeds**.
 //! - a PK-less table → **REFUSED** (no `ctid` fallback).
 //! - the §10.1 record round-trips through serde; staleness / locks / wal_bytes
 //!   are populated.
@@ -207,6 +212,123 @@ fn volatile_predicate_is_refused_and_never_executed() {
     );
 
     // The DB is untouched (the statement never ran).
+    assert_eq!(account_balances(&mut client), before);
+    drop_db(&admin, &dbname);
+}
+
+// ---------------------------------------------------------------------------
+//  REFUSE-VOLATILE — the AST + pg_proc.provolatile fix (red→green vectors)
+// ---------------------------------------------------------------------------
+//
+//  Before the fix these predicates were *executed* in the rehearsal and stamped
+//  `predicate_volatile:false`. Now each is REFUSED before any execution, and the
+//  DB is byte-for-byte untouched.
+
+/// One refusal vector: assert `statement` is REFUSED as volatile, never executed,
+/// and the `accounts` balances are unchanged afterward. Shared by the cases.
+fn assert_refused_volatile_untouched(client: &mut postgres::Client, statement: &str) {
+    let before = account_balances(client);
+    let clock = SystemClock::new();
+    let proposal = propose(statement, None, &clock);
+    let err = {
+        let inner_clock = SystemClock::new();
+        let mut backend = PgRehearsal::new(client, &inner_clock);
+        dry_run(&proposal, &mut backend, &clock).unwrap_err()
+    };
+    eprintln!("[refuse-volatile] {statement}\n  => {err}");
+    assert!(
+        matches!(err, DryRunError::Volatile(_)),
+        "must be REFUSED as volatile, got {err:?}"
+    );
+    assert_eq!(
+        account_balances(client),
+        before,
+        "DB must be untouched — the volatile predicate never ran"
+    );
+}
+
+#[test]
+fn parenless_special_keywords_are_refused() {
+    let Some((admin, dbname, mut client)) = setup("kw_volatile") else {
+        return;
+    };
+    // The headline bypass: parenless CURRENT_TIMESTAMP behind a cast.
+    assert_refused_volatile_untouched(
+        &mut client,
+        "UPDATE public.accounts SET balance = 0 WHERE owner < CURRENT_TIMESTAMP::text",
+    );
+    assert_refused_volatile_untouched(
+        &mut client,
+        "UPDATE public.accounts SET balance = 0 WHERE owner < LOCALTIMESTAMP::text",
+    );
+    assert_refused_volatile_untouched(
+        &mut client,
+        "UPDATE public.accounts SET balance = 0 WHERE balance > EXTRACT(epoch FROM CURRENT_DATE)",
+    );
+    drop_db(&admin, &dbname);
+}
+
+#[test]
+fn volatile_udf_and_builtins_are_refused_via_provolatile() {
+    let Some((admin, dbname, mut client)) = setup("udf_volatile") else {
+        return;
+    };
+    // A genuinely volatile UDF wrapping clock_timestamp() — caught ONLY by
+    // pg_proc.provolatile (it is on no name denylist).
+    client
+        .batch_execute(
+            "CREATE FUNCTION public.evil_now() RETURNS timestamptz \
+             LANGUAGE sql VOLATILE AS $$ SELECT clock_timestamp() $$;",
+        )
+        .expect("create volatile UDF");
+    assert_refused_volatile_untouched(
+        &mut client,
+        "UPDATE public.accounts SET balance = 0 WHERE owner > public.evil_now()::text",
+    );
+    // Volatile built-ins nested in CASE / subquery / cast — the AST walk reaches
+    // them and provolatile='v' refuses.
+    assert_refused_volatile_untouched(
+        &mut client,
+        "UPDATE public.accounts SET balance = 0 \
+         WHERE id = (CASE WHEN random() < 0.5 THEN 1 ELSE 2 END)",
+    );
+    assert_refused_volatile_untouched(
+        &mut client,
+        "DELETE FROM public.accounts \
+         WHERE id IN (SELECT id FROM public.accounts WHERE balance > nextval('public.ticket_seq'))",
+    );
+    assert_refused_volatile_untouched(
+        &mut client,
+        "UPDATE public.accounts SET balance = 0 WHERE owner < timeofday()",
+    );
+    drop_db(&admin, &dbname);
+}
+
+#[test]
+fn immutable_predicate_is_not_over_refused() {
+    let Some((admin, dbname, mut client)) = setup("immutable_ok") else {
+        return;
+    };
+    // lower() is IMMUTABLE and `id = 5` has no function — neither must be refused.
+    // They run, preview, and roll back (balances unchanged).
+    let before = account_balances(&mut client);
+    let clock = SystemClock::new();
+    for statement in [
+        "UPDATE public.accounts SET balance = 0 WHERE id = 5",
+        "UPDATE public.accounts SET balance = 0 WHERE lower(owner) = 'owner-3'",
+    ] {
+        let proposal = propose(statement, None, &clock);
+        let inner_clock = SystemClock::new();
+        let mut backend = PgRehearsal::new(&mut client, &inner_clock);
+        let br = dry_run(&proposal, &mut backend, &clock).unwrap_or_else(|e| {
+            panic!("immutable predicate `{statement}` must proceed, got {e:?}")
+        });
+        assert!(
+            !br.predicate_volatile,
+            "an immutable/stable predicate must record predicate_volatile=false"
+        );
+    }
+    // Still rolled back — no false-positive and no persistence.
     assert_eq!(account_balances(&mut client), before);
     drop_db(&admin, &dbname);
 }

@@ -22,12 +22,18 @@
 //!
 //! Two classes are refused **before any forward execution**:
 //!
-//! - **Volatile/non-deterministic predicate** (`now()`/`random()`/
-//!   `clock_timestamp()` …, SPEC §4): the dry-run/apply equivalence is unsafe,
-//!   so the statement is [`DryRunError::Volatile`] and never run.
-//! - **PK-less / no-replica-identity target** (SPEC §10.2): affected rows cannot
-//!   be safely identified across the dry-run/apply boundary, so the write is
-//!   [`DryRunError::PkLess`] — **no `ctid` fallback**.
+//! - **Volatile/non-deterministic predicate** (SPEC §4): the WHERE predicate is
+//!   AST-walked; the non-deterministic special keywords
+//!   (`now()`/`CURRENT_TIMESTAMP`/`CURRENT_DATE`/…) are refused by name, and every
+//!   other predicate function is resolved against `pg_proc.provolatile` on the
+//!   live connection (`'v'` → refuse; **unknown → refuse, fail-closed**). This
+//!   catches volatile built-ins (`random`/`clock_timestamp`/`nextval`/…) and
+//!   volatile UDFs alike. The statement is [`DryRunError::Volatile`] and never
+//!   run.
+//! - **No usable PK / unique-not-null identity** (SPEC §10.2): affected rows
+//!   cannot be keyed across the dry-run/apply boundary, so the write is
+//!   [`DryRunError::PkLess`] — **no `ctid` fallback**. (A PK-bearing table with
+//!   `REPLICA IDENTITY NOTHING` still proceeds — see [`DryRunError::PkLess`].)
 //!
 //! The orchestration (parse → refuse → measure → assemble → rollback) is
 //! DB-free and unit-tested against a mock [`Rehearsal`]; the real PG18 backend
@@ -38,7 +44,7 @@ use std::collections::BTreeMap;
 use pgb_core::blast_radius::{Affected, ConstraintViolation};
 use pgb_core::{BlastRadius, Clock, InverseKind, LockHeld, LockMode, PkChecksum, TriggerFired};
 
-use crate::predicate::{volatile_reason, VolatileReason};
+use crate::predicate::{predicate_volatile_reason, FunctionVolatility, VolatileReason, Volatility};
 use crate::proposal::Proposal;
 
 /// The statement class the dry-run engine recognizes (advisory parse, SPEC §4).
@@ -79,11 +85,26 @@ pub enum DryRunError {
     #[error("REFUSED: statement is not a rehearsable certified write ({0})")]
     NotRehearsable(String),
 
-    /// The target relation has no usable primary key / replica identity, so the
-    /// affected-PK set cannot be computed — **REFUSED, no `ctid` fallback**
-    /// (SPEC §10.2).
+    /// The target relation has **no usable identity** — no primary key and no
+    /// unique-not-null index — so the affected-row set cannot be keyed across the
+    /// dry-run/apply boundary. **REFUSED, no `ctid` fallback** (SPEC §10.2).
+    ///
+    /// ## §10.2 mapping: PK-set capture vs. REPLICA IDENTITY
+    ///
+    /// The affected-row set is keyed on the **primary key** (or, absent a PK, a
+    /// unique-not-null index) — this is what `RETURNING`/pre-image captures and
+    /// what the checksum hashes. That on-disk identity is **orthogonal** to a
+    /// table's `REPLICA IDENTITY` setting, which governs what a *logical-
+    /// replication* `UPDATE`/`DELETE` WAL record carries for downstream
+    /// subscribers. SPEC §10.2's "PK-less / no-replica-identity" is naming the
+    /// **genuinely identity-less** case (no key at all); it is not asking us to
+    /// refuse a PK-bearing table merely because its `REPLICA IDENTITY` is
+    /// `NOTHING`/`DEFAULT`. Consequence: a PK-bearing table with
+    /// `REPLICA IDENTITY NOTHING` **proceeds** (we capture the PK exactly), and
+    /// we refuse only when there is no usable PK / unique-not-null identity — the
+    /// real PK-less case this error names.
     #[error(
-        "REFUSED: target relation `{0}` is PK-less / has no replica identity (no ctid fallback)"
+        "REFUSED: target relation `{0}` has no usable PK / unique-not-null identity (no ctid fallback)"
     )]
     PkLess(String),
 
@@ -151,6 +172,25 @@ pub struct Measurement {
 /// bracket so that the "always rolled back, nothing persisted" property is
 /// enforced where the DB connection actually lives.
 pub trait Rehearsal {
+    /// Resolve the `pg_proc.provolatile` class of a predicate function `name`
+    /// **without executing the candidate statement** (a read of `pg_proc` only).
+    ///
+    /// The engine calls this — once per distinct function in the predicate —
+    /// *before* [`rehearse`](Rehearsal::rehearse), so a volatile UDF or built-in
+    /// is refused before any forward execution (SPEC §4). `name` is lowercase and
+    /// dot-joined as written (`now`, `pg_catalog.now`, `public.evil_now`); the
+    /// implementor resolves it the way Postgres would (search_path / qualified)
+    /// and **MUST** return [`Volatility::Unknown`] rather than guessing when it
+    /// cannot determine the class, so the engine fails closed.
+    ///
+    /// The default implementation returns [`Volatility::Unknown`] — a backend
+    /// with no `pg_proc` access thereby refuses every non-keyword predicate
+    /// function (fail-closed). Real backends override it.
+    fn volatility_of(&mut self, name: &str) -> Volatility {
+        let _ = name;
+        Volatility::Unknown
+    }
+
     /// Rehearse `statement` (a certified `kind` write on `target_relation`) in a
     /// rolled-back transaction and return the [`Measurement`].
     ///
@@ -163,6 +203,16 @@ pub trait Rehearsal {
         kind: WriteKind,
         target_relation: &str,
     ) -> Result<Measurement, String>;
+}
+
+/// Adapts a `&mut dyn Rehearsal` to the [`FunctionVolatility`] resolver seam so
+/// the DB-free predicate check can consult the backend's `pg_proc` lookup.
+struct RehearsalVolatility<'a>(&'a mut dyn Rehearsal);
+
+impl FunctionVolatility for RehearsalVolatility<'_> {
+    fn volatility_of(&mut self, name: &str) -> Volatility {
+        self.0.volatility_of(name)
+    }
 }
 
 /// Classify the proposed statement (advisory `sqlparser` parse, §4): is it a
@@ -246,8 +296,11 @@ fn stmt_label(stmt: &sqlparser::ast::Statement) -> &'static str {
 ///
 /// Pipeline (all fail-closed):
 /// 1. **TTL** — refuse an expired proposal.
-/// 2. **Volatile predicate** — refuse `now()`/`random()`/… *before* executing.
-/// 3. **Classify** — refuse non-certified shapes (DDL/TRUNCATE/unknown).
+/// 2. **Classify** — refuse non-certified shapes (DDL/TRUNCATE/unknown).
+/// 3. **Volatile predicate** — AST-walk the WHERE predicate and refuse
+///    `now()`/`CURRENT_TIMESTAMP`/`random()`/a volatile UDF *before* executing,
+///    resolving function volatility from the backend's `pg_proc` (fail-closed on
+///    unknown). Steps 2–3 only parse / read `pg_proc`; no forward write runs.
 /// 4. **Rehearse** — the backend runs the statement in a rolled-back txn and
 ///    measures the blast radius (PK set + cascades + triggers + locks + WAL +
 ///    duration + LSN/staleness).
@@ -267,13 +320,24 @@ pub fn dry_run(
         return Err(DryRunError::Expired(proposal.id.clone()));
     }
 
-    // (2) Volatile/non-deterministic predicate — REFUSED, never executed (§4).
-    if let Some(reason) = volatile_reason(&proposal.statement) {
-        return Err(DryRunError::Volatile(reason));
-    }
-
-    // (3) Classify the certified write shape + target relation (advisory parse).
+    // (2) Classify the certified write shape + target relation (advisory parse).
+    //     Refusing non-certified shapes first gives the precise default-deny
+    //     message; it touches the DB for nothing (pure parse).
     let (kind, target_relation) = classify(&proposal.statement)?;
+
+    // (3) Volatile/non-deterministic predicate — REFUSED, never executed (§4).
+    //     AST-based: walks the WHERE predicate, refuses the non-deterministic
+    //     special keywords by name and resolves every other function against the
+    //     backend's `pg_proc.provolatile` (`Rehearsal::volatility_of`). This is a
+    //     `pg_proc` *read* only — the candidate statement is never executed — and
+    //     it is fail-closed (unknown volatility ⇒ refuse). It happens *before*
+    //     `rehearse`, so the DB write never runs on a non-deterministic predicate.
+    {
+        let mut resolver = RehearsalVolatility(rehearsal);
+        if let Some(reason) = predicate_volatile_reason(&proposal.statement, &mut resolver) {
+            return Err(DryRunError::Volatile(reason));
+        }
+    }
 
     // (4) Rehearse in a rolled-back txn (the backend owns BEGIN/ROLLBACK).
     let measurement = rehearsal
@@ -420,6 +484,20 @@ mod tests {
     }
 
     impl Rehearsal for MockRehearsal {
+        /// A stand-in `pg_proc` resolver for the unit tests: a small known-class
+        /// table, `Unknown` (fail-closed) otherwise — matching how the real
+        /// `pg_proc`-backed backend behaves for an unresolvable name.
+        fn volatility_of(&mut self, name: &str) -> Volatility {
+            let bare = name.rsplit('.').next().unwrap_or(name);
+            match bare {
+                "lower" | "upper" | "abs" | "length" => Volatility::Immutable,
+                "random" | "clock_timestamp" | "nextval" | "timeofday" | "evil_now" => {
+                    Volatility::Volatile
+                }
+                _ => Volatility::Unknown,
+            }
+        }
+
         fn rehearse(
             &mut self,
             statement: &str,
@@ -500,6 +578,75 @@ mod tests {
         assert!(
             backend.rehearsed.is_none(),
             "volatile statement must not reach the rehearsal backend"
+        );
+    }
+
+    #[test]
+    fn parenless_current_timestamp_is_refused_before_rehearsal() {
+        // RED before the fix: the substring scan required `name(`, so the
+        // parenless CURRENT_TIMESTAMP slipped past and was executed with
+        // predicate_volatile:false. Now it is refused before the backend runs.
+        let clock = MockClock::new();
+        let p = propose(
+            "UPDATE public.accounts SET balance = 0 WHERE owner < CURRENT_TIMESTAMP::text",
+            None,
+            &clock,
+        );
+        let mut backend = MockRehearsal::with_target("public.accounts", &[1, 2, 3]);
+        let err = dry_run(&p, &mut backend, &clock).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                DryRunError::Volatile(VolatileReason::NondeterministicKeyword(_))
+            ),
+            "got {err:?}"
+        );
+        assert!(
+            backend.rehearsed.is_none(),
+            "parenless CURRENT_TIMESTAMP must not reach the rehearsal backend"
+        );
+    }
+
+    #[test]
+    fn volatile_udf_is_refused_before_rehearsal_via_provolatile() {
+        // RED before the fix: evil_now() is on no denylist, so the substring scan
+        // executed it. Now the backend's pg_proc.provolatile='v' refuses it.
+        let clock = MockClock::new();
+        let p = propose(
+            "UPDATE public.accounts SET balance = 0 WHERE owner > evil_now()::text",
+            None,
+            &clock,
+        );
+        let mut backend = MockRehearsal::with_target("public.accounts", &[1, 2, 3]);
+        let err = dry_run(&p, &mut backend, &clock).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                DryRunError::Volatile(VolatileReason::VolatileFunction(_))
+            ),
+            "got {err:?}"
+        );
+        assert!(
+            backend.rehearsed.is_none(),
+            "volatile UDF must not be rehearsed"
+        );
+    }
+
+    #[test]
+    fn immutable_function_predicate_still_proceeds() {
+        // No over-refusal: lower() is IMMUTABLE → the dry-run runs as normal.
+        let clock = MockClock::new();
+        let p = propose(
+            "UPDATE public.orders SET balance = 0 WHERE lower(owner) = 'x'",
+            None,
+            &clock,
+        );
+        let mut backend = MockRehearsal::with_target("public.orders", &[1, 2, 3]);
+        let br = dry_run(&p, &mut backend, &clock).expect("immutable predicate proceeds");
+        assert!(!br.predicate_volatile);
+        assert!(
+            backend.rehearsed.is_some(),
+            "immutable predicate must be rehearsed"
         );
     }
 

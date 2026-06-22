@@ -21,7 +21,7 @@ pgb-core = { path = "../core" }
 # extract its target relation + volatile-function references. Apache-2.0; already
 # in the workspace tree (pgwire). Built from the SPEC + the public sqlparser AST
 # only — clean-room (no pgDog).
-sqlparser = "0.62"
+sqlparser = { version = "0.62", features = ["visitor"] }
 # §10.1 BlastRadius JSON emission round-trips through serde.
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
