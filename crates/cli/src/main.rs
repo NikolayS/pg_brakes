@@ -89,32 +89,50 @@ fn run_demo() -> Result<(), String> {
         std::env::var("PGB_AUDIT_SIGNING_KEY").ok(),
     ) {
         (Some(dsn), Some(key)) if !dsn.is_empty() && !key.is_empty() => {
-            // SHARED `_meta` path: build the boot handle, run the flow against a
-            // clone of its shared sink, then anchor + fail-closed verify.
+            // SHARED `_meta` path: build the boot handle over a DURABLE WORM,
+            // FAIL-CLOSED verify-before-anchor on boot (the prior durable head must
+            // match the persisted chain), run the flow against a clone of its
+            // shared sink, then anchor the newly-extended head forward.
             let interval_ms: u64 = std::env::var("PGB_ANCHOR_INTERVAL_MS")
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(60_000);
+            // The durable anchor path: persisted across restarts so the boot can
+            // verify against the prior head before re-anchoring (fail-closed).
+            let anchor_path = std::env::var("PGB_ANCHOR_PATH").map_err(|_| {
+                "PGB_ANCHOR_PATH is required (the durable WORM anchor path) and has no \
+                 default — the cross-restart tamper-evidence guarantee needs it"
+                    .to_string()
+            })?;
+            if anchor_path.is_empty() {
+                return Err("PGB_ANCHOR_PATH is set but empty; refusing (fail-closed)".to_string());
+            }
             let mut store = LocalSecretStore::new();
             store
                 .put(AUDIT_SIGNING_KEY_ID, key.as_bytes())
                 .map_err(|e| e.to_string())?;
-            let mut boot = AuditBoot::connect(&dsn, &store, interval_ms)
+            let mut boot = AuditBoot::connect_with_anchor(&dsn, &store, interval_ms, &anchor_path)
                 .map_err(|e| format!("audit _meta boot failed (fail-closed): {e}"))?;
-            let audit = boot.shared_sink();
 
+            // VERIFY BEFORE ANCHOR on boot: the persisted chain must match the
+            // PRIOR durable anchored head (catches an offline full-chain rewrite
+            // across a restart); only then anchor the current head forward. Genesis
+            // first run (empty durable WORM) anchors the baseline.
+            boot.verify_then_anchor(clock.monotonic_millis())
+                .map_err(|e| {
+                    format!("audit `_meta` startup verification failed (fail-closed): {e}")
+                })?;
+
+            let audit = boot.shared_sink();
             run_flow(audit, &signing_key, verifying_key, &clock)?;
 
-            // Anchor the head we just extended, then fail-closed verify the
-            // canonical chain against the anchored head.
+            // Anchor the head we just extended forward (durably).
             boot.maybe_anchor(clock.monotonic_millis())
                 .map_err(|e| format!("audit anchor failed: {e}"))?;
-            boot.startup_verify()
-                .map_err(|e| format!("audit `_meta` chain verification failed: {e}"))?;
             let n = boot.load_chain().map(|c| c.len()).unwrap_or(0);
             println!(
-                "audit: {n} records on the SHARED, anchored `_meta` chain; \
-                 chain verified against its anchored head"
+                "audit: {n} records on the SHARED, durably-anchored `_meta` chain; \
+                 chain verified against its prior anchored head before extending"
             );
             Ok(())
         }

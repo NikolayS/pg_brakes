@@ -13,11 +13,18 @@
 //!   1. the proxy `Recorder` — injected with the SAME shared sink the
 //!      [`AuditBoot`] wraps — records a real **REJECT** onto the **persistent**
 //!      `_meta` chain (one genesis), which then `verify_chain`s;
-//!   2. the [`AuditBoot`] anchors that canonical chain and the anchored head
-//!      **matches** the chain head; the fail-closed `startup_verify` passes;
-//!   3. a **full-chain rewrite** (every record re-linked in the table) is caught
-//!      at startup `verify_against_anchor` → fail-closed (`startup_verify` errs);
-//!   4. the writer DSN is the audit-writer role (never the audited agent).
+//!   2. the [`AuditBoot`] anchors that canonical chain (to a DURABLE file-backed
+//!      WORM) and the anchored head **matches** the chain head; `verify_then_anchor`
+//!      passes;
+//!   3. **the real cross-restart hole**: boot1 writes honest records + anchors to a
+//!      DURABLE WORM file; the `_meta` rows are then offline-rewritten into a
+//!      consistent forged chain; a **fresh boot2** over the SAME durable WORM file
+//!      calling the ACTUAL [`AuditBoot::verify_then_anchor`] (verify-BEFORE-anchor)
+//!      **REFUSES to start** (`BootError::AnchorHeadMismatch`) — not a test-local
+//!      mirror, the real boot path;
+//!   4. a positive control: an **untampered** restart over the same durable WORM
+//!      verifies and proceeds;
+//!   5. the writer DSN is the audit-writer role (never the audited agent).
 //!
 //! Connection: `PG_BUMPERS_AUDIT_PGURL` (admin/superuser) or the default below —
 //! the dedicated PG18 audit cluster on **55432**. NEVER 5432.
@@ -34,6 +41,20 @@ use pgb_audit::{
 use pgb_core::{Clock, MockClock};
 use pgb_proxy::Recorder;
 use postgres::{Client, NoTls};
+
+/// A fresh, unique durable WORM anchor file path under the temp dir (modelling
+/// the object-lock / transparency-log retention the operator cannot rewrite).
+fn fresh_anchor_path(tag: &str) -> std::path::PathBuf {
+    let p = std::env::temp_dir().join(format!(
+        "pgb_proxy_s5_anchor_{tag}_{}.worm",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let _ = std::fs::remove_file(&p);
+    p
+}
 
 const DEFAULT_ADMIN_PGURL: &str = "host=127.0.0.1 port=55432 user=postgres dbname=postgres";
 
@@ -118,8 +139,8 @@ fn store_with_key() -> LocalSecretStore {
 }
 
 /// (1)+(2): a real proxy REJECT lands on the persistent `_meta` chain (one
-/// genesis), the chain verifies, the anchored head matches, and the fail-closed
-/// `startup_verify` passes.
+/// genesis), the chain verifies, and the real fail-closed boot sequence
+/// (`verify_then_anchor`) anchors it to a DURABLE WORM file and passes.
 #[test]
 fn proxy_reject_persists_and_anchored_head_matches() {
     if !it_enabled() {
@@ -127,11 +148,13 @@ fn proxy_reject_persists_and_anchored_head_matches() {
         return;
     }
     let (writer_dsn, _admin) = setup_fresh_db("anchor");
+    let anchor_path = fresh_anchor_path("anchor");
     let clock = MockClock::starting_at(1_700_000_000_000);
 
-    // Build the boot handle over the real `_meta` writer DSN, interval 10s.
+    // Build the boot handle over the real `_meta` writer DSN + DURABLE WORM file.
     let mut boot =
-        AuditBoot::connect(&writer_dsn, &store_with_key(), 10_000).expect("audit _meta boot");
+        AuditBoot::connect_with_anchor(&writer_dsn, &store_with_key(), 10_000, &anchor_path)
+            .expect("audit _meta boot");
 
     // Inject the SAME shared sink into the proxy Recorder.
     let sink_arc: Arc<Mutex<dyn Sink + Send>> = boot.sink_arc();
@@ -159,76 +182,26 @@ fn proxy_reject_persists_and_anchored_head_matches() {
     assert!(records[0].payload.statement_text.contains("DROP SCHEMA"));
     verify_chain(&records).expect("persisted chain verifies");
 
-    // Anchor the canonical chain; the anchored head must match the chain head.
-    let anchored = boot
-        .maybe_anchor(clock.monotonic_millis())
-        .expect("anchor ok")
-        .expect("first tick anchors");
+    // The REAL fail-closed boot sequence: genesis (empty durable WORM) ⇒ anchor
+    // the baseline. Passes on the honest chain.
+    boot.verify_then_anchor(clock.monotonic_millis())
+        .expect("verify_then_anchor passes on honest chain (genesis baseline)");
+
+    // The durable WORM file now pins the chain head.
+    let anchored = boot.worm().latest().expect("baseline anchored to file");
     assert_eq!(
         anchored.head_hash,
         records.last().unwrap().record_hash,
         "anchored head == persisted chain head"
     );
-
-    // Fail-closed startup verify passes on the honest, anchored chain.
-    boot.startup_verify()
-        .expect("startup verify passes on honest anchored chain");
-    eprintln!("[it] proxy REJECT persisted on `_meta`; anchored head matches; startup verify OK");
+    let _ = std::fs::remove_file(&anchor_path);
+    eprintln!("[it] proxy REJECT persisted on `_meta`; durable anchor head matches; boot OK");
 }
 
-/// (3): a full-chain rewrite in the table is caught at startup `verify_against_anchor`
-/// → fail-closed refuse-to-start.
-#[test]
-fn full_chain_rewrite_in_table_is_caught_at_startup() {
-    if !it_enabled() {
-        eprintln!("[skip] set PG_BUMPERS_IT=1 to run the proxy S5 full-chain-rewrite test");
-        return;
-    }
-    let (writer_dsn, mut admin) = setup_fresh_db("rewrite");
-    let clock = MockClock::starting_at(1_700_000_000_000);
-
-    let mut boot =
-        AuditBoot::connect(&writer_dsn, &store_with_key(), 10_000).expect("audit _meta boot");
-    let sink_arc: Arc<Mutex<dyn Sink + Send>> = boot.sink_arc();
-    let recorder = Recorder::new(
-        sink_arc,
-        Arc::new(clock.clone()) as Arc<dyn Clock>,
-        "pgb_agent",
-    );
-
-    // Two records: a BLOCK then a REJECT.
-    recorder
-        .block("s", "UPDATE t SET x=1", "write_on_readonly", None)
-        .unwrap();
-    recorder
-        .reject("s", "COPY t FROM STDIN", "copy_rejected", None)
-        .unwrap();
-
-    // Anchor the honest head + confirm startup verify passes.
-    boot.maybe_anchor(clock.monotonic_millis())
-        .unwrap()
-        .unwrap();
-    boot.startup_verify().expect("honest chain passes");
-    let honest_head = boot
-        .load_chain()
-        .unwrap()
-        .last()
-        .unwrap()
-        .record_hash
-        .clone();
-
-    // ATTACK: a privileged operator rewrites the WHOLE chain in the table,
-    // flipping the BLOCK (seq 0) to an ALLOW and re-sealing + re-linking EVERY
-    // row so the within-chain `verify_chain` is happy. Disable the append-only
-    // trigger (models an operator with direct table access).
-    admin
-        .batch_execute("ALTER TABLE pgb_audit.audit_log DISABLE TRIGGER audit_log_no_mutation")
-        .expect("disable trigger for forced rewrite");
-
-    // Recompute the canonical bytes the chain would have for the tampered rows,
-    // using the SAME audit sealing so the forged chain is internally consistent.
-    // We rebuild it in-process via an InMemorySink seeded with the tampered
-    // entries, then UPDATE each table row to the forged payload + hashes.
+/// Build the forged `_meta` rows in-process (the SAME audit sealing, so the
+/// chain is internally consistent) with the BLOCK at seq 0 flipped to ALLOW, then
+/// overwrite every row in the live table. Returns the forged records.
+fn forge_meta_rows_in_table(admin: &mut Client) -> Vec<pgb_audit::AuditRecord> {
     use pgb_audit::{InMemorySink, NewEntry, Principal};
     use pgb_policy::IntentTiers;
     let mk = |role: &str, sql: &str, dec: Decision, code: &str| NewEntry {
@@ -267,15 +240,13 @@ fn full_chain_rewrite_in_table_is_caught_at_startup() {
         )
         .unwrap();
     let forged_records = forged.load_chain().unwrap();
-    // The forged chain is internally consistent but has a DIFFERENT head.
-    verify_chain(&forged_records).expect("forged chain internally consistent");
-    assert_ne!(
-        forged_records.last().unwrap().record_hash,
-        honest_head,
-        "rewrite changed the head"
-    );
+    verify_chain(&forged_records).expect("forged chain internally consistent (S1 blind)");
 
-    // Overwrite every row in the table with the forged payload + hashes.
+    // Disable the append-only trigger (models a privileged operator with direct
+    // table access), overwrite every row, re-enable.
+    admin
+        .batch_execute("ALTER TABLE pgb_audit.audit_log DISABLE TRIGGER audit_log_no_mutation")
+        .expect("disable trigger for forced rewrite");
     for rec in &forged_records {
         let payload_text = String::from_utf8(rec.payload.canonical_bytes()).unwrap();
         admin
@@ -294,54 +265,142 @@ fn full_chain_rewrite_in_table_is_caught_at_startup() {
     admin
         .batch_execute("ALTER TABLE pgb_audit.audit_log ENABLE TRIGGER audit_log_no_mutation")
         .expect("re-enable trigger");
-
-    // A NEW boot handle (a fresh process restart) loads the rewritten table and
-    // must REFUSE TO START: the within-chain check passes (the rewrite is
-    // consistent), but the anchored head no longer matches.
-    let mut boot2 =
-        AuditBoot::connect(&writer_dsn, &store_with_key(), 10_000).expect("reconnect boot");
-    // Re-anchor would re-pin the forged head, so we DON'T anchor here — we verify
-    // against the WORM anchor carried by the still-live `boot` from the honest
-    // run. In production the WORM anchor is external + append-only; here we assert
-    // the rewritten chain fails against the honest anchor.
-    let rewritten = boot2.load_chain().unwrap();
-    verify_chain(&rewritten).expect("rewritten chain is internally consistent (S1 blind)");
-    let err = pgb_audit::verify_records_against_anchor(&rewritten, boot.worm());
-    match err {
-        Ok(pgb_audit::AnchorVerification::HeadMismatch { actual_head, .. }) => {
-            assert_eq!(actual_head, forged_records.last().unwrap().record_hash);
-            eprintln!("[it] full-chain rewrite in `_meta` CAUGHT at startup verify (HeadMismatch)");
-        }
-        other => panic!("expected HeadMismatch on full-chain rewrite, got {other:?}"),
-    }
-
-    // And the boot-level fail-closed wrapper turns that into a refuse-to-start
-    // error when the boot handle carries the honest anchor.
-    let startup = startup_verify_against(&rewritten, boot.worm());
-    assert!(
-        matches!(startup, Err(BootError::AnchorHeadMismatch { .. })),
-        "startup must fail closed on a full-chain rewrite, got {startup:?}"
-    );
+    forged_records
 }
 
-/// Mirror of `AuditBoot::startup_verify`'s decision logic over an explicit
-/// (record-slice, worm) pair, so the test can assert the boot-level fail-closed
-/// error type against the honest anchor from a prior run.
-fn startup_verify_against(
-    records: &[pgb_audit::AuditRecord],
-    worm: &pgb_audit::WormAnchor,
-) -> Result<(), BootError> {
-    verify_chain(records).map_err(BootError::ChainIntegrity)?;
-    match pgb_audit::verify_records_against_anchor(records, worm)? {
-        pgb_audit::AnchorVerification::Verified => Ok(()),
-        pgb_audit::AnchorVerification::HeadMismatch {
-            anchored_head,
-            actual_head,
-            anchored_seq,
-        } => Err(BootError::AnchorHeadMismatch {
-            anchored_head,
-            actual_head,
-            anchored_seq,
-        }),
+/// (3) THE BLOCKER FIX, proven via the REAL boot path: boot1 writes honest
+/// records and anchors to a DURABLE WORM file; the `_meta` rows are offline-
+/// rewritten into a consistent forged chain; a **fresh boot2** over the SAME
+/// durable WORM file calls the ACTUAL `AuditBoot::verify_then_anchor` (verify-
+/// BEFORE-anchor) and must **REFUSE TO START** with `AnchorHeadMismatch`.
+#[test]
+fn full_chain_rewrite_in_table_is_caught_at_startup() {
+    if !it_enabled() {
+        eprintln!("[skip] set PG_BUMPERS_IT=1 to run the proxy S5 full-chain-rewrite test");
+        return;
     }
+    let (writer_dsn, mut admin) = setup_fresh_db("rewrite");
+    let anchor_path = fresh_anchor_path("rewrite");
+    let clock = MockClock::starting_at(1_700_000_000_000);
+
+    // --- boot1 (honest run): write a BLOCK + REJECT, anchor to the DURABLE WORM. ---
+    {
+        let mut boot1 =
+            AuditBoot::connect_with_anchor(&writer_dsn, &store_with_key(), 10_000, &anchor_path)
+                .expect("audit _meta boot1");
+        let sink_arc: Arc<Mutex<dyn Sink + Send>> = boot1.sink_arc();
+        let recorder = Recorder::new(
+            sink_arc,
+            Arc::new(clock.clone()) as Arc<dyn Clock>,
+            "pgb_agent",
+        );
+        recorder
+            .block("s", "UPDATE t SET x=1", "write_on_readonly", None)
+            .unwrap();
+        recorder
+            .reject("s", "COPY t FROM STDIN", "copy_rejected", None)
+            .unwrap();
+        // REAL boot sequence: genesis (empty durable WORM) ⇒ verify (nothing to
+        // verify against) + anchor the honest head to the file. Persisted on disk.
+        boot1
+            .verify_then_anchor(clock.monotonic_millis())
+            .expect("boot1 anchors honest head to the durable WORM");
+        // boot1 process "exits" here — the durable anchor file remains.
+    }
+    let honest_head = anchor_head_in_file(&anchor_path);
+
+    // --- ATTACK: offline full-chain rewrite of the `_meta` rows (BLOCK→ALLOW). ---
+    let forged_records = forge_meta_rows_in_table(&mut admin);
+    assert_ne!(
+        forged_records.last().unwrap().record_hash,
+        honest_head,
+        "rewrite changed the head"
+    );
+
+    // --- boot2 (the REAL process restart over the SAME durable WORM file). ---
+    // It calls the ACTUAL AuditBoot::verify_then_anchor — NOT a test-local mirror.
+    // verify-BEFORE-anchor must catch the forged head against the prior durable
+    // anchor and REFUSE to start.
+    let mut boot2 =
+        AuditBoot::connect_with_anchor(&writer_dsn, &store_with_key(), 10_000, &anchor_path)
+            .expect("reconnect boot2 over same durable WORM");
+    let rewritten = boot2.load_chain().unwrap();
+    verify_chain(&rewritten).expect("rewritten chain is internally consistent (S1 blind)");
+
+    let boot_result = boot2.verify_then_anchor(clock.monotonic_millis());
+    match boot_result {
+        Err(BootError::AnchorHeadMismatch {
+            actual_head,
+            anchored_head,
+            ..
+        }) => {
+            assert_eq!(actual_head, forged_records.last().unwrap().record_hash);
+            assert_eq!(
+                anchored_head, honest_head,
+                "anchor still pins the honest head"
+            );
+            eprintln!(
+                "[it] REAL boot path REFUSED across restart: full-chain rewrite CAUGHT \
+                 (verify-before-anchor → AnchorHeadMismatch)"
+            );
+        }
+        other => panic!(
+            "FAIL-CLOSED BROKEN: real boot path must refuse over a forged restart, got {other:?}"
+        ),
+    }
+    let _ = std::fs::remove_file(&anchor_path);
+}
+
+/// (4) Positive control: an **untampered** restart over the same durable WORM
+/// file verifies and the real boot sequence proceeds (anchors forward).
+#[test]
+fn untampered_restart_over_durable_anchor_starts() {
+    if !it_enabled() {
+        eprintln!("[skip] set PG_BUMPERS_IT=1 to run the proxy S5 untampered-restart test");
+        return;
+    }
+    let (writer_dsn, _admin) = setup_fresh_db("clean_restart");
+    let anchor_path = fresh_anchor_path("clean_restart");
+    let clock = MockClock::starting_at(1_700_000_000_000);
+
+    // boot1: write honest records, anchor to the durable WORM.
+    {
+        let mut boot1 =
+            AuditBoot::connect_with_anchor(&writer_dsn, &store_with_key(), 10_000, &anchor_path)
+                .expect("audit _meta boot1");
+        let sink_arc: Arc<Mutex<dyn Sink + Send>> = boot1.sink_arc();
+        let recorder = Recorder::new(
+            sink_arc,
+            Arc::new(clock.clone()) as Arc<dyn Clock>,
+            "pgb_agent",
+        );
+        recorder
+            .reject("s", "DROP TABLE t", "ddl_rejected", None)
+            .unwrap();
+        boot1
+            .verify_then_anchor(clock.monotonic_millis())
+            .expect("boot1 anchors honest head");
+    }
+
+    // boot2: fresh process over the SAME durable WORM + the UNtampered `_meta`
+    // chain. The real boot sequence must verify cleanly and proceed.
+    let mut boot2 =
+        AuditBoot::connect_with_anchor(&writer_dsn, &store_with_key(), 10_000, &anchor_path)
+            .expect("reconnect boot2");
+    boot2
+        .verify_then_anchor(clock.monotonic_millis())
+        .expect("untampered restart over the durable anchor verifies and starts");
+    eprintln!("[it] untampered restart over durable WORM verified and started (positive control)");
+    let _ = std::fs::remove_file(&anchor_path);
+}
+
+/// Read the latest anchored head hash out of a durable WORM file (the head a
+/// prior boot pinned, persisted across the restart).
+fn anchor_head_in_file(path: &std::path::Path) -> String {
+    pgb_audit::WormAnchor::open_file(path)
+        .expect("open durable WORM")
+        .latest()
+        .expect("a prior boot anchored a head")
+        .head_hash
+        .clone()
 }

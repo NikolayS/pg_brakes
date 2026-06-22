@@ -38,6 +38,13 @@
 //!   id). **Required** (no literal default).
 //! - `PGB_ANCHOR_INTERVAL_MS` — the external-WORM anchoring cadence in millis
 //!   (default 60000). The very first tick anchors a baseline on startup.
+//! - `PGB_ANCHOR_PATH` — the **durable** file-backed WORM anchor path. The
+//!   anchored chain head is persisted here so it survives a process restart and
+//!   the boot can verify the `_meta` chain against the *prior* durable head BEFORE
+//!   re-anchoring (catching an offline full-chain rewrite across a restart).
+//!   **Required** (no literal default; the file stand-in models object-lock /
+//!   transparency-log retention — see `deploy/README.md`). Without a durable
+//!   anchor the cross-restart tamper-evidence guarantee cannot hold (fail-closed).
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -141,6 +148,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let meta_dsn = env_secret("PGB_META_DSN")?;
     let signing_key = env_secret("PGB_AUDIT_SIGNING_KEY")?;
     let anchor_interval_ms: u64 = env_or("PGB_ANCHOR_INTERVAL_MS", "60000").parse()?;
+    // The DURABLE anchor path: the anchored head must survive a restart so the
+    // boot can verify the persisted chain against the PRIOR durable head before
+    // re-anchoring (fail-closed; no literal default).
+    let anchor_path = env_secret("PGB_ANCHOR_PATH")?;
 
     // The signing key lives in the secret-store seam, NOT on the DB host (§10.9);
     // production addresses a KMS key version under the same id.
@@ -148,23 +159,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     store.put(AUDIT_SIGNING_KEY_ID, signing_key.as_bytes())?;
 
     // Connect as the audit WRITER (never the audited agent) and build the boot
-    // handle: the shared sink + the interval anchorer over the canonical chain.
-    let mut boot = AuditBoot::connect(&meta_dsn, &store, anchor_interval_ms)
-        .map_err(|e| format!("audit _meta boot failed (fail-closed): {e}"))?;
+    // handle over a DURABLE, file-backed WORM anchor: the shared sink + the
+    // interval anchorer over the canonical chain, with the anchored head persisted
+    // across restarts.
+    let mut boot =
+        AuditBoot::connect_with_anchor(&meta_dsn, &store, anchor_interval_ms, &anchor_path)
+            .map_err(|e| format!("audit _meta boot failed (fail-closed): {e}"))?;
 
     let clock: Arc<dyn Clock> = Arc::new(SystemClock::new());
 
-    // Bootstrap anchor + FAIL-CLOSED startup verification: anchor the current
-    // head once, then refuse to start unless the persisted chain verifies AND its
-    // head matches the validly-signed anchored head (catches a full-chain rewrite
-    // on boot). Any error here is a hard exit — the audit root-of-trust must hold.
-    boot.maybe_anchor(clock.monotonic_millis())
-        .map_err(|e| format!("audit startup anchor failed (fail-closed): {e}"))?;
-    boot.startup_verify()
+    // FAIL-CLOSED boot sequence — VERIFY BEFORE ANCHOR (SPEC §3/§10.9): verify the
+    // persisted `_meta` chain against the PRIOR durable anchored head FIRST, and
+    // only on a clean verify anchor the current head forward. Re-anchoring first
+    // would re-pin whatever head is now in `_meta` (incl. an offline-forged head)
+    // and make the verify trivially pass — the hole this ordering closes. A
+    // full-chain rewrite across a restart changes the head ⇒ mismatch ⇒ refuse to
+    // start. (Genesis/first boot: empty durable WORM, nothing to verify against
+    // yet; anchored as the baseline.) Any error here is a hard exit.
+    boot.verify_then_anchor(clock.monotonic_millis())
         .map_err(|e| format!("audit startup verification failed — refusing to start: {e}"))?;
     eprintln!(
-        "pgb-proxy: audit `_meta` chain verified against its anchored head on startup \
-         (anchor interval {anchor_interval_ms}ms)"
+        "pgb-proxy: audit `_meta` chain verified against its durable anchored head on startup \
+         (anchor {anchor_path}, interval {anchor_interval_ms}ms)"
     );
 
     // Inject the SAME shared sink into the proxy `Recorder` (the exact

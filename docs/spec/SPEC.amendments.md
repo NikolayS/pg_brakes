@@ -608,13 +608,12 @@ S5 (#64) wires those known-good libraries into the running binaries:
    (`PGB_ANCHOR_INTERVAL_MS`, default 60 s); the cadence is mockable (no wall clock — proven
    in the `AuditBoot` unit tests).
 
-3. **Fail-closed startup verification.** On boot the proxy/CLI anchor a baseline, then call
-   `AuditBoot::startup_verify`: it loads the persisted chain, checks within-chain integrity,
-   and checks the head matches the validly-signed WORM-anchored head. A **full-chain
-   rewrite** (every row re-linked in the table so the within-chain check is blind) is caught
-   as a head mismatch → `BootError::AnchorHeadMismatch` → **refuse to start** (proven against
-   real PG18 in `crates/proxy/tests/audit_meta_it.rs`). A missing anchor is likewise
-   fail-closed.
+3. **Fail-closed startup verification (verify-BEFORE-anchor over a DURABLE anchor — see the
+   #71 follow-up below for the corrected, cross-restart-safe form).** On boot the proxy/CLI
+   load the persisted chain, check within-chain integrity, and check the head matches the
+   validly-signed WORM-anchored head; a **full-chain rewrite** caught as a head mismatch →
+   `BootError::AnchorHeadMismatch` → **refuse to start** (proven against real PG18 in
+   `crates/proxy/tests/audit_meta_it.rs`). A missing anchor is likewise fail-closed.
 
 ### S1 invariants preserved
 
@@ -634,9 +633,12 @@ wiring, it weakens no enforcement.
 - `PGB_AUDIT_SIGNING_KEY` — the chain-head signing key material (secret-store seam; prod
   addresses a KMS key version under the same id). **Required**, no literal default.
 - `PGB_ANCHOR_INTERVAL_MS` — the WORM anchoring cadence in millis (default 60000).
+- `PGB_ANCHOR_PATH` — the **durable**, file-backed WORM anchor path (added in the #71
+  follow-up below). **Required**, no literal default.
 
 The CLI `demo` runs against the shared `_meta` chain when `PGB_META_DSN` +
-`PGB_AUDIT_SIGNING_KEY` are set (otherwise it stays an in-memory DB-free smoke, unchanged).
+`PGB_AUDIT_SIGNING_KEY` (+ `PGB_ANCHOR_PATH`) are set (otherwise it stays an in-memory
+DB-free smoke, unchanged).
 
 ### What remains (honest scope)
 
@@ -644,3 +646,52 @@ The local `WormAnchor` is still the in-memory/file append-only **stand-in**; the
 S3-Object-Lock / transparency-log target and the asymmetric KMS remain the documented
 production swaps behind the `WormAnchor`/`Kms` seams (unchanged from S4). The anchor is now
 **driven by the running binary over the real `_meta` chain**, which is the gap #64 closed.
+
+### #71 follow-up — DURABLE WORM + verify-BEFORE-anchor: `_meta` tampering is now caught ACROSS a restart
+
+A non-author review of PR #71 found that the external-anchor startup verify, as first
+landed, did **not** fail closed across a **process restart** — so the headline "full-chain
+rewrite caught on boot" was only true *within* a single process. Two holes:
+
+1. **The durable anchor was unreachable from the boot path.** `AuditBoot` hardcoded an
+   in-memory `WormAnchor::new()`; the file-backed `WormAnchor::open_file` (the only durable
+   retention the crate has) was never wired in. Every fresh process started with an **empty**
+   anchor, so it had nothing from a prior run to verify against.
+2. **The proxy anchored BEFORE it verified.** `main` called `maybe_anchor()` then
+   `startup_verify()`. A fresh process therefore re-pinned whatever head was now in `_meta`
+   — *including an offline-forged head* — and the verify trivially passed against the
+   head it had just re-anchored. The IT also did not exercise the real path: it asserted
+   refusal via a test-local mirror fed the honest prior run's in-memory WORM, not the real
+   `boot.startup_verify()`.
+
+The fix (scope `crates/audit`, `crates/proxy`, `crates/cli`):
+
+- **Durable WORM reachable from `AuditBoot`.** New `AuditBoot::connect_with_anchor(.., anchor_path)`
+  / `with_sink_and_worm(.., worm)` wire `WormAnchor::open_file(path)` into the boot/proxy/CLI
+  path (`PGB_ANCHOR_PATH`). The anchored head now **persists across restarts**. `AuditBoot`
+  also retains the KMS **verifier** so a *file-loaded* anchor (whose embedded verifier does
+  not serialize) can still be checked after a restart.
+- **Verify-BEFORE-anchor.** New `AuditBoot::verify_then_anchor(now)` is the boot sequence the
+  proxy + CLI now call: if the durable WORM already holds an anchor (a prior boot), it
+  **verifies the persisted chain against that prior durable head FIRST** and, on mismatch,
+  refuses to start (`BootError::AnchorHeadMismatch`); only after a clean verify does it anchor
+  the current head **forward**. A legitimate first boot / genesis (empty durable WORM) has
+  nothing to verify against yet and anchors the baseline without opening a hole — the durable
+  WORM's own integrity (object-lock / transparency-log retention) is the §10.9 trust anchor.
+- **Real restart-path IT.** `crates/proxy/tests/audit_meta_it.rs` now boots a real
+  `AuditBoot` over a durable WORM **file**, writes honest records + anchors (persisted),
+  offline-rewrites the `_meta` rows into a consistent forged chain, then runs a **fresh boot2**
+  over the **same** durable WORM file calling the **actual** `verify_then_anchor` — and asserts
+  it **refuses** (`AnchorHeadMismatch`). A positive control boots2 over an *untampered* chain
+  and **starts**. DB-free `AuditBoot` unit tests cover the same restart logic
+  (`verify_then_anchor_refuses_forged_chain_across_durable_restart` /
+  `…_accepts_untampered_durable_restart`).
+
+So the headline claim is now accurate: a full-chain `_meta` rewrite is caught on boot
+**across a process restart**, because the anchored head is durable and the boot verifies
+against the *prior* durable head before re-anchoring. The `WormAnchor` file remains the
+append-only **stand-in** (S3 Object Lock / transparency log is the documented production
+swap — the file is not itself true WORM). The preserved-and-passed reviewer items are
+unchanged: concurrent-appender fork-safety (`SharedSink` mutex + `PgSink` re-reads the
+persisted tail as `prev_hash`), the 42501 audited-can't-write invariant, env-secret handling
+(the key never logged), and the single shared `_meta` chain.

@@ -117,10 +117,21 @@ fn proxy_reject_and_cli_approve_share_one_anchored_meta_chain() {
         return;
     }
     let writer_dsn = setup_fresh_db("shared");
+    let anchor_path = std::env::temp_dir().join(format!(
+        "pgb_cli_s5_anchor_shared_{}.worm",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let _ = std::fs::remove_file(&anchor_path);
     let clock = MockClock::starting_at(1_700_000_000_000);
 
-    // ONE boot handle over the real `_meta` writer DSN → one canonical chain.
-    let mut boot = AuditBoot::connect(&writer_dsn, &store_with_key(), 30_000).expect("audit boot");
+    // ONE boot handle over the real `_meta` writer DSN + DURABLE WORM → one
+    // canonical chain, anchored to a file that survives restarts.
+    let mut boot =
+        AuditBoot::connect_with_anchor(&writer_dsn, &store_with_key(), 30_000, &anchor_path)
+            .expect("audit boot");
 
     // ---- PROXY side: inject the shared sink into the proxy Recorder ----
     let proxy_arc: Arc<Mutex<dyn Sink + Send>> = boot.sink_arc();
@@ -198,22 +209,22 @@ fn proxy_reject_and_cli_approve_share_one_anchored_meta_chain() {
     }
     verify_chain(&records).expect("the SHARED chain verifies (one genesis, both components)");
 
-    // ---- Anchor the canonical chain; anchored head == chain head ----
-    let anchored = boot
-        .maybe_anchor(clock.monotonic_millis())
-        .expect("anchor ok")
-        .expect("first tick anchors");
+    // ---- Anchor the canonical chain to the durable WORM; head matches ----
+    // The real fail-closed boot sequence (genesis baseline here): verify (nothing
+    // prior) + anchor the current head durably.
+    boot.verify_then_anchor(clock.monotonic_millis())
+        .expect("fail-closed verify_then_anchor passes on the honest shared chain");
+    let anchored = boot.worm().latest().expect("baseline anchored to the file");
     assert_eq!(
         anchored.head_hash,
         records.last().unwrap().record_hash,
         "anchored head == shared chain head"
     );
-    boot.startup_verify()
-        .expect("fail-closed startup verify passes on the honest, anchored shared chain");
 
     eprintln!(
         "[it] proxy REJECT + CLI APPROVE on ONE `_meta` chain ({} records, single genesis); \
-         verify_chain OK; anchored head matches",
+         verify_chain OK; durable anchored head matches",
         records.len()
     );
+    let _ = std::fs::remove_file(&anchor_path);
 }
