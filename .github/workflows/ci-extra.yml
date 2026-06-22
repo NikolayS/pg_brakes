@@ -1,0 +1,183 @@
+name: CI extra
+
+# Heavier, slower quality gates kept OUT of the fast ci.yml so the quick
+# fmt/clippy/build/test/deny signal stays fast. Fuzz · coverage floor · feature
+# matrix · supply-chain note · docs checks. (SPEC §4, §10.6; issue #42.)
+
+on:
+  push:
+  pull_request:
+
+concurrency:
+  group: ci-extra-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Least privilege: read the repo only. No job writes back.
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Fuzz the hostile parse loops (SPEC §4): pgwire FE/BE frame decoders +
+  # read-only SQL classifier. cargo-fuzz needs NIGHTLY, installed ONLY here; the
+  # rest of CI stays on 1.90.0. Short, time-boxed (60s/target) on every PR.
+  # ---------------------------------------------------------------------------
+  fuzz:
+    name: Fuzz (codec + classifier, 60s/target)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    # Force nightly across the whole job: the repo rust-toolchain.toml pins
+    # 1.90.0, but RUSTUP_TOOLCHAIN overrides any rust-toolchain.toml so every
+    # cargo/rustc invocation here (incl. the build cargo-fuzz drives) uses
+    # nightly, which libFuzzer requires.
+    env:
+      RUSTUP_TOOLCHAIN: nightly
+    steps:
+      - name: Checkout
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
+
+      - name: Install nightly (fuzz job only)
+        uses: dtolnay/rust-toolchain@67ef31d5b988238dd797d409d6f9574278e20537 # master
+        with:
+          toolchain: nightly
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
+        with:
+          workspaces: fuzz
+
+      - name: Install cargo-fuzz
+        # `+nightly` is required: the repo rust-toolchain.toml pins 1.90.0, which
+        # would otherwise override the default toolchain and fail cargo-fuzz's
+        # MSRV. cargo-fuzz / libFuzzer need nightly anyway.
+        run: cargo +nightly install cargo-fuzz --locked
+
+      - name: Fuzz pgwire frontend decoder (60s, must never panic)
+        working-directory: fuzz
+        run: cargo +nightly fuzz run frontend_decode -- -max_total_time=60
+
+      - name: Fuzz pgwire backend decoder (60s, must never panic)
+        working-directory: fuzz
+        run: cargo +nightly fuzz run backend_decode -- -max_total_time=60
+
+      - name: Fuzz read-only classifier (60s, never-panic + fail-closed invariant)
+        working-directory: fuzz
+        run: cargo +nightly fuzz run classifier -- -max_total_time=60
+
+      - name: Upload any crash reproducers
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: fuzz-artifacts
+          path: fuzz/artifacts/
+          if-no-files-found: ignore
+
+  # ---------------------------------------------------------------------------
+  # Coverage with a per-crate FLOOR on the enforcement crates (SPEC §4, §10.6).
+  # Runs the DB-free tests (no PG_BUMPERS_IT); env-gated IT is excluded. The
+  # floor script fails CI if any enforcement crate regresses. RATCHET UP.
+  # ---------------------------------------------------------------------------
+  coverage:
+    name: Coverage (enforcement-crate floor)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
+
+      - name: Install Rust 1.90.0 (+ llvm-tools)
+        uses: dtolnay/rust-toolchain@67ef31d5b988238dd797d409d6f9574278e20537 # master
+        with:
+          toolchain: 1.90.0
+          components: llvm-tools-preview
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@9e1e5806d4a4822de933115878265be9aaa786d9 # v2.82.2
+        with:
+          tool: cargo-llvm-cov
+
+      - name: Coverage (workspace, DB-free) -> JSON + HTML + lcov
+        run: |
+          # One instrumented test run produces the profile data; the two
+          # `report` calls just re-render it (no rebuild) into HTML + lcov.
+          cargo llvm-cov --workspace --locked --json --output-path coverage.json
+          cargo llvm-cov report --html
+          cargo llvm-cov report --lcov --output-path coverage.lcov
+
+      - name: Enforce per-crate coverage floor
+        run: python3 .github/scripts/coverage_floor.py coverage.json
+
+      - name: Upload coverage report (HTML + lcov + json)
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: coverage-report
+          path: |
+            target/llvm-cov/html/
+            coverage.lcov
+            coverage.json
+          if-no-files-found: warn
+
+  # ---------------------------------------------------------------------------
+  # Feature matrix: optional features must not rot. --no-default-features and
+  # --all-features (covers pgb-audit's `pg` feature) both build + test (DB-free).
+  # ---------------------------------------------------------------------------
+  feature-matrix:
+    name: Feature matrix (${{ matrix.features }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        features:
+          - "--no-default-features"
+          - "--all-features"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
+
+      - name: Install Rust 1.90.0
+        uses: dtolnay/rust-toolchain@67ef31d5b988238dd797d409d6f9574278e20537 # master
+        with:
+          toolchain: 1.90.0
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
+        with:
+          key: ${{ matrix.features }}
+
+      - name: build (${{ matrix.features }})
+        run: cargo build --workspace --locked ${{ matrix.features }}
+
+      - name: test (${{ matrix.features }})
+        run: cargo test --workspace --locked ${{ matrix.features }}
+
+  # ---------------------------------------------------------------------------
+  # Docs checks (cheap, no toolchain): offline markdown link check + typo check.
+  # ---------------------------------------------------------------------------
+  docs:
+    name: Docs (link check + typos)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
+
+      - name: Markdown link check (offline; README + docs/**)
+        uses: lycheeverse/lychee-action@8646ba30535128ac92d33dfc9133794bfdd9b411 # v2.8.0
+        with:
+          args: "--offline --no-progress README.md docs/**/*.md"
+          fail: true
+
+      - name: Typo check (project allow-list in typos.toml)
+        uses: crate-ci/typos@37bb98842b0d8c4ffebdb75301a13db0267cef89 # v1.47.2
+        with:
+          files: "README.md docs"
+          config: typos.toml

@@ -32,6 +32,13 @@ allow = [
     # (e.g. unicode-ident); they are NOT copyleft.
     "Unicode-3.0",
     "Unicode-DFS-2016",
+    # NCSA (University of Illinois/NCSA Open Source License) — a permissive,
+    # OSI-approved, BSD/MIT-style license (NOT copyleft). It enters ONLY via the
+    # fuzz toolchain: `libfuzzer-sys` is `(MIT OR Apache-2.0) AND NCSA` because
+    # it bundles the LLVM libFuzzer runtime. The fuzz crate is its own workspace
+    # and never ships in the production tree, but we keep the allowance so a
+    # `cargo deny check` run against the fuzz crate is also green. See fuzz/.
+    "NCSA",
 ]
 # Require a high confidence match when inferring a license from text.
 confidence-threshold = 0.8
@@ -47,10 +54,18 @@ allow-wildcard-paths = true
 deny = []
 
 [advisories]
-# RUSTSEC advisory database checks. Fail on security vulnerabilities and
-# unmaintained crates so issues surface in CI rather than in production.
+# RUSTSEC advisory database checks (the `cargo-audit` equivalent — SPEC §4).
+# `cargo deny check advisories` pulls the RustSec advisory-db and FAILS the
+# build on any security vulnerability (RUSTSEC-YYYY-NNNN) in the dependency tree,
+# and on yanked crates, so a newly-disclosed CVE surfaces in CI on the next run
+# rather than in production. cargo-deny's defaults (vulnerabilities = error,
+# unmaintained = warn) apply; we keep them.
 db-urls = ["https://github.com/rustsec/advisory-db"]
 yanked = "deny"
+# Documented, time-boxed exceptions ONLY. Every entry must cite the RUSTSEC id
+# and a reason/issue; empty by design so a fresh advisory cannot be silently
+# suppressed. Example: ignore = ["RUSTSEC-2024-XXXX"] # why + tracking issue.
+ignore = []
 
 [sources]
 # Only crates.io (and any explicitly allowed git/registry sources) are permitted.

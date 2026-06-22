@@ -1,0 +1,36 @@
+# typos (crate-ci/typos) configuration for pg_bumpers.
+#
+# The docs typo check runs over README.md + docs/**. This allow-list whitelists
+# project vocabulary, Postgres/protocol jargon, and a few deliberate examples
+# (e.g. the intentionally-misspelled bad-SQL demo) so the check fails only on
+# REAL typos, not on domain terms.
+#
+# `default.extend-words` rewires individual words; `default.extend-identifiers`
+# whitelists code-like identifiers verbatim. Prefer the narrowest entry.
+
+[files]
+# Lockfiles, vendored data, and generated artifacts are not prose — skip them.
+extend-exclude = [
+    "*.lock",
+    "pnpm-lock.yaml",
+    "Cargo.lock",
+    "fuzz/corpus/**",
+]
+
+[default.extend-words]
+# Treat these as correct wherever they appear (word = itself disables the
+# correction). Postgres / wire-protocol / domain jargon that typos mis-flags.
+RTO = "RTO"                # Recovery Time Objective (disaster-recovery term)
+mis = "mis"                # hyphenated prefix: "classifier-mis-allowed"
+appliable = "appliable"    # "auto-appliable" — the project's chosen spelling
+Unparseable = "Unparseable"  # the spelling used across the codebase/docs
+SELEKT = "SELEKT"          # DELIBERATE bad-SQL example in docs/demo.md
+FRM = "FRM"                # part of the same deliberate bad-SQL example
+
+[default.extend-identifiers]
+# Verbatim code identifiers / acronyms that must never be "corrected".
+ctid = "ctid"
+provolatile = "provolatile"
+datadir = "datadir"
+datadirs = "datadirs"
+basebackup = "basebackup"
