@@ -192,13 +192,34 @@ mod dl {
         }
     }
 
-    /// **Multi-level cascade (#48): fail-closed.** A DELETE whose cascade reaches
-    /// a GRANDCHILD relation whose destroyed rows have NO captured pre-image
-    /// (the apply walks direct children; a grandchild's pre-images aren't fully
-    /// captured). The full-effect reconciliation sees the grandchild `del`
-    /// exceeding its predicted footprint, AND the reversible-capture check sees
-    /// fewer pre-images than destroyed rows → ABORT (IrreversibleChange), NOT a
-    /// silent destructive commit.
+    /// **Multi-level (grandchild) cascade (#48/#50): fail-closed.** A
+    /// `parent → child → GRANDCHILD ON DELETE CASCADE` DELETE. This faithfully
+    /// models the TRUE asymmetry the S3 sprint review flagged and #50 closed:
+    ///
+    /// - the **target** `public.orders` is captured (RETURNING);
+    /// - the **DIRECT child** `public.order_items` is in `cascade_by_table`, is
+    ///   re-checked at step 5, and its pre-images ARE captured (1-level capture
+    ///   works);
+    /// - the **GRANDCHILD** `public.order_item_audit` is present in
+    ///   `effect_by_table` (the dry-run's full `pg_stat_xact_*` measure recorded
+    ///   its `del=8`) but **NOT** in `cascade_by_table` — apply discovery walks
+    ///   DIRECT children only (#48). So it is never recomputed, `build_inverse`
+    ///   captures **no** pre-image for it, and the forward op is never even asked
+    ///   to capture it (it is not handed to `apply_forward` as a cascade relation).
+    ///
+    /// Step 6 full-effect reconciliation PASSES for the grandchild (it IS in
+    /// `effect_by_table` and actual `del=8` == predicted `del=8`). The OLD
+    /// direct-children-only step-8 guard iterated `predicted.cascades` only, never
+    /// saw the grandchild, and **COMMITTED** — silently losing the 8 grandchild
+    /// rows on revert. The #50 `assert_reversible_preimage_coverage` reconciles the
+    /// FULL actual footprint (`deltas`): the grandchild destroyed 8 rows with 0
+    /// captured pre-images → **`IrreversibleChange` ABORT** (REVERTED,
+    /// `prod_rows_touched=0`).
+    ///
+    /// Modeled exactly like the engine's own
+    /// `apply::tests::multilevel_grandchild_cascade_delete_aborts_fail_closed`:
+    /// the grandchild lives in `extra_effect` (→ `effect_by_table` ONLY, NOT
+    /// `cascade_by_table`) and has no entry in `cascade_preimage_ids`.
     pub fn multi_level_cascade_fail_closed() -> DataLossCase {
         let child = "public.order_items".to_string();
         let grandchild = "public.order_item_audit".to_string();
@@ -207,31 +228,27 @@ mod dl {
             kind: WriteKind::Delete,
             grant_ids: vec![2, 4, 6, 8],
             target_effect: OpCounts::new(0, 0, 4),
-            // Direct child captured fine; grandchild predicted del=8 but only
-            // captured-as-direct (the apply walks DIRECT children only).
-            cascades: vec![
-                (child.clone(), vec![20, 40, 60, 80], OpCounts::new(0, 0, 4)),
-                (
-                    grandchild.clone(),
-                    vec![200, 400, 600, 800, 210, 410, 610, 810],
-                    OpCounts::new(0, 0, 8),
-                ),
-            ],
-            extra_effect: vec![],
+            // Only the DIRECT child is a cascade relation (in `cascade_by_table`):
+            // it is recomputed at step 5 and its pre-images are captured.
+            cascades: vec![(child.clone(), vec![20, 40, 60, 80], OpCounts::new(0, 0, 4))],
+            // The GRANDCHILD is in the MEASURED full footprint (`effect_by_table`)
+            // as a DELETE of 8 rows, but is NOT a `cascade_by_table` relation — the
+            // exact #48 asymmetry. It is never recomputed and never captured.
+            extra_effect: vec![(grandchild.clone(), OpCounts::new(0, 0, 8))],
             recompute_override: vec![],
             written_override: None,
-            // At apply time the grandchild cascade destroyed 8 rows...
+            // The ACTUAL apply footprint: target del=4, child del=4, AND grandchild
+            // del=8 — exactly what the dry-run measured, so step-6 reconciliation
+            // PASSES for every relation (in-radius AND actual==predicted).
             apply_deltas: vec![
                 ("public.orders".into(), OpCounts::new(0, 0, 4)),
                 (child.clone(), OpCounts::new(0, 0, 4)),
-                (grandchild.clone(), OpCounts::new(0, 0, 8)),
+                (grandchild, OpCounts::new(0, 0, 8)),
             ],
-            // ...but only the DIRECT child's pre-images were captured; the
-            // grandchild's are MISSING (the #48 gap) → reversible-capture aborts.
-            cascade_preimage_ids: vec![
-                (child, vec![20, 40, 60, 80]),
-                (grandchild, vec![]), // <-- the incomplete inverse: 0 captured for 8 destroyed
-            ],
+            // Only the DIRECT child's pre-images are captured; the grandchild is not
+            // a cascade relation, so its 8 destroyed rows have ZERO captured
+            // pre-images → step-8 `assert_reversible_preimage_coverage` ABORTS.
+            cascade_preimage_ids: vec![(child, vec![20, 40, 60, 80])],
         }
     }
 

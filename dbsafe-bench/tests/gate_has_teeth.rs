@@ -189,12 +189,22 @@ fn multi_level_cascade_is_fail_closed_via_irreversible_change() {
     );
 }
 
-/// TEETH #4 (the #48 fail-closed proof, inverted) — flip the multi-level-cascade
-/// reversible-capture check: pretend every grandchild row's pre-image WAS captured
-/// (as if the apply walked N levels and the reconciliation matched), so
-/// guarded_apply commits the multi-level cascade. The runner MUST flag the
-/// catastrophic FN — proving the green `multi-level-cascade-fail-closed` scenario
-/// is a real guard firing, not a tautology.
+/// TEETH #4 (the #48/#50 fail-closed proof, inverted) — prove the green
+/// `multi-level-cascade-fail-closed` scenario depends specifically on
+/// `assert_reversible_preimage_coverage` (the #50 fix), not on a weaker/wrong path.
+///
+/// We start from the FAITHFUL grandchild model (target + DIRECT child captured,
+/// grandchild present only in `effect_by_table` with `del=8`) and *supply the
+/// grandchild's captured pre-images* via the N-level capture seam: we register the
+/// grandchild as a cascade relation (`cascades`) AND hand over all 8 pre-images.
+/// This is the engine's own `multilevel_grandchild_with_captured_preimages_commits`
+/// completeness path: step-8 coverage is now satisfied, so the REAL `guarded_apply`
+/// COMMITs the multi-level cascade → the runner MUST flag the catastrophic FN.
+///
+/// If the green scenario aborted for any OTHER reason (e.g. a step-6
+/// reconciliation over-write, or the OLD direct-children-only guard catching a
+/// grandchild miscast as a direct child), this flip would NOT commit and the test
+/// would fail — so it pins the green scenario to the #50 coverage guard.
 #[test]
 fn flipping_the_multi_level_cascade_capture_trips_the_gate() {
     let child = "public.order_items".to_string();
@@ -204,6 +214,10 @@ fn flipping_the_multi_level_cascade_capture_trips_the_gate() {
         kind: WriteKind::Delete,
         grant_ids: vec![2, 4, 6, 8],
         target_effect: OpCounts::new(0, 0, 4),
+        // Defense flipped: model the N-level capture seam — the grandchild is now
+        // a captured cascade relation (recomputed + pre-images supplied), exactly
+        // what makes `assert_reversible_preimage_coverage` PASS so the apply
+        // commits. The DIRECT child stays captured as before.
         cascades: vec![
             (child.clone(), vec![20, 40, 60, 80], OpCounts::new(0, 0, 4)),
             (
@@ -220,7 +234,7 @@ fn flipping_the_multi_level_cascade_capture_trips_the_gate() {
             (child.clone(), OpCounts::new(0, 0, 4)),
             (grandchild.clone(), OpCounts::new(0, 0, 8)),
         ],
-        // Defense flipped: pretend the grandchild's 8 pre-images WERE captured.
+        // All 8 grandchild pre-images captured → coverage satisfied → COMMIT.
         cascade_preimage_ids: vec![
             (child, vec![20, 40, 60, 80]),
             (grandchild, vec![200, 400, 600, 800, 210, 410, 610, 810]),
@@ -237,7 +251,13 @@ fn flipping_the_multi_level_cascade_capture_trips_the_gate() {
     assert_eq!(
         result.observed.verdict,
         Verdict::Allow,
-        "with the grandchild capture faked complete, the multi-level cascade COMMITs"
+        "with the grandchild's pre-images captured (N-level seam), \
+         assert_reversible_preimage_coverage passes and the multi-level cascade COMMITs"
+    );
+    assert!(
+        result.observed.prod_rows_touched > 0,
+        "the committed multi-level cascade touched prod rows (the data loss \
+         that the green scenario refuses)"
     );
     assert!(
         result.catastrophic_fn,
