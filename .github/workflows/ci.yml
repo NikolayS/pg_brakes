@@ -4,11 +4,12 @@ on:
   push:
   pull_request:
 
-# Cancel superseded runs on the same ref to save CI minutes.
+# Cancel superseded runs on the same ref to save CI minutes (esp. on PR pushes).
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# Least privilege: the fast gates need only to read the repo.
 permissions:
   contents: read
 
@@ -17,20 +18,25 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
+  # The FAST gate — fmt - clippy -D warnings - build --locked - test --locked -
+  # cargo-deny. Kept deliberately lean; fuzz/coverage/matrix/docs live in the
+  # separate ci-extra.yml workflow so this stays the quick merge signal.
   rust:
     name: Rust (fmt - clippy - build - test - deny)
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
 
       - name: Install Rust 1.90.0 (rustfmt + clippy)
-        uses: dtolnay/rust-toolchain@1.90.0
+        uses: dtolnay/rust-toolchain@67ef31d5b988238dd797d409d6f9574278e20537 # master
         with:
+          toolchain: 1.90.0
           components: rustfmt, clippy
 
       - name: Cache cargo build
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
 
       - name: rustfmt
         run: cargo fmt --all --check
@@ -45,27 +51,28 @@ jobs:
         run: cargo test --workspace --locked
 
       - name: cargo-deny (licenses - bans - advisories - sources)
-        uses: EmbarkStudios/cargo-deny-action@v2
+        uses: EmbarkStudios/cargo-deny-action@bb137d7af7e4fb67e5f82a49c4fce4fad40782fe # v2.0.20
         with:
           command: check
 
   mcp:
     name: MCP server (build - test - license-check)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     defaults:
       run:
         working-directory: mcp/server
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66ddda # v4.1.0
         with:
           version: 11.8.0
 
       - name: Setup Node 22
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
           cache: pnpm

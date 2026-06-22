@@ -1,0 +1,77 @@
+# Fuzz crate for pg_bumpers — hostile parse-loop fuzzing (SPEC §4).
+#
+# This crate is DELIBERATELY NOT a member of the main workspace (see the
+# `[workspace]` table below, which makes `fuzz/` its own root). Keeping it out
+# of the root workspace means:
+#   * the fast `cargo build/test --workspace` job never has to compile
+#     libfuzzer-sys (which needs a nightly toolchain), and
+#   * `cargo deny check` on the root workspace is unaffected by the fuzz deps.
+#
+# The fuzz targets are built with `cargo +nightly fuzz` (cargo-fuzz / libFuzzer)
+# in the dedicated CI fuzz job. The rest of the project stays on 1.90.0 stable.
+#
+# License hygiene: every dependency here is permissive —
+#   * libfuzzer-sys  : MIT OR Apache-2.0 WITH LLVM-exception
+#   * arbitrary      : MIT OR Apache-2.0
+#   * pgb-pgwire     : Apache-2.0 (this repo)
+# so the AGPL guard in deny.toml stays satisfied. (A separate deny job runs
+# `cargo deny check` against this crate's lockfile too — see ci.yml.)
+
+[package]
+name = "pgb-fuzz"
+version = "0.0.0"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+
+# Make `fuzz/` its own workspace root so it is excluded from the main workspace
+# and resolves its own (nightly-only) dependencies independently.
+[workspace]
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+# libFuzzer bindings (the `#[fuzz_target]` macro + the entry point).
+libfuzzer-sys = "0.4"
+# `arbitrary` lets a target turn raw fuzz bytes into structured inputs (we use
+# it for the tagged-frame targets: first byte → message tag, rest → body).
+arbitrary = { version = "1", features = ["derive"] }
+# `bytes::Bytes` is the body type the codec's `decode(tag, body)` takes; we wrap
+# the fuzz slice in it. Same major version the codec uses (MIT).
+bytes = "1"
+
+# The crate under test. Path dep into the workspace; no version churn.
+pgb-pgwire = { path = "../crates/pgwire" }
+
+# Each fuzz target is its own `[[bin]]` with `test = false` / `doc = false`
+# (the cargo-fuzz convention) so `cargo test` here is a no-op and the binaries
+# only ever run under libFuzzer.
+
+[[bin]]
+name = "frontend_decode"
+path = "fuzz_targets/frontend_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "backend_decode"
+path = "fuzz_targets/backend_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "classifier"
+path = "fuzz_targets/classifier.rs"
+test = false
+doc = false
+bench = false
+
+# Optimize the fuzz binaries but keep debug assertions ON so overflow/`debug_assert!`
+# bugs are caught while fuzzing.
+[profile.release]
+debug = 1
+debug-assertions = true
+overflow-checks = true
