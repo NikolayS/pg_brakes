@@ -238,8 +238,13 @@ pub enum CloneError {
 /// **Governance contract:** [`provision`](CloneProvider::provision) MUST return a
 /// handle whose [`CloneHandle::governance`] is compliant
 /// ([`CloneGovernance::assert_compliant`]) and MUST record the clone in the
-/// provider's [`CloneLedger`] *before* handing the handle out, so a crash between
-/// provision and teardown leaves a reapable orphan record (SPEC §10.7).
+/// provider's [`CloneLedger`] *before any prod PII exists on disk* — i.e. before
+/// creating the datadir / running `pg_basebackup`, not merely before handing the
+/// handle out — so a crash anywhere from datadir creation through teardown
+/// (including mid-`pg_basebackup`) leaves a reapable orphan record (SPEC §10.7,
+/// fail-closed ordering). The ledger-independent
+/// [`reap_orphans_with_sweep`](ledger::reap_orphans_with_sweep) is the backstop if
+/// the ledger itself is lost/relocated.
 /// [`destroy`](CloneProvider::destroy) MUST be idempotent and remove the ledger
 /// entry only once the clone is physically gone.
 pub trait CloneProvider {

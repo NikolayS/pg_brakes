@@ -20,8 +20,12 @@
 //!   is killed while the (throttled) base backup is still streaming; the
 //!   ledger-FIRST breadcrumb means the reaper still finds and destroys the
 //!   half-written prod-PII datadir — no dir/process survives.
-//! - **Ledger-independent sweep (§10.7):** a prod-PII datadir on disk with **no**
-//!   ledger entry (lost ledger) is reaped by the filesystem sweep alone.
+//! - **Ledger-independent sweep (§10.7):** a *completed* prod-PII datadir on disk
+//!   with **no** ledger entry (lost ledger) is reaped by the filesystem sweep
+//!   alone, and so is a **markerless PARTIAL** mid-`pg_basebackup` datadir (and the
+//!   empty earliest-window dir) — the sweep gates on the provider-owned
+//!   `local-clone-*` name and reaps unless a LIVE owner is proven, not on datadir
+//!   content, so partial/empty prod-PII copies cannot survive a lost ledger.
 //! - **RLS/column-grant parity (§4):** capture `pg_policies` + column grants from
 //!   prod and from the clone and assert full parity (the clone enforces the same
 //!   RLS + column grants as prod).
@@ -477,6 +481,134 @@ fn ledger_independent_sweep_reaps_unrecorded_datadir() {
         !datadir.exists(),
         "the unrecorded prod-PII datadir must be GONE after the sweep"
     );
+
+    drop(primary);
+    cleanup(&root);
+}
+
+// ===========================================================================
+//  RESIDUAL LEAK FIX — a MARKERLESS PARTIAL datadir w/ NO ledger entry is reaped
+// ===========================================================================
+//
+//  The re-review of #33 found a residual leak: the old sweep keyed on datadir
+//  *content* (`PG_VERSION`/`postmaster.pid`/marker), so a PARTIAL mid-basebackup
+//  datadir (only `backup_label` + `pg_wal/`, or empty in the earliest window) with
+//  NO ledger entry — the exact lost-ledger + crash-mid-basebackup scenario — was
+//  NOT reaped. The sweep now treats any `local-clone-*` child of the
+//  provider-owned clone_root as a reap candidate unless a LIVE owner is proven, so
+//  a markerless partial (and the empty earliest window) is reaped. We materialise
+//  the partial from a REAL pg_basebackup interrupted mid-stream (a genuine partial
+//  prod-PII datadir), strip any owner marker, and write NO ledger entry.
+
+#[test]
+fn sweep_reaps_markerless_partial_basebackup_with_no_ledger_entry() {
+    if skip("markerless_partial_sweep") {
+        return;
+    }
+    let root = scratch_root("partial-sweep");
+    let primary = Primary::start(&root, 54365, "prod", GOV_SEED_SQL);
+
+    let clone_root = root.join("clones");
+    let ledger_dir = root.join("ledger");
+    let ledger = CloneLedger::open(&ledger_dir).unwrap();
+    std::fs::create_dir_all(&clone_root).unwrap();
+
+    // Materialise a REAL but PARTIAL prod-PII datadir: launch pg_basebackup
+    // throttled, let it stream a bit, then KILL it mid-stream — the target dir is
+    // left half-written (no completed PG_VERSION-consistent datadir; no marker;
+    // and crucially NO ledger entry — the lost-ledger + crash window).
+    let clone_id = "local-clone-PARTIAL-1";
+    let datadir = clone_root.join(clone_id);
+    let mut bb = Command::new(pg_bin().join("pg_basebackup"))
+        .arg("--pgdata")
+        .arg(&datadir)
+        .arg("--wal-method=stream")
+        .arg("--checkpoint=fast")
+        .arg("--no-sync")
+        .arg("--max-rate=32k") // throttle so the kill reliably lands mid-stream
+        .arg("--host")
+        .arg("127.0.0.1")
+        .arg("--port")
+        .arg(primary.port.to_string())
+        .arg("--username")
+        .arg(&primary.repl_user)
+        .arg("--no-password")
+        .spawn()
+        .expect("spawn pg_basebackup");
+
+    // Wait until the partial datadir actually exists on disk, then kill mid-stream.
+    let mut waited = 0;
+    while !datadir.exists() && waited < 100 {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        waited += 1;
+    }
+    assert!(datadir.exists(), "partial datadir must appear on disk");
+    let _ = Command::new("kill")
+        .arg("-KILL")
+        .arg(bb.id().to_string())
+        .output();
+    let _ = bb.wait();
+
+    // It is a genuine PARTIAL: none of the old content tell-tales are reliably
+    // present, there is NO owner marker, and NO ledger entry. (We assert the
+    // markerless + ledgerless premise; PG_VERSION may or may not have streamed yet
+    // — either way the old content gate would miss the no-PG_VERSION case, which is
+    // the leak.)
+    eprintln!(
+        "[partial-sweep] partial datadir contents: PG_VERSION={} postmaster.pid={} marker={}",
+        datadir.join("PG_VERSION").exists(),
+        datadir.join("postmaster.pid").exists(),
+        datadir.join(".pgb_clone_owner.json").exists()
+    );
+    // Force the worst case the reviewer reproduced: strip PG_VERSION + any marker
+    // so the datadir has NONE of the old tell-tales (a markerless partial).
+    let _ = std::fs::remove_file(datadir.join("PG_VERSION"));
+    let _ = std::fs::remove_file(datadir.join(".pgb_clone_owner.json"));
+    let _ = std::fs::remove_file(datadir.join("postmaster.pid"));
+    assert!(!datadir.join("PG_VERSION").exists());
+    assert!(!datadir.join("postmaster.pid").exists());
+    assert!(!datadir.join(".pgb_clone_owner.json").exists());
+    assert!(
+        ledger.entries().unwrap().is_empty(),
+        "premise: NO ledger entry for the markerless partial"
+    );
+
+    // The ledger-only pass sees nothing (the lost-ledger condition).
+    let ledger_only = reap_orphans(&ledger).expect("ledger-only pass");
+    assert!(
+        ledger_only.alarms.is_empty(),
+        "the ledger-only reaper cannot see the markerless partial"
+    );
+    assert!(datadir.exists(), "still on disk after the ledger-only pass");
+
+    // === THE FIX: the full sweep reaps the markerless partial prod-PII datadir. ===
+    let outcome = reap_orphans_with_sweep(&ledger, &clone_root).expect("full reaper pass");
+    eprintln!("[partial-sweep] reaper outcome: {outcome:?}");
+    assert!(
+        outcome
+            .alarms
+            .iter()
+            .any(|a| a.clone_id == clone_id && a.reaped),
+        "the sweep must reap the markerless partial prod-PII datadir: {outcome:?}"
+    );
+    assert!(
+        !datadir.exists(),
+        "RESIDUAL FIX: the markerless partial prod-PII datadir must be GONE after the sweep"
+    );
+
+    // The empty earliest-window case too: an empty `local-clone-*` dir is reaped.
+    let empty_id = "local-clone-EMPTY-1";
+    let empty = clone_root.join(empty_id);
+    std::fs::create_dir_all(&empty).unwrap();
+    let outcome2 = reap_orphans_with_sweep(&ledger, &clone_root).expect("sweep empty");
+    assert!(
+        outcome2
+            .alarms
+            .iter()
+            .any(|a| a.clone_id == empty_id && a.reaped),
+        "the empty earliest-window datadir must be reaped: {outcome2:?}"
+    );
+    assert!(!empty.exists(), "the empty clone datadir must be GONE");
 
     drop(primary);
     cleanup(&root);

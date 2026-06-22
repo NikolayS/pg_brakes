@@ -23,11 +23,17 @@
 //!
 //! - **Ledger-driven reap** — the primary path: a recorded clone whose owner is
 //!   dead is destroyed (above).
-//! - **Filesystem sweep** — [`reap_orphans`] **also** scans `clone_root` for any
-//!   clone datadir whose owner is not a live, matching owner, *even with no ledger
-//!   entry at all*. This fully closes the leaked-PII window: if the ledger write
-//!   ever fails/is lost (or a crash lands between datadir creation and the ledger
-//!   write under any future ordering), the on-disk PII is still found and reaped.
+//! - **Filesystem sweep** — [`reap_orphans_with_sweep`] **also** scans `clone_root`
+//!   and treats **every child directory** (the provider owns `clone_root`
+//!   exclusively and names each clone `local-clone-*`) as a reap candidate *even
+//!   with no ledger entry at all* — reaping it **unless a LIVE owner is proven** for
+//!   it (a ledger entry matched by path, or an in-dir [`OWNER_MARKER`] whose owner
+//!   [`is_live`](OwnerIdentity::is_live)). Crucially it does **not** key on datadir
+//!   *content* (`PG_VERSION`/`postmaster.pid`/marker), so a **partial or empty**
+//!   mid-`pg_basebackup` datadir — which has none of those tell-tales — is reaped
+//!   too. This closes the leaked-PII window even when the ledger write is
+//!   lost/relocated and a crash lands mid-basebackup: the on-disk prod-PII copy is
+//!   still found and reaped.
 //!
 //! # PID-reuse hardening (fail-closed liveness)
 //!
@@ -315,14 +321,20 @@ fn read_owner_marker(datadir: &Path) -> Option<OwnerIdentity> {
     serde_json::from_slice(&bytes).ok()
 }
 
-/// Heuristic: does `path` look like a Postgres clone datadir? We only ever sweep
-/// directories we own (created by this crate's provider), but require a tell-tale
-/// (`PG_VERSION`, `postmaster.pid`, or our own [`OWNER_MARKER`]) before treating a
-/// child of `clone_root` as a reap candidate — so a stray non-PG dir is ignored.
-fn looks_like_clone_datadir(path: &Path) -> bool {
-    path.join(OWNER_MARKER).exists()
-        || path.join("PG_VERSION").exists()
-        || path.join("postmaster.pid").exists()
+/// Whether `name` is a clone-datadir name the provider creates under its
+/// exclusively-owned `clone_root`. Every clone datadir is named `local-clone-*`
+/// (see [`LocalCloneProvider::provision`](super::local::LocalCloneProvider::provision)),
+/// so the sweep gates on the **name**, not on datadir *content*.
+///
+/// This is deliberately *not* a content fingerprint (`PG_VERSION` /
+/// `postmaster.pid` / [`OWNER_MARKER`]): a **partial** mid-`pg_basebackup` datadir
+/// has none of those (early on it holds only `backup_label` / `pg_wal/`, and in the
+/// earliest window it is completely empty), so a content gate would miss exactly
+/// the leaked-PII orphan the sweep is the backstop for (SPEC §10.7). Keying on the
+/// owned name reaps partial/empty clone datadirs too, while still ignoring any
+/// stray non-clone directory a deployment might place under `clone_root`.
+fn is_clone_datadir_name(name: &str) -> bool {
+    name.starts_with("local-clone-")
 }
 
 /// An orphan-clone alarm (SPEC §10.7). Raised whenever the reaper finds a clone
@@ -450,12 +462,15 @@ pub fn reap_orphans(ledger: &CloneLedger) -> Result<ReapOutcome, CloneError> {
 /// **plus** a ledger-independent sweep of `clone_root` (SPEC §10.7,
 /// defence-in-depth).
 ///
-/// The sweep fully closes the leaked-PII window: every clone datadir under
-/// `clone_root` whose owner is not a live, matching owner is destroyed **even if
-/// it has no ledger entry at all** — the case the original ledger-only reaper
-/// could not see (a crash between datadir creation and the ledger write, or a
-/// lost/relocated ledger). An orphan caught by *both* paths is reaped once and
-/// alarmed once.
+/// The sweep closes the leaked-PII window for a lost/relocated ledger: the
+/// provider owns `clone_root` exclusively and names every clone `local-clone-*`,
+/// so **every such child directory** is destroyed **unless a LIVE owner is proven**
+/// for it (a ledger entry matched by path, or an in-dir [`OWNER_MARKER`] whose
+/// owner is live) — **even if it has no ledger entry at all**. Because it gates on
+/// the owned *name* and not on datadir *content*, it reaps **partial or empty**
+/// mid-`pg_basebackup` datadirs too (they have no `PG_VERSION`/`postmaster.pid`/
+/// marker) — exactly the orphan the original content-keyed sweep missed. An orphan
+/// caught by *both* paths is reaped once and alarmed once.
 pub fn reap_orphans_with_sweep(
     ledger: &CloneLedger,
     clone_root: &Path,
@@ -492,9 +507,14 @@ fn reap_from_ledger(ledger: &CloneLedger, outcome: &mut ReapOutcome) -> Result<(
     Ok(())
 }
 
-/// The ledger-independent half: scan `clone_root` for clone datadirs whose owner
-/// is not live, and reap them — **even with no ledger entry** (records into
-/// `outcome`). Datadirs already reaped/alarmed by the ledger pass are skipped.
+/// The ledger-independent half: scan `clone_root` and reap **every child
+/// directory** (the owned `local-clone-*` name set) for which **no LIVE owner is
+/// proven** — **even with no ledger entry and no datadir content** (records into
+/// `outcome`). Proof of life is a ledger entry matched by path, or an in-dir
+/// [`OWNER_MARKER`] whose owner [`is_live`](OwnerIdentity::is_live); anything else
+/// (dead owner, recycled pid, absent/garbled marker, partial/empty datadir) is an
+/// orphan and is reaped (fail-closed). Datadirs already reaped/alarmed by the
+/// ledger pass are skipped.
 fn sweep_clone_root(
     clone_root: &Path,
     ledger: &CloneLedger,
@@ -516,7 +536,17 @@ fn sweep_clone_root(
     for ent in rd {
         let ent = ent.map_err(|e| CloneError::Tooling(format!("sweep entry: {e}")))?;
         let path = ent.path();
-        if !path.is_dir() || !looks_like_clone_datadir(&path) {
+        let name = match path.file_name().and_then(|s| s.to_str()) {
+            Some(n) => n.to_string(),
+            None => continue,
+        };
+        // The provider OWNS clone_root exclusively and names every clone datadir
+        // `local-clone-*`. We gate on the NAME, never on datadir content — a
+        // partial/empty mid-basebackup datadir has no `PG_VERSION`/`postmaster.pid`
+        // /marker, and that is exactly the leaked-PII orphan we must reap. Any
+        // child dir with the owned name is a reap candidate **unless a LIVE owner
+        // is proven** for it (ledger-by-path, then in-dir marker); see below.
+        if !path.is_dir() || !is_clone_datadir_name(&name) {
             continue;
         }
         // Already alarmed by the ledger pass this run (e.g. dead-owner entry whose
@@ -524,23 +554,26 @@ fn sweep_clone_root(
         if outcome.alarms.iter().any(|a| a.datadir == path) {
             continue;
         }
-        // A live ledger entry owns this datadir ⇒ in active use, leave it.
+        // PROOF OF LIFE #1 — a ledger entry matched BY PATH whose owner is live ⇒
+        // this is an in-progress provision or an in-use clone; leave it. (A
+        // legitimately in-flight provision wrote its ledger entry first, so it is
+        // proven live here and skipped — race-safe.)
         if ledger_entries
             .iter()
             .any(|e| e.datadir == path && e.owner().is_live())
         {
+            outcome.live_skipped.push(name);
             continue;
         }
 
-        // Decide ownership from the in-datadir marker. A live, matching owner ⇒
-        // in active use, leave it. Otherwise (dead owner, recycled pid, or no/
-        // garbled marker) it is an orphan — fail-closed.
+        // PROOF OF LIFE #2 — an in-dir owner marker naming a live, matching owner ⇒
+        // in active use; leave it. Otherwise (dead owner, recycled pid, or no/
+        // garbled/absent marker — including a partial/empty datadir) NO live owner
+        // is proven, so it is an orphan and we reap it (fail-closed toward PII
+        // safety: reaping a possibly-orphaned dir is correct per SPEC §10.7, which
+        // prioritises no-leaked-PII over a provision retry).
         let owner = read_owner_marker(&path);
-        let clone_id = path
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("unknown")
-            .to_string();
+        let clone_id = name;
         if matches!(&owner, Some(o) if o.is_live()) {
             outcome.live_skipped.push(clone_id);
             continue;
@@ -809,7 +842,10 @@ mod tests {
 
     #[test]
     fn sweep_skips_non_clone_directories() {
-        // A stray non-PG directory under clone_root is ignored (no tell-tale).
+        // A stray directory under clone_root whose name is NOT in the owned
+        // `local-clone-*` set is ignored — even though it has content. The sweep
+        // gates on the owned NAME (the provider owns clone_root exclusively), not
+        // on datadir content.
         let dir = tmp_dir("sweep-stray");
         let ledger = CloneLedger::open(dir.join("ledger")).unwrap();
         let clone_root = dir.join("clones");
@@ -819,7 +855,105 @@ mod tests {
 
         let outcome = reap_orphans_with_sweep(&ledger, &clone_root).unwrap();
         assert!(outcome.alarms.is_empty());
-        assert!(stray.exists(), "a non-clone dir must be left untouched");
+        assert!(
+            stray.exists(),
+            "a non-clone-named dir must be left untouched"
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn sweep_reaps_markerless_partial_datadir_with_no_ledger_entry() {
+        // THE RESIDUAL LEAK (re-review of #33): a PARTIAL mid-`pg_basebackup`
+        // datadir under clone_root has NO `PG_VERSION`/`postmaster.pid`/marker — it
+        // holds only `backup_label` + `pg_wal/` — AND no ledger entry. The old
+        // content-keyed `looks_like_clone_datadir` gate missed it, so the prod-PII
+        // partial survived the full sweep. With name-gating + reap-unless-live-owner
+        // it is reaped.
+        let dir = tmp_dir("sweep-partial");
+        let ledger = CloneLedger::open(dir.join("ledger")).unwrap();
+        let clone_root = dir.join("clones");
+        let partial = clone_root.join("local-clone-99999-1");
+        fs::create_dir_all(partial.join("pg_wal")).unwrap();
+        fs::write(partial.join("backup_label"), b"START WAL LOCATION: 0/0\n").unwrap();
+        // Sanity: none of the old content tell-tales are present, and no marker.
+        assert!(!partial.join("PG_VERSION").exists());
+        assert!(!partial.join("postmaster.pid").exists());
+        assert!(!partial.join(OWNER_MARKER).exists());
+        assert!(ledger.entries().unwrap().is_empty(), "no ledger entry");
+
+        let outcome = reap_orphans_with_sweep(&ledger, &clone_root).unwrap();
+        assert_eq!(
+            outcome.alarms.len(),
+            1,
+            "the markerless partial datadir must raise exactly one alarm: {outcome:?}"
+        );
+        assert_eq!(outcome.alarms[0].clone_id, "local-clone-99999-1");
+        assert!(outcome.alarms[0].reaped);
+        assert!(
+            !partial.exists(),
+            "the markerless partial prod-PII datadir must be GONE after the sweep"
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn sweep_reaps_empty_earliest_window_datadir() {
+        // The earliest crash window: the clone datadir exists but is COMPLETELY
+        // empty (pg_basebackup created the target but copied nothing yet). No
+        // content, no marker, no ledger entry — it must still be reaped.
+        let dir = tmp_dir("sweep-empty");
+        let ledger = CloneLedger::open(dir.join("ledger")).unwrap();
+        let clone_root = dir.join("clones");
+        let empty = clone_root.join("local-clone-88888-1");
+        fs::create_dir_all(&empty).unwrap();
+        assert!(
+            fs::read_dir(&empty).unwrap().next().is_none(),
+            "precondition: the datadir is empty"
+        );
+
+        let outcome = reap_orphans_with_sweep(&ledger, &clone_root).unwrap();
+        assert_eq!(
+            outcome.alarms.len(),
+            1,
+            "the empty earliest-window datadir must be reaped: {outcome:?}"
+        );
+        assert!(outcome.alarms[0].reaped);
+        assert!(!empty.exists(), "the empty clone datadir must be GONE");
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn sweep_skips_partial_datadir_with_live_ledger_owner() {
+        // Race-safety: a legitimately in-progress provision wrote its ledger entry
+        // FIRST (fix #1), so even a partial/empty datadir with no in-dir marker yet
+        // is proven LIVE by the ledger-by-path match and must NOT be reaped.
+        let dir = tmp_dir("sweep-inflight");
+        let ledger = CloneLedger::open(dir.join("ledger")).unwrap();
+        let clone_root = dir.join("clones");
+        let inflight = clone_root.join("local-clone-inflight-1");
+        // Partial, markerless datadir — mid-basebackup, marker not stamped yet.
+        fs::create_dir_all(inflight.join("pg_wal")).unwrap();
+        // …but the ledger entry exists, owned by THIS (live) process.
+        ledger
+            .record(&LedgerEntry {
+                clone_id: "local-clone-inflight-1".into(),
+                datadir: inflight.clone(),
+                port: 54399,
+                owner_pid: std::process::id(),
+                owner_start: OwnerIdentity::current().start,
+            })
+            .unwrap();
+
+        let outcome = reap_orphans_with_sweep(&ledger, &clone_root).unwrap();
+        assert!(
+            outcome.alarms.is_empty(),
+            "an in-progress provision proven live by its ledger entry must NOT be reaped: {outcome:?}"
+        );
+        assert!(
+            inflight.exists(),
+            "the in-flight clone datadir must survive"
+        );
         fs::remove_dir_all(&dir).ok();
     }
 
