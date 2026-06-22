@@ -43,6 +43,10 @@ use postgres::{Client, NoTls};
 
 use pgb_audit::pg::PgSink;
 use pgb_audit::verify_chain;
+// `sink.load_chain_mut()` / `sink.verify_mut()` below are now `Sink` trait
+// methods (the audit read-method API moved into the trait); bring `Sink` into
+// scope so they resolve on the concrete `PgSink` value.
+use pgb_audit::Sink;
 use pgb_core::MockClock;
 use pgb_warden::{
     tick_and_audit, PgActivitySource, PgKiller, WardenLoop, WardenThresholds, REASON_BREAKER_TRIP,

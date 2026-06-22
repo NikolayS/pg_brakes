@@ -31,6 +31,10 @@
 //! - [`anchor`] — the interval-driven external WORM/transparency anchor of the
 //!   chain head; [`verify_against_anchor`](anchor::verify_against_anchor) catches
 //!   a *full-chain rewrite* that the within-chain check cannot (S4).
+//! - [`boot`] — (S5, behind `pg`) the wiring that gives the proxy + CLI **one**
+//!   shared, persistent, anchored `_meta` chain: it constructs the [`SharedSink`]
+//!   over the Postgres `_meta` sink, runs the interval [`Anchorer`] over it, and
+//!   performs the **fail-closed startup verification** against the anchored head.
 //!
 //! Time is always read from `core::Clock` upstream and passed in as a
 //! millisecond stamp, so no part of the crate touches a wall clock and tests
@@ -47,11 +51,15 @@ pub mod secret;
 pub mod sink;
 
 #[cfg(feature = "pg")]
+pub mod boot;
+
+#[cfg(feature = "pg")]
 pub mod pg;
 
 pub use anchor::{
-    verify_against_anchor, verify_against_anchor_with, AnchorEntry, AnchorError,
-    AnchorVerification, Anchored, Anchorer, WormAnchor, WormAnchorError,
+    head_of, verify_against_anchor, verify_against_anchor_with, verify_records_against_anchor,
+    verify_records_against_anchor_with, AnchorEntry, AnchorError, AnchorVerification, Anchored,
+    Anchorer, WormAnchor, WormAnchorError,
 };
 pub use chain::{verify_chain, AuditChain, ChainBreak, NewEntry};
 pub use kms::{HeadSignature, Kms, KmsError, LocalKms, OPERATOR_PRINCIPAL};
@@ -59,7 +67,10 @@ pub use record::{
     AuditPayload, AuditRecord, Decision, IntentTiers, Principal, WriteSafetyRefs, GENESIS_PREV_HASH,
 };
 pub use secret::{LocalSecretStore, SecretError, SecretStore, AUDIT_SIGNING_KEY_ID};
-pub use sink::{InMemorySink, Sink, SinkError};
+pub use sink::{InMemorySink, SharedSink, Sink, SinkError};
+
+#[cfg(feature = "pg")]
+pub use boot::{AuditBoot, BootError};
 
 #[cfg(feature = "pg")]
 pub use pg::PgSink;

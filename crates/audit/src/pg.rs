@@ -131,13 +131,14 @@ impl Sink for PgSink {
             "PgSink::load_chain needs &mut; call load_chain_mut() / verify_mut()".to_string(),
         ))
     }
-}
 
-impl PgSink {
     /// Read the full chain back, oldest first (the `&mut` variant the sync
     /// Postgres client requires). Reconstructs each record from its verbatim
-    /// canonical payload + stored `record_hash`.
-    pub fn load_chain_mut(&mut self) -> Result<Vec<AuditRecord>, SinkError> {
+    /// canonical payload + stored `record_hash`. This **overrides** the trait
+    /// default (which would delegate to the unsupported `&self` `load_chain`), so
+    /// reads through a `dyn Sink` (e.g. [`crate::sink::SharedSink`]) work against
+    /// the `_meta` table.
+    fn load_chain_mut(&mut self) -> Result<Vec<AuditRecord>, SinkError> {
         let rows = self.client.query(
             "SELECT payload, record_hash FROM pgb_audit.audit_log ORDER BY seq ASC",
             &[],
@@ -149,12 +150,5 @@ impl PgSink {
             out.push(Self::row_to_record(&payload_json, record_hash)?);
         }
         Ok(out)
-    }
-
-    /// Verify the persisted chain (the `&mut` variant). Returns the first broken
-    /// link if any, exactly like the in-memory path.
-    pub fn verify_mut(&mut self) -> Result<(), SinkError> {
-        let chain = self.load_chain_mut()?;
-        crate::chain::verify_chain(&chain).map_err(SinkError::Integrity)
     }
 }

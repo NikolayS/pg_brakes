@@ -27,10 +27,29 @@
 //! - `PGB_POLICY_PATH` — path to `policy.yaml`.
 //! - `PGB_POLICY_ROLE` — which role's budgets apply (default `analytics`).
 //! - `PGB_STATEMENT_TIMEOUT_MS` — injected `statement_timeout` (default 30000).
+//!
+//! Audit (`_meta` chain — SPEC §3/§4/§10.9, issue #64):
+//! - `PGB_META_DSN` — the `_meta` writer DSN (keyword/value, **`pgb_audit_writer`**
+//!   role; **never** the audited agent). **Required**: there is no default — the
+//!   proxy refuses to start without somewhere to persist + anchor the canonical
+//!   audit chain (fail-closed; the audit log is the tamper-evidence root).
+//! - `PGB_AUDIT_SIGNING_KEY` — the audit chain-head **signing key** material (the
+//!   dev secret-store seam; production addresses a KMS key version under the same
+//!   id). **Required** (no literal default).
+//! - `PGB_ANCHOR_INTERVAL_MS` — the external-WORM anchoring cadence in millis
+//!   (default 60000). The very first tick anchors a baseline on startup.
+//! - `PGB_ANCHOR_PATH` — the **durable** file-backed WORM anchor path. The
+//!   anchored chain head is persisted here so it survives a process restart and
+//!   the boot can verify the `_meta` chain against the *prior* durable head BEFORE
+//!   re-anchoring (catching an offline full-chain rewrite across a restart).
+//!   **Required** (no literal default; the file stand-in models object-lock /
+//!   transparency-log retention — see `deploy/README.md`). Without a durable
+//!   anchor the cross-restart tamper-evidence guarantee cannot hold (fail-closed).
 
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
-use pgb_audit::InMemorySink;
+use pgb_audit::{AuditBoot, LocalSecretStore, SecretStore, Sink, AUDIT_SIGNING_KEY_ID};
 use pgb_core::{Clock, SystemClock};
 use pgb_policy::PolicyConfig;
 use pgb_proxy::config::{BackendTarget, TlsConfig};
@@ -120,12 +139,79 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Fail-closed on an incoherent TLS posture (require_tls without material).
     cfg.validate_tls()?;
 
-    // Audit sink: the in-memory hash chain (the Postgres `_meta` sink is wired in
-    // a follow-up; this binary keeps the chain in-process). The chain is the
-    // tamper-evident evidence that hostile statements were stopped.
-    let sink: Arc<Mutex<dyn pgb_audit::Sink + Send>> = Arc::new(Mutex::new(InMemorySink::new()));
+    // Audit: ONE shared, persistent, anchored `_meta` chain (SPEC §3/§4/§10.9,
+    // issue #64). The proxy `Recorder` and the CLI approval flow both hash-chain
+    // into this single canonical chain in the `_meta` DB (single genesis), and an
+    // external WORM anchor pins its head on a clock interval so a full-chain
+    // rewrite is caught. The chain is the tamper-evident evidence that hostile
+    // statements were stopped.
+    let meta_dsn = env_secret("PGB_META_DSN")?;
+    let signing_key = env_secret("PGB_AUDIT_SIGNING_KEY")?;
+    let anchor_interval_ms: u64 = env_or("PGB_ANCHOR_INTERVAL_MS", "60000").parse()?;
+    // The DURABLE anchor path: the anchored head must survive a restart so the
+    // boot can verify the persisted chain against the PRIOR durable head before
+    // re-anchoring (fail-closed; no literal default).
+    let anchor_path = env_secret("PGB_ANCHOR_PATH")?;
+
+    // The signing key lives in the secret-store seam, NOT on the DB host (§10.9);
+    // production addresses a KMS key version under the same id.
+    let mut store = LocalSecretStore::new();
+    store.put(AUDIT_SIGNING_KEY_ID, signing_key.as_bytes())?;
+
+    // Connect as the audit WRITER (never the audited agent) and build the boot
+    // handle over a DURABLE, file-backed WORM anchor: the shared sink + the
+    // interval anchorer over the canonical chain, with the anchored head persisted
+    // across restarts.
+    let mut boot =
+        AuditBoot::connect_with_anchor(&meta_dsn, &store, anchor_interval_ms, &anchor_path)
+            .map_err(|e| format!("audit _meta boot failed (fail-closed): {e}"))?;
+
     let clock: Arc<dyn Clock> = Arc::new(SystemClock::new());
-    let recorder = Recorder::new(sink, clock, cfg.backend.role.clone());
+
+    // FAIL-CLOSED boot sequence — VERIFY BEFORE ANCHOR (SPEC §3/§10.9): verify the
+    // persisted `_meta` chain against the PRIOR durable anchored head FIRST, and
+    // only on a clean verify anchor the current head forward. Re-anchoring first
+    // would re-pin whatever head is now in `_meta` (incl. an offline-forged head)
+    // and make the verify trivially pass — the hole this ordering closes. A
+    // full-chain rewrite across a restart changes the head ⇒ mismatch ⇒ refuse to
+    // start. (Genesis/first boot: empty durable WORM, nothing to verify against
+    // yet; anchored as the baseline.) Any error here is a hard exit.
+    boot.verify_then_anchor(clock.monotonic_millis())
+        .map_err(|e| format!("audit startup verification failed — refusing to start: {e}"))?;
+    eprintln!(
+        "pgb-proxy: audit `_meta` chain verified against its durable anchored head on startup \
+         (anchor {anchor_path}, interval {anchor_interval_ms}ms)"
+    );
+
+    // Inject the SAME shared sink into the proxy `Recorder` (the exact
+    // `Arc<Mutex<dyn Sink + Send>>` the boot handle wraps), so every gate verdict
+    // appends to the canonical `_meta` chain.
+    let sink: Arc<Mutex<dyn Sink + Send>> = boot.sink_arc();
+    let recorder = Recorder::new(sink, clock.clone(), cfg.backend.role.clone());
+
+    // Run the interval anchorer in the background, ticking on the same injected
+    // clock cadence. `AuditBoot` (sync Postgres client) is driven under a Mutex
+    // from a spawned task; the tokio interval provides the cadence and the
+    // monotonic clock the due-check.
+    let boot = Arc::new(Mutex::new(boot));
+    {
+        let boot = boot.clone();
+        let clock = clock.clone();
+        let tick = Duration::from_millis(anchor_interval_ms.max(1));
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(tick);
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                interval.tick().await;
+                let now = clock.monotonic_millis();
+                if let Ok(mut b) = boot.lock() {
+                    if let Err(e) = b.maybe_anchor(now) {
+                        eprintln!("pgb-proxy: audit anchor tick failed: {e}");
+                    }
+                }
+            }
+        });
+    }
 
     let tls_acceptor = match &cfg.tls {
         Some(t) => Some(Arc::new(tokio_rustls::TlsAcceptor::from(

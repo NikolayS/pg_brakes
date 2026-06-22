@@ -634,6 +634,8 @@ dependencies = [
  "pgb-audit",
  "pgb-core",
  "pgb-policy",
+ "pgb-proxy",
+ "postgres",
  "rand_core 0.6.4",
  "serde",
  "serde_json",

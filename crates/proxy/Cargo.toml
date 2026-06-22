@@ -21,7 +21,9 @@ path = "src/main.rs"
 pgb-core = { path = "../core" }
 pgb-policy = { path = "../policy" }
 pgb-pgwire = { path = "../pgwire" }
-pgb-audit = { path = "../audit", default-features = false }
+# The `pg` feature pulls in the Postgres `_meta` sink + the S5 `AuditBoot` wiring
+# so the running proxy persists + anchors ONE shared `_meta` chain (issue #64).
+pgb-audit = { path = "../audit", features = ["pg"] }
 
 # Async runtime + byte-level control of the FE/BE loop (matches pgwire).
 tokio = { version = "1", features = ["io-util", "macros", "rt", "rt-multi-thread", "net", "time", "sync"] }

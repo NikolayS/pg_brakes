@@ -18,11 +18,11 @@ use std::process::ExitCode;
 use ed25519_dalek::SigningKey;
 use rand_core::OsRng;
 
-use pgb_audit::Sink;
+use pgb_audit::{AuditBoot, LocalSecretStore, SecretStore, Sink, AUDIT_SIGNING_KEY_ID};
 use pgb_cli::{
     ApprovalFlow, InMemoryNonceStore, Principal, Proposal, RecordingWebhookSender, RequestId,
 };
-use pgb_core::{inverse::Operation, SystemClock};
+use pgb_core::{inverse::Operation, Clock, SystemClock};
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
@@ -47,24 +47,35 @@ fn main() -> ExitCode {
                 ExitCode::from(2)
             }
         },
-        Some("demo") => {
-            run_demo();
-            ExitCode::SUCCESS
-        }
+        Some("demo") => match run_demo() {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("pgb-cli demo failed: {e}");
+                ExitCode::from(1)
+            }
+        },
         _ => {
             println!(
                 "pgb-cli — pg_bumpers approval CLI (SPEC §14 MVP).\n\
                  usage:\n  \
                  pgb-cli approve <request-id>   sign a proposal-bound grant (human approver)\n  \
-                 pgb-cli demo                   run request -> approve -> verify-at-apply in-process"
+                 pgb-cli demo                   run request -> approve -> verify-at-apply\n\
+                 \n\
+                 Set PGB_META_DSN (audit-writer DSN) + PGB_AUDIT_SIGNING_KEY to run the demo\n\
+                 against the SHARED, persistent, anchored `_meta` chain (the one the proxy\n\
+                 also writes); otherwise the demo runs in-process on an in-memory chain."
             );
             ExitCode::SUCCESS
         }
     }
 }
 
-/// Run the full §14 flow in-process and print each step (a runnable smoke).
-fn run_demo() {
+/// Run the full §14 flow + print each step. When `PGB_META_DSN` +
+/// `PGB_AUDIT_SIGNING_KEY` are set, the flow hash-chains into the **shared,
+/// persistent, anchored `_meta` chain** (issue #64 — the same chain the proxy
+/// writes), and the run anchors + fail-closed-verifies it on exit. Otherwise it
+/// runs in-process on an in-memory chain (the DB-free smoke).
+fn run_demo() -> Result<(), String> {
     let clock = SystemClock::new();
 
     // The approver's audit-key-grade signing key (§10.9). In production this is
@@ -73,8 +84,86 @@ fn run_demo() {
     let signing_key = SigningKey::generate(&mut OsRng);
     let verifying_key = signing_key.verifying_key();
 
+    match (
+        std::env::var("PGB_META_DSN").ok(),
+        std::env::var("PGB_AUDIT_SIGNING_KEY").ok(),
+    ) {
+        (Some(dsn), Some(key)) if !dsn.is_empty() && !key.is_empty() => {
+            // SHARED `_meta` path: build the boot handle over a DURABLE WORM,
+            // FAIL-CLOSED verify-before-anchor on boot (the prior durable head must
+            // match the persisted chain), run the flow against a clone of its
+            // shared sink, then anchor the newly-extended head forward.
+            let interval_ms: u64 = std::env::var("PGB_ANCHOR_INTERVAL_MS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(60_000);
+            // The durable anchor path: persisted across restarts so the boot can
+            // verify against the prior head before re-anchoring (fail-closed).
+            let anchor_path = std::env::var("PGB_ANCHOR_PATH").map_err(|_| {
+                "PGB_ANCHOR_PATH is required (the durable WORM anchor path) and has no \
+                 default — the cross-restart tamper-evidence guarantee needs it"
+                    .to_string()
+            })?;
+            if anchor_path.is_empty() {
+                return Err("PGB_ANCHOR_PATH is set but empty; refusing (fail-closed)".to_string());
+            }
+            let mut store = LocalSecretStore::new();
+            store
+                .put(AUDIT_SIGNING_KEY_ID, key.as_bytes())
+                .map_err(|e| e.to_string())?;
+            let mut boot = AuditBoot::connect_with_anchor(&dsn, &store, interval_ms, &anchor_path)
+                .map_err(|e| format!("audit _meta boot failed (fail-closed): {e}"))?;
+
+            // VERIFY BEFORE ANCHOR on boot: the persisted chain must match the
+            // PRIOR durable anchored head (catches an offline full-chain rewrite
+            // across a restart); only then anchor the current head forward. Genesis
+            // first run (empty durable WORM) anchors the baseline.
+            boot.verify_then_anchor(clock.monotonic_millis())
+                .map_err(|e| {
+                    format!("audit `_meta` startup verification failed (fail-closed): {e}")
+                })?;
+
+            let audit = boot.shared_sink();
+            run_flow(audit, &signing_key, verifying_key, &clock)?;
+
+            // Anchor the head we just extended forward (durably).
+            boot.maybe_anchor(clock.monotonic_millis())
+                .map_err(|e| format!("audit anchor failed: {e}"))?;
+            let n = boot.load_chain().map(|c| c.len()).unwrap_or(0);
+            println!(
+                "audit: {n} records on the SHARED, durably-anchored `_meta` chain; \
+                 chain verified against its prior anchored head before extending"
+            );
+            Ok(())
+        }
+        _ => {
+            // DB-free smoke on an in-memory chain, wrapped in a SharedSink so we
+            // can read the same chain back after the flow consumes its handle.
+            let audit = pgb_audit::SharedSink::new(pgb_audit::InMemorySink::new());
+            let readback = audit.clone();
+            run_flow(audit, &signing_key, verifying_key, &clock)?;
+            let chain_ok = readback.verify().is_ok();
+            println!(
+                "audit: {} records (in-memory), chain intact={}",
+                readback.load_chain().map(|c| c.len()).unwrap_or(0),
+                chain_ok
+            );
+            Ok(())
+        }
+    }
+}
+
+/// Drive request → approve → verify-at-apply over an arbitrary audit [`Sink`],
+/// printing each step. The audit sink is whatever the caller injected — an
+/// in-memory chain or a clone of the shared, persistent `_meta` chain.
+fn run_flow<S: Sink>(
+    audit: S,
+    signing_key: &SigningKey,
+    verifying_key: ed25519_dalek::VerifyingKey,
+    clock: &dyn Clock,
+) -> Result<(), String> {
     let mut flow = ApprovalFlow::new(
-        pgb_audit::InMemorySink::new(),
+        audit,
         RecordingWebhookSender::new(),
         verifying_key,
         InMemoryNonceStore::new(),
@@ -98,8 +187,8 @@ fn run_demo() {
 
     // 1. The blocked write opens an APPROVAL_REQUIRED ticket + fires the webhook.
     let outcome = flow
-        .request_elevation(id.clone(), proposal, "agent-demo", &op, 60_000, &clock)
-        .expect("eligible op should open a request");
+        .request_elevation(id.clone(), proposal, "agent-demo", &op, 60_000, clock)
+        .map_err(|e| format!("request_elevation: {e}"))?;
     println!(
         "1) request_elevation -> {} (request {}, webhook delivered={})",
         outcome.contract.code,
@@ -110,8 +199,8 @@ fn run_demo() {
     // 2. A human approver (NOT the agent) signs the grant.
     let approver = Principal::approver("human-alice");
     let approval = flow
-        .approve(&id, &approver, &signing_key, "nonce-demo-1", 30_000, &clock)
-        .expect("approver should sign a grant");
+        .approve(&id, &approver, signing_key, "nonce-demo-1", 30_000, clock)
+        .map_err(|e| format!("approve: {e}"))?;
     println!("2) approve -> grant signed by `{}`", approver.id);
 
     // 3. At apply, re-derive the live binding and re-verify the grant.
@@ -121,16 +210,9 @@ fn run_demo() {
         .expect("request exists")
         .proposal
         .to_binding("nonce-demo-1", approval.grant.binding.expiry_unix_millis);
-    match flow.verify_at_apply(&approval.grant, &live, &clock) {
+    match flow.verify_at_apply(&approval.grant, &live, clock) {
         Ok(()) => println!("3) verify_at_apply -> VERIFIED (grant binds to the approved proposal)"),
         Err(e) => println!("3) verify_at_apply -> REJECTED: {e}"),
     }
-
-    // The audit chain holds every step, hash-chained + verifiable.
-    let chain_ok = flow.audit().verify().is_ok();
-    println!(
-        "audit: {} records, chain intact={}",
-        flow.audit().load_chain().map(|c| c.len()).unwrap_or(0),
-        chain_ok
-    );
+    Ok(())
 }

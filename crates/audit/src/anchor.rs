@@ -36,7 +36,7 @@ use std::path::{Path, PathBuf};
 
 use crate::chain::AuditChain;
 use crate::kms::{HeadSignature, Kms, LocalKms};
-use crate::record::GENESIS_PREV_HASH;
+use crate::record::{AuditRecord, GENESIS_PREV_HASH};
 
 /// One published anchor: a signed snapshot of the chain head at an interval tick.
 ///
@@ -108,10 +108,18 @@ pub enum AnchorVerification {
     },
 }
 
-/// The head of a chain as `(head_hash, seq, timestamp)`: the `record_hash` and
-/// `seq` of the last record, or `(GENESIS_PREV_HASH, 0, 0)` for an empty chain.
-fn chain_head(chain: &AuditChain) -> (String, u64, u64) {
-    match chain.records().last() {
+/// The head of a record slice as `(head_hash, seq, timestamp)`: the
+/// `record_hash` and `seq` of the last record, or `(GENESIS_PREV_HASH, 0, 0)`
+/// for an empty slice.
+///
+/// This is the canonical head-extraction used by **every** anchor path — the
+/// in-memory [`AuditChain`] and the records loaded back from the persistent
+/// `_meta` sink — so an anchor taken over an in-memory chain and one taken over
+/// the same records read from Postgres pin the **identical** head. That identity
+/// is what lets the proxy/CLI anchor the canonical `_meta` chain they share and
+/// lets a later verifier (over the persisted rows) match it.
+pub fn head_of(records: &[AuditRecord]) -> (String, u64, u64) {
+    match records.last() {
         Some(r) => (
             r.record_hash.clone(),
             r.payload.seq,
@@ -297,6 +305,23 @@ impl Anchorer {
         now_monotonic_millis: u64,
         worm: &mut WormAnchor,
     ) -> Result<Option<Anchored>, WormAnchorError> {
+        self.maybe_anchor_records(chain.records(), now_monotonic_millis, worm)
+    }
+
+    /// Anchor over a **record slice** rather than an in-memory [`AuditChain`].
+    ///
+    /// This is the path the proxy/CLI take over the rows read back from the
+    /// persistent `_meta` sink ([`crate::pg::PgSink::load_chain_mut`]): the
+    /// canonical chain lives in Postgres, so the anchorer pins the head of the
+    /// persisted records directly. The head is computed by [`head_of`], so an
+    /// anchor over `chain.records()` and one over the same rows read from `_meta`
+    /// pin the **identical** head.
+    pub fn maybe_anchor_records(
+        &mut self,
+        records: &[AuditRecord],
+        now_monotonic_millis: u64,
+        worm: &mut WormAnchor,
+    ) -> Result<Option<Anchored>, WormAnchorError> {
         let due = match self.last_anchor_at {
             None => true,
             Some(prev) => now_monotonic_millis.saturating_sub(prev) >= self.interval_millis,
@@ -305,7 +330,7 @@ impl Anchorer {
             return Ok(None);
         }
 
-        let (head_hash, seq, ts) = chain_head(chain);
+        let (head_hash, seq, ts) = head_of(records);
         let signature = self.signer.sign_head(&head_hash, seq, ts);
         let entry = AnchorEntry {
             head_hash: head_hash.clone(),
@@ -340,10 +365,7 @@ pub fn verify_against_anchor(
     chain: &AuditChain,
     worm: &WormAnchor,
 ) -> Result<AnchorVerification, AnchorError> {
-    match &worm.verifier {
-        Some(v) => verify_against_anchor_with(chain, worm, v),
-        None => Err(AnchorError::NoVerifier),
-    }
+    verify_records_against_anchor(chain.records(), worm)
 }
 
 /// Verify `chain` against its latest WORM-anchored head using an **explicit**
@@ -351,6 +373,38 @@ pub fn verify_against_anchor(
 /// embedded verifier). Same outcomes as [`verify_against_anchor`].
 pub fn verify_against_anchor_with(
     chain: &AuditChain,
+    worm: &WormAnchor,
+    verifier: &impl Kms,
+) -> Result<AnchorVerification, AnchorError> {
+    verify_records_against_anchor_with(chain.records(), worm, verifier)
+}
+
+/// Verify a **record slice** (e.g. the rows read back from the persistent
+/// `_meta` sink) against its latest WORM-anchored head, using the verifier the
+/// anchor carries.
+///
+/// This is the **fail-closed startup check** the proxy/CLI run on boot: load the
+/// canonical `_meta` chain, and refuse to start unless its current head matches
+/// the validly-signed anchored head. A full-chain rewrite changes the head, so
+/// it surfaces here as [`AnchorVerification::HeadMismatch`]; a missing anchor is
+/// [`AnchorError::NoAnchor`] (fail closed — with no anchor we cannot assert the
+/// chain was not rewritten). Same outcomes/semantics as [`verify_against_anchor`].
+pub fn verify_records_against_anchor(
+    records: &[AuditRecord],
+    worm: &WormAnchor,
+) -> Result<AnchorVerification, AnchorError> {
+    match &worm.verifier {
+        Some(v) => verify_records_against_anchor_with(records, worm, v),
+        None => Err(AnchorError::NoVerifier),
+    }
+}
+
+/// Verify a **record slice** against its latest WORM-anchored head using an
+/// **explicit** KMS verifier (needed when the anchor was loaded from a file and
+/// carries no embedded verifier). Same outcomes as
+/// [`verify_records_against_anchor`].
+pub fn verify_records_against_anchor_with(
+    records: &[AuditRecord],
     worm: &WormAnchor,
     verifier: &impl Kms,
 ) -> Result<AnchorVerification, AnchorError> {
@@ -367,8 +421,8 @@ pub fn verify_against_anchor_with(
         return Err(AnchorError::BadSignature { seq: anchor.seq });
     }
 
-    // (2) Compare the chain's current head to the validly-signed anchored head.
-    let (actual_head, _seq, _ts) = chain_head(chain);
+    // (2) Compare the slice's current head to the validly-signed anchored head.
+    let (actual_head, _seq, _ts) = head_of(records);
     if actual_head == anchor.head_hash {
         Ok(AnchorVerification::Verified)
     } else {

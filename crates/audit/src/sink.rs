@@ -38,11 +38,33 @@ pub trait Sink {
     fn append(&mut self, entry: NewEntry, timestamp_ms: u64) -> Result<AuditRecord, SinkError>;
 
     /// Read the full chain back, oldest first, for verification / export.
+    ///
+    /// Some backends (the synchronous Postgres `_meta` sink) cannot satisfy a
+    /// `&self` read because the DB client needs `&mut`; they return a
+    /// [`SinkError::Backend`] here and implement [`load_chain_mut`](Sink::load_chain_mut)
+    /// instead. Callers that may hold such a sink should prefer `load_chain_mut`.
     fn load_chain(&self) -> Result<Vec<AuditRecord>, SinkError>;
+
+    /// Read the full chain back, oldest first, with a **mutable** borrow.
+    ///
+    /// This is the universal read path: the in-memory sink delegates to the
+    /// `&self` [`load_chain`](Sink::load_chain), and the Postgres `_meta` sink
+    /// overrides it to drive its `&mut` client. The proxy/CLI anchoring + the
+    /// fail-closed startup verify both read through this method so they work
+    /// against **either** sink unchanged.
+    fn load_chain_mut(&mut self) -> Result<Vec<AuditRecord>, SinkError> {
+        self.load_chain()
+    }
 
     /// Verify the persisted chain's integrity, returning the first broken link.
     fn verify(&self) -> Result<(), SinkError> {
         crate::chain::verify_chain(&self.load_chain()?).map_err(SinkError::Integrity)
+    }
+
+    /// Verify the persisted chain's integrity via the `&mut` read path (the one
+    /// that works against the Postgres `_meta` sink too).
+    fn verify_mut(&mut self) -> Result<(), SinkError> {
+        crate::chain::verify_chain(&self.load_chain_mut()?).map_err(SinkError::Integrity)
     }
 }
 
@@ -77,5 +99,74 @@ impl Sink for InMemorySink {
 
     fn load_chain(&self) -> Result<Vec<AuditRecord>, SinkError> {
         Ok(self.chain.records().to_vec())
+    }
+}
+
+/// A **shared, cloneable** handle to one append-only [`Sink`] (SPEC §3/§4 — one
+/// canonical `_meta` chain).
+///
+/// This is the seam that collapses the per-component, in-memory, ephemeral
+/// chains into **one** chain: the proxy `Recorder` and the CLI approval flow each
+/// hold a clone of the same `SharedSink`, so a proxy reject and a CLI approve
+/// hash-chain into the **same** underlying sink (one genesis, one head). Wrap a
+/// single backing sink — the Postgres `_meta` [`crate::pg::PgSink`] in
+/// production, an [`InMemorySink`] in unit tests — once, then clone the handle to
+/// every consumer.
+///
+/// The inner `Mutex` serializes appends, which a hash chain requires anyway (it
+/// is inherently sequential). `load_chain_mut` (and `verify_mut`) read the same
+/// underlying chain, so the interval anchorer and the fail-closed startup verify
+/// see exactly the records both consumers appended.
+#[derive(Clone)]
+pub struct SharedSink {
+    inner: std::sync::Arc<std::sync::Mutex<dyn Sink + Send>>,
+}
+
+impl SharedSink {
+    /// Wrap a backing sink in a shared, cloneable handle. Every clone appends to
+    /// and reads from the **same** underlying chain.
+    pub fn new(sink: impl Sink + Send + 'static) -> Self {
+        SharedSink {
+            inner: std::sync::Arc::new(std::sync::Mutex::new(sink)),
+        }
+    }
+
+    /// Wrap an already-shared `Arc<Mutex<dyn Sink + Send>>` (e.g. the exact
+    /// trait-object handle the proxy `Recorder` is constructed from), so the
+    /// anchorer/verify path and the recorder share the identical backing sink.
+    pub fn from_arc(inner: std::sync::Arc<std::sync::Mutex<dyn Sink + Send>>) -> Self {
+        SharedSink { inner }
+    }
+
+    /// The underlying shared handle, e.g. to hand the proxy `Recorder` the same
+    /// `Arc<Mutex<dyn Sink + Send>>` this `SharedSink` wraps.
+    pub fn arc(&self) -> std::sync::Arc<std::sync::Mutex<dyn Sink + Send>> {
+        self.inner.clone()
+    }
+}
+
+impl Sink for SharedSink {
+    fn append(&mut self, entry: NewEntry, timestamp_ms: u64) -> Result<AuditRecord, SinkError> {
+        let mut guard = self
+            .inner
+            .lock()
+            .map_err(|_| SinkError::Backend("shared audit sink mutex poisoned".to_string()))?;
+        guard.append(entry, timestamp_ms)
+    }
+
+    fn load_chain(&self) -> Result<Vec<AuditRecord>, SinkError> {
+        let guard = self
+            .inner
+            .lock()
+            .map_err(|_| SinkError::Backend("shared audit sink mutex poisoned".to_string()))?;
+        guard.load_chain()
+    }
+
+    fn load_chain_mut(&mut self) -> Result<Vec<AuditRecord>, SinkError> {
+        let mut guard = self
+            .inner
+            .lock()
+            .map_err(|_| SinkError::Backend("shared audit sink mutex poisoned".to_string()))?;
+        guard.load_chain_mut()
     }
 }
