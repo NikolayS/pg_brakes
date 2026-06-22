@@ -9,23 +9,28 @@
 //!   proposal_id, dry_run_lsn, blast_radius_checksum, nonce, expiry }
 //! ```
 //!
-//! At apply time the apply path is *intended* to re-derive the binding hash from
-//! the **live** request and re-verify the signature + the single-use nonce + the
-//! expiry against the injected [`Clock`]. Any divergence — a swapped statement,
-//! swapped prepared params, a replay onto a different session, a reused nonce, or
-//! an expired TTL — makes [`GrantToken::verify_for_apply`] **REJECT**. The
-//! binding hash is the reason statement-text-plus-blast-radius alone is
-//! insufficient (round-3 fix): it pins the *principal* and *session* too,
-//! defeating cross-session replay.
+//! At apply time the apply path re-derives the binding hash from the **live**
+//! request and re-verifies the signature + the single-use nonce + the expiry
+//! against the injected [`Clock`]. Any divergence — a swapped statement, swapped
+//! prepared params, a replay onto a different session, a reused nonce, or an
+//! expired TTL — makes [`GrantToken::verify_for_apply`] **REJECT**. The binding
+//! hash is the reason statement-text-plus-blast-radius alone is insufficient
+//! (round-3 fix): it pins the *principal* and *session* too, defeating
+//! cross-session replay.
 //!
-//! **Status (S4 — not yet wired into a production apply path).** This token is
-//! minted and verified end-to-end *only* in the CLI's in-process approval demo
-//! (`pgb_cli::flow`, which calls [`GrantToken::verify_for_apply`]). **No
-//! production apply path consumes it yet** — `guarded_apply`
-//! (`crates/clone-orchestrator`) has no caller that threads a `GrantToken`
-//! through, and the proxy never calls `verify_for_apply`. Wiring the §14.3 grant
-//! into the production apply path is **deferred to S5** (#66; blocked on the
-//! generic `ApplyConn`, #45). See `docs/spec/SPEC.amendments.md` §S4.
+//! **Status (S5 — consumed at a real apply path).** This token is now re-verified
+//! at a **production apply path**:
+//! `pgb_clone_orchestrator::guarded_apply_with_grant`
+//! (`crates/clone-orchestrator/src/apply_grant.rs`, #66) re-derives the live
+//! binding from the live request **plus the apply-time recomputed PK-set
+//! checksum** and calls [`GrantToken::verify_for_apply`] **before** any apply txn
+//! opens — no valid grant ⇒ fail-closed abort, no mutation. The grant gate binds
+//! the signed `blast_radius_checksum` to the live data set, so a drifted proposal
+//! also rejects. (The CLI's in-process approval demo, `pgb_cli::flow`, still
+//! mints + verifies too.) **Remaining gap:** the live agent → MCP → proxy wiring
+//! that *invokes* that caller over a served transport is **not** built yet
+//! (S5 assembly, #63) — proven by unit + real-PG18 integration tests, not yet by
+//! a running proxy/MCP binary. See `docs/spec/SPEC.amendments.md` §S5.
 //!
 //! Cryptography: Ed25519 via `ed25519-dalek` v2 (BSD-3-Clause). The signed
 //! message is the 32-byte SHA-256 binding hash; verification uses

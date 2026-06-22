@@ -644,9 +644,11 @@ dependencies = [
 name = "pgb-clone-orchestrator"
 version = "0.0.0"
 dependencies = [
+ "ed25519-dalek",
  "pgb-core",
  "pgb-policy",
  "postgres",
+ "rand_core 0.6.4",
  "serde",
  "serde_json",
  "sqlparser",

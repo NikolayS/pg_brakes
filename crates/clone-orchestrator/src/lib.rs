@@ -57,6 +57,7 @@
 #![warn(missing_docs)]
 
 pub mod apply;
+pub mod apply_grant;
 pub mod dry_run;
 pub mod predicate;
 pub mod proposal;
@@ -67,6 +68,9 @@ pub use apply::{
     guarded_apply, statement_timeout_ms, AppliedWrite, ApplyConn, ApplyError, CapturedRow,
     ForwardResult, PitrConfig, RecoveryFence, RelationChange, MIN_STATEMENT_TIMEOUT_MS,
     STATEMENT_TIMEOUT_MULTIPLIER,
+};
+pub use apply_grant::{
+    guarded_apply_with_grant, BridgedApplyConfig, GrantedApplyError, LiveRequest,
 };
 pub use dry_run::{
     classify, dry_run, AffectedTable, DryRunError, Measurement, Rehearsal, RelationEffect,
