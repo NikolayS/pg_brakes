@@ -713,6 +713,11 @@ name = "pgb-warden"
 version = "0.0.0"
 dependencies = [
  "pgb-core",
+ "pgb-policy",
+ "postgres",
+ "serde",
+ "serde_yaml_ng",
+ "thiserror",
 ]
 
 [[package]]
