@@ -64,6 +64,32 @@ impossible" or "tamper-proof". This file documents the residual, disclosed limit
   prove the WALL denies DROP / COPY…PROGRAM / pg_read_file / non-whitelisted reads
   when the agent connects WITHOUT the proxy. The marquee's CLASS 1 shows the
   applyd refusal even when driven *through* the MCP.
+- **Cooperative MCP-seam denials are UNAUDITED BY DESIGN (S5 #77 item 3).** Several
+  denials are emitted by the cooperative MCP shell **at the seam, BEFORE the request
+  ever reaches the proxy or applyd** — so they never produce a `_meta` audit record:
+  - **`READ_ONLY`** — a `query`/`explain_plan` whose inner statement is a write/DDL or
+    a stacked statement is blocked by the cooperative classifier before the proxy wire
+    (`crates/mcp/src/server.rs` `tool_query` / `tool_explain_plan`).
+  - **`CONFIRM_REQUIRED`** — `apply_write` called with no `confirm_rows` is blocked at
+    the shell (absence ≠ "just apply") before the applyd `apply` RPC.
+  - **`PROPOSAL_NOT_FOUND`** — `dry_run`/`apply_write` for an id the shell never minted
+    (unknown/TTL-expired) is rejected at the shell before any RPC.
+  - **`NOT_REHEARSABLE`** (when raised at the MCP seam for a malformed/empty statement
+    that fails-closed to NotRead at the classifier) — blocked before the wire.
+  This is **intentional and acceptable**: the floor + its audit live in the
+  **proxy + applyd** (the real boundaries), and a write rejected at the cooperative
+  seam *never executes and never reaches them*, so there is nothing for the durable
+  chain to attest. Critically, the agent-facing `pgb-mcp` process holds **only the
+  SELECT-only `pgb_audit_reader`** credential (#97; it *reads* the `_meta` tail for
+  `get_audit` but has **no** INSERT capability) — emitting a shell-side audit record
+  would require putting an audit-WRITE credential into the agent process, which is
+  **forbidden** (least privilege; "the audited cannot write audit", SPEC §3/§10.9).
+  So the honest contract is: the MCP seam may *cooperatively short-circuit* a request
+  with a recoverable block, but the **authoritative, audited** denials are the ones the
+  proxy/WALL and applyd record — and those still fire for any request that reaches the
+  wire (incl. an agent that *skips* the cooperative shell entirely). Whenever an
+  MCP-seam block would also be a real floor violation, driving the same statement
+  *through to* applyd/proxy (or directly to the DB) produces the audited refusal.
 - **SPEC.amendments tie:** "S5 — MCP production wire + live Core (#67)" →
   *"Not a security boundary (the honesty contract)"*.
 

@@ -227,4 +227,21 @@ warden:
     fn default_validates() {
         assert!(WardenThresholds::default().validate().is_ok());
     }
+
+    /// The SHIPPED policy example now documents a `warden:` section (S5 #77 item 2).
+    /// Assert it parses, validates, AND equals the conservative built-in default — so
+    /// the example is HONEST (a deployment sees exactly what the warden enforces) and a
+    /// drift between the doc'd numbers and the code default would fail CI.
+    #[test]
+    fn shipped_policy_example_warden_section_matches_the_default() {
+        const EXAMPLE: &str = include_str!("../../policy/policy.example.yaml");
+        let t = WardenThresholds::from_policy_yaml(EXAMPLE)
+            .expect("the shipped policy.example.yaml `warden:` section must parse + validate");
+        assert_eq!(
+            t,
+            WardenThresholds::default(),
+            "the documented `warden:` values must match WardenThresholds::default() — \
+             update both together if you change a threshold"
+        );
+    }
 }
