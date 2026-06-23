@@ -61,8 +61,12 @@ fn it_enabled() -> bool {
         .unwrap_or(false)
 }
 
+/// The PG18 bin dir. Precedence (unified across every IT — issue #44):
+/// `PG_BUMPERS_PG18_BIN` (the ONE cross-IT/CI var) → `PG_BUMPERS_PGBIN` (legacy,
+/// local back-compat) → the Homebrew keg path (macOS dev fallback).
 fn pgbin() -> String {
-    std::env::var("PG_BUMPERS_PGBIN")
+    std::env::var("PG_BUMPERS_PG18_BIN")
+        .or_else(|_| std::env::var("PG_BUMPERS_PGBIN"))
         .unwrap_or_else(|_| "/opt/homebrew/opt/postgresql@18/bin".to_string())
 }
 

@@ -45,7 +45,9 @@ IFS=$'\n\t'
 # --------------------------------------------------------------------------------------
 # Config
 # --------------------------------------------------------------------------------------
-PGBIN="${PGBIN:-/opt/homebrew/opt/postgresql@18/bin}"
+# PG18 bin dir. Precedence (unified — issue #44): PG_BUMPERS_PG18_BIN → PGBIN
+# (legacy) → the Homebrew keg path (macOS dev fallback).
+PGBIN="${PG_BUMPERS_PG18_BIN:-${PGBIN:-/opt/homebrew/opt/postgresql@18/bin}}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEPLOY_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 SQL_FILE="$DEPLOY_DIR/sql/10_hardened_role.sql"

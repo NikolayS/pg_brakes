@@ -205,7 +205,8 @@ PG_BUMPERS_IT=1 cargo test -p pgb-clone-orchestrator --test dry_run_it -- --noca
 
 The **clone-governance** suite is self-contained — it spins its *own* throwaway PG 18
 clusters (primary on `54360 + offset`, clone on `54370 + offset`) via
-`PG_BUMPERS_PGBIN` (defaults to the keg path), so `local-stack` does not need to be up:
+`PG_BUMPERS_PG18_BIN` (or the legacy `PG_BUMPERS_PGBIN`; both default to the keg
+path), so `local-stack` does not need to be up:
 
 ```sh
 PG_BUMPERS_IT=1 cargo test -p pgb-clone-orchestrator --test clone_governance_it -- --nocapture

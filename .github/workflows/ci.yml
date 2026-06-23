@@ -60,3 +60,161 @@ jobs:
   # builds + tests it (`cargo {build,test} --workspace`), and `cargo deny`
   # license-checks its deps. The old pnpm/Node `mcp:` job (the TS `mcp/server`)
   # was removed with that tree in EPIC #83; no replacement step is needed.
+
+  # ===========================================================================
+  # THE SAFETY INTEGRATION JOB (issue #44) — runs the REAL deterministic-floor
+  # ITs against a REAL PostgreSQL 18 on EVERY push/PR. These tests are env-gated
+  # behind PG_BUMPERS_IT=1 and need a live PG18, so the fast `rust` job above
+  # (which NEVER sets PG_BUMPERS_IT) skips them. A regression that breaks the
+  # moat would otherwise leave CI green — this job is the backstop.
+  #
+  # ⚠️ Throwaway clusters ONLY, on dedicated HIGH ports (54321/54341/54355/
+  # 55431/55432/543xx). NEVER :5432.
+  #
+  # Substrate strategy (avoids the #18 cross-crate scratch-collision flakes):
+  #   • SELF-PROVISIONING ITs (warden, dbsafe-bench gate, clone-governance, the
+  #     MCP write-path) initdb their OWN clusters — run each as its OWN cargo
+  #     invocation with --test-threads=1 (clone-governance + write-path both
+  #     default to :54360, so they MUST NOT run concurrently).
+  #   • STACK-BACKED ITs connect to a pre-provisioned admin server on a fixed
+  #     port (each test makes its own DB): deploy/ci/start-pg.sh brings those up.
+  #   • PROXY / READ-PATH ITs need the native-role WALL → deploy/local-stack.sh.
+  # ===========================================================================
+  integration:
+    name: Integration (real PG18 — the safety ITs)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      # The ONE cross-IT/CI PG18 bin-dir variable (issue #44). PGDG installs
+      # PostgreSQL 18 here on Ubuntu; every IT resolver honors this first.
+      PG_BUMPERS_PG18_BIN: /usr/lib/postgresql/18/bin
+      PG_BUMPERS_IT: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
+
+      - name: Install PostgreSQL 18 from the PGDG apt repo
+        run: |
+          set -Eeuo pipefail
+          # The official apt.postgresql.org setup, pinned reproducibly. The
+          # ubuntu runner ships its own libpq/clients — purge first so the only
+          # PG on PATH is PGDG's 18.
+          sudo systemctl stop postgresql || true
+          sudo apt-get purge -y 'postgresql-*' || true
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+            -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc
+          # shellcheck disable=SC1091
+          . /etc/os-release
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] \
+            https://apt.postgresql.org/pub/repos/apt ${VERSION_CODENAME}-pgdg main" \
+            | sudo tee /etc/apt/sources.list.d/pgdg.list >/dev/null
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends postgresql-18 postgresql-client-18
+          # Verify the bin dir + the exact tools every IT needs are present.
+          ls -l "$PG_BUMPERS_PG18_BIN"
+          for t in initdb pg_ctl pg_basebackup psql pg_isready; do
+            test -x "$PG_BUMPERS_PG18_BIN/$t" || { echo "missing $t in $PG_BUMPERS_PG18_BIN" >&2; exit 1; }
+          done
+          "$PG_BUMPERS_PG18_BIN/initdb" --version
+          # PGDG auto-starts a default cluster on :5432 owned by the `postgres`
+          # OS user — stop it so nothing of ours can ever collide with it. (Our
+          # ITs use high ports only; this is belt + suspenders.)
+          sudo pg_ctlcluster 18 main stop || true
+
+      - name: Install Rust 1.90.0
+        uses: dtolnay/rust-toolchain@67ef31d5b988238dd797d409d6f9574278e20537 # master
+        with:
+          toolchain: 1.90.0
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
+        with:
+          key: integration
+
+      - name: Build the workspace (test + bins the ITs drive)
+        run: cargo build --workspace --locked
+
+      # ---- SELF-PROVISIONING ITs (each initdb's its own throwaway cluster) ----
+      # Distinct cargo invocations + --test-threads=1 so the clone-governance and
+      # write-path ITs (both default to :54360) can never run concurrently.
+
+      - name: IT — native-role warden runaway-kill (warden_it)
+        run: cargo test -p pgb-warden --test warden_it --locked -- --nocapture --test-threads=1
+
+      - name: IT — dbsafe-bench gate has teeth (gate_it, direct-to-DB WALL bypass)
+        run: cargo test -p dbsafe-bench --test gate_it --locked -- --nocapture --test-threads=1
+
+      - name: IT — clone-orchestrator governance (dry_run clone + guarded apply + SIGKILL teardown)
+        run: cargo test -p pgb-clone-orchestrator --test clone_governance_it --locked -- --nocapture --test-threads=1
+
+      - name: IT — MCP write-path e2e (mcp -> applyd socket -> guarded_apply -> PG18)
+        run: cargo test -p pgb-mcp --test write_path_e2e --locked -- --nocapture --test-threads=1
+
+      # ---- STACK-BACKED ITs (connect to a pre-provisioned admin server) ----
+      # Each group brings up its own throwaway admin cluster on its default port,
+      # runs, then tears it down. Distinct ports -> groups don't interfere.
+
+      - name: IT — clone-orchestrator dry_run + apply + revert + apply_grant (:54341)
+        run: |
+          set -Eeuo pipefail
+          deploy/ci/start-pg.sh 54341
+          trap 'deploy/ci/stop-pg.sh 54341' EXIT
+          cargo test -p pgb-clone-orchestrator --locked \
+            --test dry_run_it --test apply_it --test revert_it --test apply_grant_it \
+            -- --nocapture --test-threads=1
+
+      - name: IT — applyd guarded-apply + revert + socket wire (:54355)
+        run: |
+          set -Eeuo pipefail
+          deploy/ci/start-pg.sh 54355
+          trap 'deploy/ci/stop-pg.sh 54355' EXIT
+          PG_BUMPERS_PGURL="host=127.0.0.1 port=54355 user=postgres dbname=postgres" \
+            cargo test -p pgb-applyd --test applyd_it --locked -- --nocapture --test-threads=1
+
+      - name: IT — audit _meta sink/tamper/chain + proxy audit-_meta + cli shared-_meta (:55432)
+        env:
+          PG_BUMPERS_AUDIT_PGURL: host=127.0.0.1 port=55432 user=postgres dbname=postgres
+        run: |
+          set -Eeuo pipefail
+          deploy/ci/start-pg.sh 55432
+          trap 'deploy/ci/stop-pg.sh 55432' EXIT
+          cargo test -p pgb-audit --locked \
+            --test pg_meta_it --test concurrent_append_it --test single_anchor_owner_it \
+            -- --nocapture --test-threads=1
+          # The proxy S5 _meta-chain IT also targets the audit admin server.
+          cargo test -p pgb-proxy --test audit_meta_it --locked -- --nocapture --test-threads=1
+          cargo test -p pgb-cli --test shared_meta_it --locked -- --nocapture --test-threads=1
+
+      - name: IT — fidelity gate (clone<->prod prediction + typed-inverse restore) (:55431)
+        run: |
+          set -Eeuo pipefail
+          deploy/ci/start-pg.sh 55431
+          trap 'deploy/ci/stop-pg.sh 55431' EXIT
+          PG_BUMPERS_PGURL="host=127.0.0.1 port=55431 user=postgres dbname=postgres" \
+            cargo test -p fidelity-spike --locked -- --nocapture --test-threads=1
+
+      # ---- PROXY / READ-PATH ITs — need the native-role WALL (local-stack) ----
+
+      - name: Bring up the local-stack (primary :54321 WALL role + meta :54323 + replica :54322)
+        run: deploy/local-stack.sh up
+
+      - name: IT — proxy marquee/cutoff/TLS + read-gates against the WALL primary
+        run: |
+          set -Eeuo pipefail
+          cargo test -p pgb-proxy --locked \
+            --test proxy_it --test readgates_it \
+            -- --nocapture --test-threads=1
+
+      - name: IT — MCP read-path e2e THROUGH the live proxy (TLS+SCRAM, WALL deny)
+        run: cargo test -p pgb-mcp --test read_path_e2e --locked -- --nocapture --test-threads=1
+
+      - name: Safety script — role-hardening WALL matrix (its own cluster)
+        run: deploy/test/wall_matrix.sh
+
+      - name: Safety script — local-stack integration smoke (primary/meta/replica + streaming)
+        run: deploy/smoke.sh
+
+      - name: Tear down the local-stack
+        if: always()
+        run: deploy/local-stack.sh down || true

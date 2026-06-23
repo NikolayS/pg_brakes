@@ -29,7 +29,10 @@ IFS=$'\n\t'
 # --------------------------------------------------------------------------------------
 # Configuration
 # --------------------------------------------------------------------------------------
-PGBIN="${PGBIN:-/opt/homebrew/opt/postgresql@18/bin}"
+# PG18 bin dir. Precedence (unified across every IT/CI — issue #44):
+# PG_BUMPERS_PG18_BIN (the ONE cross-IT/CI var) → PGBIN (legacy, local
+# back-compat) → the Homebrew keg path (macOS dev fallback).
+PGBIN="${PG_BUMPERS_PG18_BIN:-${PGBIN:-/opt/homebrew/opt/postgresql@18/bin}}"
 
 # Repo root = parent of this script's dir, so paths work from any cwd.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

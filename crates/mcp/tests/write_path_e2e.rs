@@ -64,8 +64,9 @@ fn it_enabled() -> bool {
 // =============================================================================
 
 /// A throwaway PG18 instance: its own data dir + a dedicated high port, dropped on
-/// teardown. The bin dir comes from `PG_BUMPERS_PG_BINDIR` (default the Homebrew
-/// PG18 path the env documents); the port from `PG_BUMPERS_PRIMARY_PORT` (54360).
+/// teardown. The bin dir comes from `PG_BUMPERS_PG18_BIN` (then the legacy
+/// `PG_BUMPERS_PG_BINDIR`, then the Homebrew keg path); the port from
+/// `PG_BUMPERS_PRIMARY_PORT` (54360).
 struct Pg {
     datadir: PathBuf,
     port: u16,
@@ -73,9 +74,13 @@ struct Pg {
 }
 
 impl Pg {
+    /// The PG18 bin dir. Precedence (unified across every IT — issue #44):
+    /// `PG_BUMPERS_PG18_BIN` (the ONE cross-IT/CI var) → `PG_BUMPERS_PG_BINDIR`
+    /// (legacy, local back-compat) → the Homebrew keg path (macOS dev fallback).
     fn bindir() -> PathBuf {
         PathBuf::from(
-            std::env::var("PG_BUMPERS_PG_BINDIR")
+            std::env::var("PG_BUMPERS_PG18_BIN")
+                .or_else(|_| std::env::var("PG_BUMPERS_PG_BINDIR"))
                 .unwrap_or_else(|_| "/opt/homebrew/opt/postgresql@18/bin".to_string()),
         )
     }
