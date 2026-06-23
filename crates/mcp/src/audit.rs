@@ -7,22 +7,27 @@
 //! `limit` of them (the tail), each projected to the compact wire shape the TS
 //! `get_audit` returns (`seq` / `decision` / `statement_class`).
 //!
-//! The `_meta` reader connects as a read-only audit role (NEVER the audited agent;
-//! the audited principal is `REVOKE`d from the audit table). The `postgres` crate
-//! is synchronous (it drives its own internal runtime), so every read runs on a
+//! The `_meta` reader connects as a genuinely SELECT-only audit role —
+//! `pgb_audit_reader`, which has `SELECT` on the chain but NO `INSERT`/`UPDATE`/
+//! `DELETE` (see `crates/audit/sql/10_audit_meta.sql`). So the credential the
+//! agent-facing `pgb-mcp` process holds for `get_audit` can read the audit tail but
+//! can NEVER write/forge it — never the audit *writer*, and never the audited agent
+//! (which is `REVOKE`d from the audit table entirely). The `postgres` crate is
+//! synchronous (it drives its own internal runtime), so every read runs on a
 //! `spawn_blocking` thread, off the MCP server's tokio runtime.
 
 use pgb_audit::{PgSink, Sink};
 
 use crate::contract::BlockContract;
 
-/// Connection details for the read-only `_meta` audit reader. Mirrors the
-/// `PGB_META_DSN` the deploy stack writes — but the MCP read path uses a reader
-/// DSN (a role that can SELECT the audit table, never the audited agent).
+/// Connection details for the SELECT-only `_meta` audit reader. Mirrors the
+/// `PGB_META_DSN` the deploy stack forwards to the agent process — which is the
+/// `pgb_audit_reader` reader DSN (a role that can `SELECT` the audit table but holds
+/// no write privilege, and is never the audited agent or the audit writer).
 #[derive(Debug, Clone)]
 pub struct AuditConfig {
     /// The `_meta` reader DSN (keyword/value, e.g.
-    /// `host=… port=… user=pgb_audit_writer password=… dbname=postgres`).
+    /// `host=… port=… user=pgb_audit_reader password=… dbname=postgres`).
     pub dsn: String,
 }
 

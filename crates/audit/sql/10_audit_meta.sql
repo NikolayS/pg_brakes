@@ -10,7 +10,9 @@
 --   * an append-only table holding one row per recorded statement (incl. rejects);
 --   * each row carries the chain links (prev_hash, record_hash) + the canonical payload
 --     bytes that the Rust `verify_chain()` recomputes the hash from;
---   * GRANTS so ONLY the dedicated audit-WRITER role inserts, and the audited principal
+--   * GRANTS so ONLY the dedicated audit-WRITER role inserts, the agent-facing
+--     `get_audit` read-through uses a SEPARATE SELECT-ONLY audit-READER role (no
+--     write-credential ever lands in the agent process), and the audited principal
 --     (the agent role) is REVOKEd from INSERT/UPDATE/DELETE — it "cannot write audit".
 --
 -- The external WORM anchor + KMS key-separation land in S4 (§10.9); this file is the
@@ -26,14 +28,21 @@
 BEGIN;
 
 -- -------------------------------------------------------------------------------------
--- 0. Roles. Two principals with SEPARATED duties (SPEC §3/§10.9 "audited cannot write
---    audit"):
+-- 0. Roles. THREE principals with SEPARATED duties (SPEC §3/§10.9 "audited cannot write
+--    audit") + least privilege on the agent-facing read-through:
 --      * pgb_audit_writer — the ONLY role allowed to INSERT audit rows. The proxy/warden
---        write the chain as THIS role, never as the agent. (Dev password; production
---        credentials come from the secret store, not this file.)
+--        write the chain as THIS role, never as the agent. It also SELECTs (it reads the
+--        head to chain the next row). (Dev password; production credentials come from the
+--        secret store, not this file.) This WRITE credential stays ONLY where rows are
+--        legitimately appended (proxy/applyd/warden) — NEVER in the agent process.
+--      * pgb_audit_reader — a SELECT-ONLY reader for the agent-facing `get_audit`
+--        read-through. It can SELECT the chain but has NO INSERT/UPDATE/DELETE, so the
+--        DSN that pgb-mcp forwards into the agent process can read the audit tail WITHOUT
+--        carrying a credential able to forge audit rows (least privilege / fail-closed).
 --      * pgb_agent — the audited principal (created by the WALL migration). It is the
---        SUBJECT of audit rows but must NOT be able to write/rewrite them.
---    Both are created here if absent so this file stands alone against a bare `_meta` DB.
+--        SUBJECT of audit rows but must NOT be able to write/rewrite — or directly read —
+--        them.
+--    All are created here if absent so this file stands alone against a bare `_meta` DB.
 -- -------------------------------------------------------------------------------------
 -- The `IF NOT EXISTS` check + CREATE is non-atomic, so two concurrent applies can
 -- both pass the check and race on the CREATE; we catch `duplicate_object` /
@@ -44,6 +53,16 @@ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'pgb_audit_writer') THEN
     BEGIN
       CREATE ROLE pgb_audit_writer LOGIN PASSWORD 'pgb_audit_writer_dev_pw';
+    EXCEPTION WHEN duplicate_object OR unique_violation THEN
+      NULL;  -- created concurrently; fine.
+    END;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'pgb_audit_reader') THEN
+    -- The SELECT-ONLY reader the agent-facing pgb-mcp `get_audit` connects as. It can
+    -- read the chain but is granted NO write — a stolen reader credential cannot forge
+    -- audit history. NOSUPERUSER/NOINHERIT for least privilege.
+    BEGIN
+      CREATE ROLE pgb_audit_reader LOGIN PASSWORD 'pgb_audit_reader_dev_pw' NOSUPERUSER NOINHERIT;
     EXCEPTION WHEN duplicate_object OR unique_violation THEN
       NULL;  -- created concurrently; fine.
     END;
@@ -118,13 +137,16 @@ CREATE TRIGGER audit_log_no_mutation
 --    Re-assert UNCONDITIONALLY every run (idempotent drift defense).
 --
 --    (a) Only the writer role may INSERT. It gets no UPDATE/DELETE — append-only.
---    (b) The audited principal (pgb_agent) is explicitly REVOKEd from INSERT/UPDATE/
+--    (b) The SELECT-ONLY reader role (pgb_audit_reader) backs the agent-facing
+--        `get_audit` read-through: USAGE + SELECT, and NOTHING else (it must never be
+--        able to forge audit rows — least privilege for the credential the agent holds).
+--    (c) The audited principal (pgb_agent) is explicitly REVOKEd from INSERT/UPDATE/
 --        DELETE on the audit table. It is the SUBJECT of the log, never its author.
---    (c) PUBLIC gets nothing on this schema (default-deny); future tables inherit the
+--    (d) PUBLIC gets nothing on this schema (default-deny); future tables inherit the
 --        default-privilege revoke.
 -- -------------------------------------------------------------------------------------
 
--- (c) Default-deny: strip any PUBLIC defaults on the schema/table first.
+-- (d) Default-deny: strip any PUBLIC defaults on the schema/table first.
 REVOKE ALL ON SCHEMA pgb_audit FROM PUBLIC;
 REVOKE ALL ON ALL TABLES IN SCHEMA pgb_audit FROM PUBLIC;
 ALTER DEFAULT PRIVILEGES IN SCHEMA pgb_audit REVOKE ALL ON TABLES FROM PUBLIC;
@@ -136,7 +158,16 @@ GRANT INSERT, SELECT ON pgb_audit.audit_log TO pgb_audit_writer;
 -- The writer reads the head (last seq + record_hash) to chain the next row, hence SELECT.
 -- It needs the sequence-less table's identity, so nothing else is required.
 
--- (b) THE KEY REVOKE: the audited principal cannot write/rewrite the audit table.
+-- (b) The reader role: USAGE on the schema + SELECT on the table — and that is ALL. This
+--     is the role the agent-facing pgb-mcp `get_audit` connects as, so the agent process
+--     holds a credential that can READ the audit tail but can NEVER write/forge it. We
+--     re-assert the SELECT grant AND explicitly REVOKE every write privilege every run so
+--     the read-only posture is drift-corrected and auditable line-by-line.
+GRANT USAGE ON SCHEMA pgb_audit TO pgb_audit_reader;
+GRANT SELECT ON pgb_audit.audit_log TO pgb_audit_reader;
+REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON pgb_audit.audit_log FROM pgb_audit_reader;
+
+-- (c) THE KEY REVOKE: the audited principal cannot write/rewrite the audit table.
 --     REVOKE of a never-granted privilege is a harmless no-op; we issue it explicitly so
 --     the guarantee is auditable line-by-line and drift-corrected on every re-apply.
 REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON pgb_audit.audit_log FROM pgb_agent;
@@ -149,8 +180,10 @@ COMMIT;
 
 -- =====================================================================================
 -- Done. pgb_audit.audit_log is append-only (grants + trigger), written ONLY by
--- pgb_audit_writer, and the audited principal pgb_agent is REVOKEd from INSERT/UPDATE/
--- DELETE — it "cannot write audit" (SPEC §3/§4/§10.9). The external WORM anchor + KMS
--- key-separation are S4. The Rust `_meta` sink (crates/audit/src/pg.rs) INSERTs as the
--- writer role and reads rows back for `verify_chain()`.
+-- pgb_audit_writer, readable by the SELECT-ONLY pgb_audit_reader (the agent-facing
+-- `get_audit` credential — read but never forge), and the audited principal pgb_agent is
+-- REVOKEd from INSERT/UPDATE/DELETE — it "cannot write audit" (SPEC §3/§4/§10.9). The
+-- external WORM anchor + KMS key-separation are S4. The Rust `_meta` sink
+-- (crates/audit/src/pg.rs) INSERTs as the writer role and reads rows back for
+-- `verify_chain()`.
 -- =====================================================================================

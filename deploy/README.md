@@ -185,13 +185,21 @@ The printed connect line is of the form (values filled in by the launcher):
 
 ```sh
 claude mcp add pg-bumpers \
-  --env PGB_APPLYD_SOCKET=<state>/applyd.sock \
   --env PGB_PROXY_HOST=127.0.0.1 --env PGB_PROXY_PORT=6432 \
   --env PGB_PROXY_DB=pgb_demo --env PGB_PROXY_USER=pgb_agent \
   --env PGB_PROXY_PASSWORD=pgb_agent_dev_pw --env PGB_PROXY_APP_NAME=pgb_proxy \
+  --env PGB_PROXY_REQUIRE_TLS=false \
   --env PGB_ROLE=pgb_agent --env PGB_SESSION_ID=pgb-demo-session \
-  -- node <repo>/mcp/server/dist/bin/mcpStdio.js
+  --env PGB_APPLYD_SOCKET=<state>/applyd.sock \
+  --env PGB_META_DSN='host=127.0.0.1 port=54321 dbname=pgb_demo user=pgb_audit_reader password=...' \
+  -- <repo>/target/debug/pgb-mcp
 ```
+
+The agent-facing `PGB_META_DSN` uses the **SELECT-only** `pgb_audit_reader` role (it can
+read the audit tail for `get_audit` but holds no `INSERT`/`UPDATE`/`DELETE`), so no
+audit-write credential ever enters the agent process. The INSERT-capable
+`pgb_audit_writer` stays only with the proxy/applyd/warden (the path that legitimately
+appends the chain).
 
 **The read path genuinely goes through `pgb-proxy`.** Because the proxy is
 extended-protocol-only (its statement-stacking defense), the MCP read client
@@ -200,7 +208,8 @@ plain simple-query is rejected. Two proofs the e2e test asserts: the proxy stamp
 `application_name=pgb_proxy` on the backend session as `pgb_agent` (visible in
 `pg_stat_activity`), and a read of the **non-granted** `secret_data` is `WALL_DENIED`
 (SQLSTATE 42501) — the WALL role denying default-deny, which a raw superuser path
-would not. Proven end-to-end in `mcp/server/test/upStack.e2e.test.ts` (`PG_BUMPERS_IT=1`).
+would not. Proven end-to-end by the env-gated Rust e2e `crates/mcp/tests/read_path_e2e.rs`
+(`PG_BUMPERS_IT=1`); the write path is proven by `crates/mcp/tests/write_path_e2e.rs`.
 
 The operator **approve** hop (the signing key never enters the agent/MCP path) calls
 the applyd socket `approve` RPC out-of-band; see the e2e test for the exact shape, and

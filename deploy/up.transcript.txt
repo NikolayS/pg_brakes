@@ -1,38 +1,50 @@
 ================================================================================
  pg_bumpers — deploy/up.sh RUNNABLE-STACK e2e transcript
- (mcp/server/test/upStack.e2e.test.ts, PG_BUMPERS_IT=1)
+ server: Rust pgb-mcp (crates/mcp) — the single deployable MCP server (EPIC #83)
+ (crates/mcp/tests/{write_path_e2e,read_path_e2e}.rs, PG_BUMPERS_IT=1)
  The MCP read path genuinely traverses pgb-proxy (extended-protocol-only,
- WALL-enforced); writes go through pgb-applyd's grant-gated floor; a live
- pgb-warden watches; one anchored _meta chain verifies. :5432 untouched.
+ WALL-enforced); writes go through pgb-applyd's grant-gated floor; get_audit reads
+ the `_meta` chain via the SELECT-only pgb_audit_reader role; one anchored _meta
+ chain verifies. :5432 untouched.
+ generated: 2026-06-23  write-port: 54361  read-primary: 54321
+ pg: initdb (PostgreSQL) 18.4 (Homebrew)
 ================================================================================
 
-running deploy/up.sh --no-build (launches pgb-proxy + pgb-applyd + pgb-warden)…
-stack up; MCP read path → pgb-proxy at 127.0.0.1:6432 (backend PG18 is :54321).
-a REAL MCP client is connected to the shipped stdio shell.
-tools/list → 9 tools.
-read: query(accounts) → 8 rows through pgb-proxy.
-PROXY PROOF #1: backend session tagged application_name='pgb_proxy' as role 'pgb_agent' seen in pg_stat_activity (the proxy originated it).
-PROXY PROOF #2: query(secret_data) → WALL_DENIED — the WALL role the proxy connects as denied the non-granted table (raw superuser would not).
-REFUSED: propose_write("DROP TABLE public.accounts") → NOT_REHEARSABLE (neutralized by refusal, NOT executed).
-REFUSED: propose_write("TRUNCATE public.accounts") → NOT_REHEARSABLE (neutralized by refusal, NOT executed).
-BOUNDED: dry_run → blast radius 4 rows, reversible=true.
-apply WITHOUT a grant → APPROVAL_REQUIRED (retryable=true).
-operator approve (out-of-band CLI-minted grant verified at apply).
-COMMITTED: apply WITH the grant → bounded (4 even zeroed, 4 odd untouched), reversible=true.
-get_audit → 0 record(s).
-pgb-cli verify → the shared `_meta` chain VERIFIES.
---- pgb-cli verify output ---
-pgb-cli verify: the shared `_meta` chain VERIFIES (8 records) and the durable anchored head MATCHES the chain head.
-  head = b561f452964f3a653540b3e0da519df73cf687f90156e7a5b6f145be8f07ea52
-  anchored_seq = 7
-  decisions by reason_code:
-    NOT_REHEARSABLE                  x2
-    apply_committed                  x1
-    approval_required                x1
-    explain_failed                   x1
-    grant_signed                     x1
-    ok                               x2
-================================
+a REAL MCP client drives the SHIPPED PgBumpersMcp handler over the SAME duplex
+transport the stdio `pgb-mcp` binary uses (initialize → tools/list → tools/call).
+the read path runs THROUGH a live pgb-proxy (TLS + SCRAM) in front of a throwaway
+PG18; the write path runs THROUGH a real pgb-applyd Unix-socket child.
 
-vitest result line:
-      Tests  5 passed (5)
+--- WRITE PATH (crates/mcp/tests/write_path_e2e.rs, throwaway PG18 :54361) ---
+[ok] propose_write(DROP TABLE) → NOT_REHEARSABLE (structural refusal)
+[ok] propose_write(TRUNCATE) → NOT_REHEARSABLE
+[ok] dry_run(UPDATE…FROM) → NOT_REHEARSABLE (steerable predicate, at dry_run)
+[ok] propose_write(UPDATE … WHERE id%2=0) → proposal p-32fa1ec8d03d8a14
+[ok] dry_run → bounded to 4 rows, reversible; risk=ALLOW (logged-only)
+[ok] apply_write forcing function: missing→CONFIRM_REQUIRED, wrong→CONFIRM_MISMATCH
+[ok] apply_write (no grant) → APPROVAL_REQUIRED; no mutation
+[ok] request_elevation → ticket req-00000001; suggested cap_max_rows=5
+[ok] operator approve (out-of-band over the socket; signing key NOT in agent stdio)
+[ok] apply_write (granted) → COMMITTED: even rows zeroed, odd rows untouched (read back from PG18)
+[ok] apply_write (over-cap) → BLAST_DRIFT abort; row count unchanged (18)
+[ok] injection-via-data inert: a DROP with a persuasive comment → NOT_REHEARSABLE
+[ok] get_audit → 10 record(s) on the one anchored _meta chain (ALLOW + BLOCK present)
+[PASS] MCP write path through the live applyd floor: refuse → bound → approve → commit (bounded+reversible) → over-cap abort; confirm_rows forcing + injection inert; audit chain.
+
+--- READ PATH (crates/mcp/tests/read_path_e2e.rs, read THROUGH the proxy → PG18 :54321) ---
+[ok] query(mcp_read_demo) → 5 rows through pgb-proxy
+[ok] query(mcp_secret) → "WALL_DENIED" (the proxy/WALL denied the non-granted table)
+[ok] query(DELETE …) → READ_ONLY; the row is untouched (classifier fast-path)
+[ok] explain_plan(read) → a JSON plan (planned, not executed)
+[ok] explain-hole CLOSED: stacked/write explain_plan → READ_ONLY; victim row intact
+[ok] discover_schema → 6 columns; the granted table is visible
+[ok] get_audit → 7 record(s) from the `_meta` chain (incl. a blocked read)
+[PASS] MCP read path: reads traverse the live proxy; explain-hole closed; audit read-through works.
+[ok] terminated 1 live agent-tagged backend session(s) (pg_terminate_backend)
+[ok] live loss → transparently recovered on the very next read (re-dial)
+[ok] live-loss RECOVERY: the next read re-dialed a fresh proxy session and returned 5 rows
+[PASS] read-path live-loss: a mid-session backend kill is absorbed (no crash); the next read re-dials + succeeds.
+
+cargo test result lines (write-path + read-path):
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.98s
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.34s

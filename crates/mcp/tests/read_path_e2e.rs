@@ -518,3 +518,167 @@ async fn mcp_reads_traverse_the_live_proxy_and_the_explain_hole_stays_closed() {
         "[PASS] MCP read path: reads traverse the live proxy; explain-hole closed; audit read-through works."
     );
 }
+
+/// Terminate the proxy's LIVE backend session (the agent-tagged
+/// `application_name='pgb_proxy'`, role `pgb_agent`) from an admin connection — the
+/// warden-style `pg_terminate_backend`. Returns how many sessions were terminated
+/// (0 if none were live yet). Mirrors how `pgb-warden` reaps an agent-tagged
+/// backend, and how the backend dies under us in production (restart / idle reset).
+fn terminate_agent_backends() -> u64 {
+    use postgres::{Client, NoTls};
+    let mut admin = Client::connect(&admin_dsn(), NoTls).expect("admin connect (terminate)");
+    let row = admin
+        .query_one(
+            "SELECT count(*)::bigint AS n FROM (
+               SELECT pg_terminate_backend(pid)
+               FROM pg_stat_activity
+               WHERE application_name = 'pgb_proxy'
+                 AND usename = 'pgb_agent'
+                 AND pid <> pg_backend_pid()
+             ) AS killed",
+            &[],
+        )
+        .expect("pg_terminate_backend the agent-tagged session");
+    row.get::<_, i64>("n") as u64
+}
+
+/// FIX 2 (samorev round, EPIC #83 PR4): the read path's LIVE connection-loss →
+/// re-dial recovery — the symmetric analogue of the write-side
+/// `applyd::tests::dropped_socket_transparently_reconnects_on_the_next_call`.
+///
+/// The prior coverage only proved the **never-dialed / down-from-start** case
+/// (`proxy::tests::query_against_a_down_proxy_is_a_recoverable_block_not_a_crash`).
+/// This test drives the UNTESTED path the deleted `proxyResilience.test.ts`
+/// guarded: a proxy/backend connection lost **mid-session** must be ABSORBED (no
+/// crash/throw of the stdio process), and the **next read must re-dial a fresh
+/// connection and succeed**.
+///
+/// What it does, all LIVE (real proxy + real PG18, NEVER 5432):
+///   1. a successful read establishes a HELD `tokio-postgres` client to the proxy,
+///      which originated a backend session tagged `application_name='pgb_proxy'`;
+///   2. an admin `pg_terminate_backend` kills that live backend session (the proxy
+///      then closes the agent-facing connection — the held client is now dead);
+///   3. the next read finds the held client unusable, ABSORBS the loss (never a
+///      panic/throw — it is at worst a RECOVERABLE block), and a follow-up read
+///      RE-DIALS a fresh proxy-brokered session and SUCCEEDS, returning correct
+///      rows from a genuinely new backend session.
+///
+/// **Teeth:** if `ProxyTransport::with_client` stops resetting the cached client on
+/// `ReadError::ConnectionLost` (e.g. it surfaces a hard error instead of
+/// `*guard = None` + re-dial), step 3's recovery read returns `blocked` forever
+/// instead of `ok` — and the `recovered["status"] == "ok"` assertion FAILS. (Proven
+/// RED in the PR by temporarily breaking that reset.)
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn read_path_absorbs_a_live_connection_loss_and_the_next_read_redials() {
+    if !it_enabled() {
+        eprintln!(
+            "[skip] set PG_BUMPERS_IT=1 (+ deploy/local-stack.sh up) for the read-path live-loss e2e"
+        );
+        return;
+    }
+    tokio::task::spawn_blocking(setup_fixtures)
+        .await
+        .expect("fixture setup thread");
+
+    let (addr, cert_der, _paths) = spawn_proxy().await;
+    let server = build_server(addr, &cert_der);
+    let client = connect_client(server).await;
+
+    // ---- 1. A successful read: dials the proxy + holds a live client. The proxy
+    //         originated a backend session tagged application_name='pgb_proxy'. ----
+    let first = call_sql(
+        &client,
+        "query",
+        "SELECT id FROM public.mcp_read_demo ORDER BY id",
+    )
+    .await;
+    assert_eq!(
+        first["status"],
+        serde_json::json!("ok"),
+        "the first read must succeed (it establishes the held connection): {first}"
+    );
+    assert_eq!(first["rowCount"], serde_json::json!(5), "5 rows: {first}");
+    eprintln!("[ok] live read #1 → 5 rows; a held proxy connection is now established");
+
+    // ---- 2. Kill the LIVE agent-tagged backend session out-of-band (warden-style).
+    //         The proxy's relay loop errors and closes the agent-facing connection,
+    //         so the MCP server's held tokio-postgres client is now dead. ----
+    let killed = tokio::task::spawn_blocking(terminate_agent_backends)
+        .await
+        .expect("terminate thread");
+    assert!(
+        killed >= 1,
+        "expected to terminate the live agent-tagged backend session (saw {killed})"
+    );
+    eprintln!(
+        "[ok] terminated {killed} live agent-tagged backend session(s) (pg_terminate_backend)"
+    );
+
+    // ---- 3. The loss is ABSORBED (no crash/throw — the call returns a structured
+    //         result, recoverable at worst), and the read path RE-DIALS a fresh
+    //         session and SUCCEEDS. `with_client` retries once internally, so the
+    //         very next read usually recovers transparently; if it instead surfaces
+    //         a recoverable PROXY_UNAVAILABLE block, a follow-up read MUST recover.
+    //         Either way: never a panic, and recovery is guaranteed. ----
+    let after_loss = call_sql(
+        &client,
+        "query",
+        "SELECT id FROM public.mcp_read_demo ORDER BY id",
+    )
+    .await;
+    // The loss must be ABSORBED into a structured outcome — either an immediate
+    // transparent recovery (`ok`) or a RECOVERABLE block (never a crash/throw, and
+    // never a non-retryable hard failure).
+    let status = after_loss["status"].as_str().unwrap_or_default();
+    assert!(
+        status == "ok" || status == "blocked",
+        "a live connection loss must be ABSORBED into ok/blocked, never a crash: {after_loss}"
+    );
+    if status == "blocked" {
+        assert_eq!(
+            after_loss["code"],
+            serde_json::json!("PROXY_UNAVAILABLE"),
+            "a re-dialable live loss surfaces as the recoverable PROXY_UNAVAILABLE block: {after_loss}"
+        );
+        assert_eq!(
+            after_loss["retryable"],
+            serde_json::json!(true),
+            "the live-loss block must be retryable (re-dial): {after_loss}"
+        );
+        eprintln!("[ok] live loss → recoverable PROXY_UNAVAILABLE block (absorbed, not a crash)");
+    } else {
+        eprintln!("[ok] live loss → transparently recovered on the very next read (re-dial)");
+    }
+
+    // ---- 3b. A subsequent read MUST re-dial a fresh proxy-brokered session and
+    //          SUCCEED with the correct rows — the re-dial-recovery guarantee. ----
+    let recovered = call_sql(
+        &client,
+        "query",
+        "SELECT id, owner FROM public.mcp_read_demo ORDER BY id",
+    )
+    .await;
+    assert_eq!(
+        recovered["status"],
+        serde_json::json!("ok"),
+        "after a live loss the next read MUST re-dial a fresh session and SUCCEED: {recovered}"
+    );
+    assert_eq!(
+        recovered["rowCount"],
+        serde_json::json!(5),
+        "the re-dialed read returns the full result from a fresh backend session: {recovered}"
+    );
+    assert_eq!(
+        recovered["rows"][0]["owner"],
+        serde_json::json!("owner-1"),
+        "the recovered rows are the real table contents (genuine fresh session): {recovered}"
+    );
+    eprintln!(
+        "[ok] live-loss RECOVERY: the next read re-dialed a fresh proxy session and returned 5 rows"
+    );
+
+    client.cancel().await.expect("clean shutdown");
+    eprintln!(
+        "[PASS] read-path live-loss: a mid-session backend kill is absorbed (no crash); the next read re-dials + succeeds."
+    );
+}
