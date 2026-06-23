@@ -240,6 +240,43 @@ mod tests {
     }
 
     #[test]
+    fn proxy_floor_gate_blocks_explain_analyse_and_serialize_but_allows_plan_only() {
+        // REV bug-hunter (HIGH): the proxy's FIRST gate shares the classifier with
+        // the MCP fast-path. `EXPLAIN (ANALYSE) …` (the British synonym) EXECUTES
+        // on PG18 (proven live: it mutates/deletes) — so the floor gate must BLOCK
+        // it, exactly like an `EXPLAIN (ANALYZE)` write, and like `SERIALIZE` and
+        // any unknown option (fail-closed). A plan-only EXPLAIN stays allowed so
+        // `explain_plan` keeps working through the proxy.
+        let g = Enforcement::new();
+        for sql in [
+            "EXPLAIN (ANALYSE) SELECT 1",
+            "EXPLAIN (ANALYSE) UPDATE public.allowed_read SET label = 'x'",
+            "EXPLAIN (ANALYSE) DELETE FROM public.allowed_read WHERE id = 1",
+            "EXPLAIN (FORMAT JSON, ANALYSE) SELECT 1",
+            "EXPLAIN (SERIALIZE) SELECT 1",
+            "EXPLAIN (FROBNICATE) SELECT 1",
+        ] {
+            match g.gate(&parse(sql)) {
+                GateDecision::Block { code, .. } => {
+                    assert_eq!(code, "write_on_readonly", "{sql} should be BLOCKED")
+                }
+                other => panic!("expected Block for {sql}, got {other:?}"),
+            }
+        }
+        // The legitimate plan-only EXPLAIN still passes the floor gate.
+        for sql in [
+            "EXPLAIN SELECT 1",
+            "EXPLAIN (FORMAT JSON) SELECT 1",
+            "EXPLAIN (VERBOSE, COSTS, BUFFERS) SELECT 1",
+        ] {
+            match g.gate(&parse(sql)) {
+                GateDecision::Allow { sql: Some(_) } => {}
+                other => panic!("expected Allow for {sql}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
     fn rejects_copy_frontend_frames() {
         let g = Enforcement::new();
         for f in [

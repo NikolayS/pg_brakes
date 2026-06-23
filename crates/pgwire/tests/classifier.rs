@@ -93,6 +93,74 @@ fn explain_analyze_executes_so_it_is_not_read() {
 }
 
 #[test]
+fn explain_analyse_british_spelling_executes_so_it_is_not_read() {
+    // REGRESSION (REV bug-hunter, HIGH): `ANALYSE` is a *full* PostgreSQL synonym
+    // for `ANALYZE` — live-proven on PG18.4 that `EXPLAIN (ANALYSE) …` EXECUTES:
+    // it fires `SELECT bump()` side effects, MUTATES on UPDATE, and DELETEs rows.
+    // It must therefore classify NOT-READ, exactly like the American spelling.
+    // (Before the fix, the option-name check only matched `"analyze"`, so the
+    // British spelling slipped through and classified as a Read.)
+    assert_not_read("EXPLAIN (ANALYSE) SELECT 1");
+    assert_not_read("EXPLAIN (ANALYSE) SELECT * FROM accounts WHERE id = 1");
+    assert_not_read("EXPLAIN (analyse) SELECT 1"); // case-insensitive
+    assert_not_read("EXPLAIN (ANALYSE) UPDATE t SET a = 1 WHERE id = 2");
+    assert_not_read("EXPLAIN (ANALYSE) DELETE FROM t WHERE id = 1");
+    // Mixed with an otherwise-plan-only option, the presence of ANALYSE still
+    // executes (proven live) → not-read.
+    assert_not_read("EXPLAIN (FORMAT JSON, ANALYSE) SELECT 1");
+    assert_not_read("EXPLAIN (ANALYSE, BUFFERS) SELECT 1");
+}
+
+#[test]
+fn explain_serialize_executes_so_it_is_not_read() {
+    // SERIALIZE serializes the *result*, which requires RUNNING the plan — it
+    // executes (and PG even rejects it without ANALYZE). Not plan-only → not-read.
+    assert_not_read("EXPLAIN (SERIALIZE) SELECT 1");
+    assert_not_read("EXPLAIN (SERIALIZE text) SELECT 1");
+    assert_not_read("EXPLAIN (ANALYZE, SERIALIZE) SELECT 1");
+}
+
+#[test]
+fn explain_with_unknown_option_is_not_read_fail_closed() {
+    // Fail-closed allowlist: an EXPLAIN is a read ONLY if EVERY option is in the
+    // proven plan-only allowlist. An unrecognized/unknown option — a typo, a
+    // future PG option, or an injected token — is NOT proven plan-only, so the
+    // whole EXPLAIN is not-read.
+    assert_not_read("EXPLAIN (FROBNICATE) SELECT 1");
+    assert_not_read("EXPLAIN (FORMAT JSON, FROBNICATE) SELECT 1");
+    assert_not_read("EXPLAIN (WAL) SELECT 1"); // WAL is meaningful only with ANALYZE
+    assert_not_read("EXPLAIN (TIMING) SELECT 1"); // TIMING is meaningful only with ANALYZE
+}
+
+#[test]
+fn explain_with_only_plan_only_options_stays_read() {
+    // GREEN guard: the legitimate, proven plan-only options keep `explain_plan`
+    // (and the proxy gate) working — PR2's read e2e must still pass.
+    assert_read("EXPLAIN SELECT 1");
+    assert_read("EXPLAIN (FORMAT JSON) SELECT 1");
+    assert_read("EXPLAIN VERBOSE SELECT a FROM t");
+    assert_read("EXPLAIN (VERBOSE) SELECT 1");
+    assert_read("EXPLAIN (COSTS) SELECT 1");
+    assert_read("EXPLAIN (COSTS false) SELECT 1");
+    assert_read("EXPLAIN (SETTINGS) SELECT 1");
+    assert_read("EXPLAIN (GENERIC_PLAN) SELECT 1");
+    assert_read("EXPLAIN (SUMMARY) SELECT 1");
+    assert_read("EXPLAIN (MEMORY) SELECT 1");
+    assert_read("EXPLAIN (BUFFERS) SELECT 1");
+    assert_read("EXPLAIN (BUFFERS true) SELECT 1");
+    assert_read("EXPLAIN (FORMAT JSON, VERBOSE, COSTS, BUFFERS) SELECT count(*) FROM events");
+}
+
+#[test]
+fn bare_explain_analyse_does_not_parse_so_it_is_not_read() {
+    // The bare (non-parenthesized) British form `EXPLAIN ANALYSE …` is not a
+    // keyword sqlparser recognizes, so it fails to parse and is fail-closed
+    // not-read. Pin it so a future parser change cannot silently let it through.
+    assert_not_read("EXPLAIN ANALYSE SELECT 1");
+    assert_not_read("EXPLAIN ANALYSE VERBOSE SELECT 1");
+}
+
+#[test]
 fn explain_of_a_write_is_not_read() {
     // The explain-hole guard: EXPLAIN of a WRITE/DDL plans a write — refuse it, so
     // `explain_plan` can never be a back-door to a write (even without ANALYZE, the

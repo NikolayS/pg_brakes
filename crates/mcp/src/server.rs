@@ -383,6 +383,17 @@ mod tests {
             "SELECT 1; DROP TABLE orders",
             "DELETE FROM orders",
             "INSERT INTO orders VALUES (1)",
+            // REV bug-hunter (HIGH): the British synonym `ANALYSE` EXECUTES the
+            // inner statement on PG18 (proven live: it mutates/deletes/side-
+            // effects), so the MCP fast-path must refuse it BEFORE it reaches the
+            // wire — exactly like `ANALYZE`. SERIALIZE also executes; any unknown
+            // option fails closed.
+            "EXPLAIN (ANALYSE) SELECT 1",
+            "EXPLAIN (ANALYSE) UPDATE orders SET id = id",
+            "EXPLAIN (ANALYSE) DELETE FROM orders",
+            "EXPLAIN (FORMAT JSON, ANALYSE) SELECT 1",
+            "EXPLAIN (SERIALIZE) SELECT 1",
+            "EXPLAIN (FROBNICATE) SELECT 1",
         ] {
             let r = s
                 .dispatch("explain_plan", &args(&[("sql", serde_json::json!(sql))]))
@@ -398,6 +409,33 @@ mod tests {
                 sc["code"],
                 serde_json::json!("READ_ONLY"),
                 "explain_plan(`{sql}`) → READ_ONLY (the hole is closed)"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn query_fast_path_refuses_explain_analyse_executes() {
+        // The `query` fast-path shares the SAME `pgb_pgwire::classify` chokepoint,
+        // so it too must refuse `EXPLAIN (ANALYSE) …` (which EXECUTES on PG18)
+        // before it can reach the proxy. Proves both fast-path entry points
+        // (`query` + `explain_plan`) are covered by the single fix.
+        let s = PgBumpersMcp::new("pgb_agent", "sess-1");
+        for sql in [
+            "EXPLAIN (ANALYSE) SELECT 1",
+            "EXPLAIN (ANALYSE) UPDATE orders SET id = id",
+            "EXPLAIN (SERIALIZE) SELECT 1",
+            "EXPLAIN (FROBNICATE) SELECT 1",
+        ] {
+            let r = s
+                .dispatch("query", &args(&[("sql", serde_json::json!(sql))]))
+                .await
+                .unwrap();
+            assert_eq!(r.is_error, Some(true), "query(`{sql}`) must be blocked");
+            let sc = r.structured_content.unwrap();
+            assert_eq!(
+                sc["code"],
+                serde_json::json!("READ_ONLY"),
+                "query(`{sql}`) → READ_ONLY (fast-path refuses the executing EXPLAIN)"
             );
         }
     }

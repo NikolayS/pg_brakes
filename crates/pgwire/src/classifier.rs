@@ -113,29 +113,38 @@ pub fn is_explain(sql: &str) -> bool {
 
 /// Whether a single parsed statement is provably read-only.
 ///
-/// Only `SELECT` (incl. a read-only WITH/CTE) and a **non-`ANALYZE` `EXPLAIN` of a
-/// read** qualify. `INSERT`/`UPDATE`/`DELETE`/`MERGE`/DDL/`COPY`/`TRUNCATE`/utility
-/// and everything else are not-read. A data-modifying CTE
-/// (`WITH x AS (DELETE …) SELECT …`) is rejected because the WITH body contains a
-/// write.
+/// Only `SELECT` (incl. a read-only WITH/CTE) and an **`EXPLAIN` of a read whose
+/// every option is plan-only** qualify. An `EXPLAIN` with `ANALYZE`/`ANALYSE`,
+/// `SERIALIZE`, or any non-allowlisted option is not-read (it would execute).
+/// `INSERT`/`UPDATE`/`DELETE`/`MERGE`/DDL/`COPY`/`TRUNCATE`/utility and everything
+/// else are not-read. A data-modifying CTE (`WITH x AS (DELETE …) SELECT …`) is
+/// rejected because the WITH body contains a write.
 fn is_read_statement(stmt: &Statement) -> bool {
     match stmt {
         Statement::Query(query) => query_is_read_only(query),
         // A plain `EXPLAIN` (no ANALYZE) only PLANS — it never executes the inner
         // statement — so `EXPLAIN [(FORMAT …)] <read>` is a read. It is read-only
-        // iff (a) it is not `ANALYZE` (which WOULD execute), in either the bare
-        // `EXPLAIN ANALYZE …` form (the `analyze` flag) or the parenthesized
-        // `EXPLAIN (ANALYZE) …` form (an `ANALYZE` utility option), AND (b) the
-        // inner statement is itself a read (so `EXPLAIN DELETE …` / `EXPLAIN
-        // SELECT 1; DROP …` are NOT reads). This lets the agent read path serve
-        // `explain_plan` THROUGH the proxy without ever planning a write — the
-        // explain-hole stays closed by construction.
+        // iff:
+        //   (a) it is not bare `EXPLAIN ANALYZE …` (the `analyze` flag — which
+        //       WOULD execute), AND
+        //   (b) EVERY parenthesized `EXPLAIN (…)` option is in the proven
+        //       **plan-only allowlist** ([`explain_options_plan_only`]) — so
+        //       `ANALYZE`/`ANALYSE` (the British synonym), `SERIALIZE`, or ANY
+        //       option we cannot prove is plan-only makes it NOT a read
+        //       (fail-closed), AND
+        //   (c) the inner statement is itself a read (so `EXPLAIN DELETE …` /
+        //       `EXPLAIN SELECT 1; DROP …` are NOT reads).
+        // This lets the agent read path serve `explain_plan` THROUGH the proxy
+        // without ever planning *or executing* a write — the explain-hole stays
+        // closed by construction. Live-verified on PostgreSQL 18.4 that
+        // `EXPLAIN (ANALYSE) …` executes (it mutates/deletes/side-effects) while
+        // every allowlisted option below only plans.
         Statement::Explain {
             analyze,
             statement,
             options,
             ..
-        } => !*analyze && !explain_options_analyze(options) && is_read_statement(statement),
+        } => !*analyze && explain_options_plan_only(options) && is_read_statement(statement),
         // `COPY … TO/FROM` is a not-read path regardless of direction.
         Statement::Copy { .. } => false,
         // Explicitly enumerate the common writes/DDL/utility for clarity even
@@ -157,16 +166,57 @@ fn is_read_statement(stmt: &Statement) -> bool {
     }
 }
 
-/// Whether a parenthesized `EXPLAIN (…)` option list contains `ANALYZE` (which
-/// makes EXPLAIN EXECUTE the statement). Case-insensitive; fail-closed — any
-/// option whose name is `ANALYZE` (regardless of a truthy/falsy arg we cannot
-/// fully evaluate) is treated as analyzing, so `EXPLAIN (ANALYZE) …` is not-read.
-fn explain_options_analyze(options: &Option<Vec<sqlparser::ast::UtilityOption>>) -> bool {
+/// The `EXPLAIN (…)` options that we have **proven** (live, on PostgreSQL 18.4)
+/// only PLAN the statement — they never execute it, so they have no side effects
+/// and are safe on the read path. The list is intentionally an **allowlist**, not
+/// a denylist: anything not on it is fail-closed to not-read.
+///
+/// Proven plan-only on PG18.4 (verified against a side-effecting `SELECT bump()`
+/// that mutates a sentinel — the sentinel stayed `0`, i.e. no execution):
+/// `FORMAT`, `VERBOSE`, `COSTS`, `SETTINGS`, `GENERIC_PLAN`, `SUMMARY`, `MEMORY`,
+/// and standalone `BUFFERS` (PG18 reports planning buffers without running).
+///
+/// **Deliberately excluded** (each EXECUTES the statement — proven live, or by PG
+/// rule cannot stand alone without `ANALYZE`, which executes):
+/// - `ANALYZE` / `ANALYSE` — the British synonym is a *full* PostgreSQL synonym;
+///   both EXECUTE (the headline bug: `EXPLAIN (ANALYSE) UPDATE …` mutated,
+///   `… DELETE …` deleted, `… SELECT bump()` fired the side effect).
+/// - `SERIALIZE` — EXECUTES (it serializes the *result*, which requires running
+///   the plan); PG additionally rejects it without `ANALYZE`.
+/// - `WAL`, `TIMING` — meaningful only with `ANALYZE` (PG errors "requires
+///   ANALYZE" standalone), and with ANALYZE they execute → never plan-only.
+///
+/// Matching is **case-insensitive** on the option *name* only; the option's `arg`
+/// (e.g. `COSTS false`, `BUFFERS true`, `FORMAT json`) does not change whether the
+/// name is plan-only, so it is not consulted — an allowlisted name with any arg
+/// stays plan-only, and a non-allowlisted name is not-read regardless of arg.
+const EXPLAIN_PLAN_ONLY_OPTIONS: &[&str] = &[
+    "FORMAT",
+    "VERBOSE",
+    "COSTS",
+    "SETTINGS",
+    "GENERIC_PLAN",
+    "SUMMARY",
+    "MEMORY",
+    "BUFFERS",
+];
+
+/// Whether **every** parenthesized `EXPLAIN (…)` option is in the proven
+/// plan-only allowlist ([`EXPLAIN_PLAN_ONLY_OPTIONS`]).
+///
+/// Fail-closed: `ANALYZE`/`ANALYSE`, `SERIALIZE`, or **any** unrecognized/unknown
+/// option (a typo, a future PG option, an injected token) makes this return
+/// `false` → the `EXPLAIN` is not-read. `None` (the bare, non-parenthesized form)
+/// has no utility options and is vacuously plan-only here — the bare `ANALYZE`
+/// case is caught separately by the `analyze` flag at the call site.
+fn explain_options_plan_only(options: &Option<Vec<sqlparser::ast::UtilityOption>>) -> bool {
     match options {
-        None => false,
-        Some(opts) => opts
-            .iter()
-            .any(|o| o.name.value.eq_ignore_ascii_case("analyze")),
+        None => true,
+        Some(opts) => opts.iter().all(|o| {
+            EXPLAIN_PLAN_ONLY_OPTIONS
+                .iter()
+                .any(|allowed| o.name.value.eq_ignore_ascii_case(allowed))
+        }),
     }
 }
 
