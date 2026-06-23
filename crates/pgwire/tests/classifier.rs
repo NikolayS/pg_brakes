@@ -70,6 +70,52 @@ fn copy_is_not_read() {
 }
 
 #[test]
+fn explain_of_a_read_without_analyze_is_a_read() {
+    // A plain EXPLAIN only PLANS — it never executes the inner statement — so an
+    // EXPLAIN of a read is a read. This is what lets the agent's `explain_plan`
+    // tool run THROUGH the proxy (the proxy permits the planned read).
+    assert_read("EXPLAIN SELECT 1");
+    assert_read("EXPLAIN (FORMAT JSON) SELECT * FROM accounts WHERE id = 1");
+    assert_read("EXPLAIN VERBOSE SELECT a FROM t");
+    assert_read("EXPLAIN (FORMAT JSON, VERBOSE) SELECT count(*) FROM events");
+    // EXPLAIN of a read-only CTE is still a read.
+    assert_read("EXPLAIN (FORMAT JSON) WITH r AS (SELECT 1 AS x) SELECT x FROM r");
+}
+
+#[test]
+fn explain_analyze_executes_so_it_is_not_read() {
+    // EXPLAIN ANALYZE actually RUNS the statement (side effects!), so it must NOT
+    // be a read — in BOTH the bare and parenthesized forms.
+    assert_not_read("EXPLAIN ANALYZE SELECT 1");
+    assert_not_read("EXPLAIN (ANALYZE) SELECT 1");
+    assert_not_read("EXPLAIN (ANALYZE, FORMAT JSON) SELECT * FROM accounts");
+    assert_not_read("EXPLAIN ANALYZE VERBOSE SELECT 1");
+}
+
+#[test]
+fn explain_of_a_write_is_not_read() {
+    // The explain-hole guard: EXPLAIN of a WRITE/DDL plans a write — refuse it, so
+    // `explain_plan` can never be a back-door to a write (even without ANALYZE, the
+    // intent is a write and several writes have side effects at plan time).
+    assert_not_read("EXPLAIN DELETE FROM accounts WHERE id = 1");
+    assert_not_read("EXPLAIN (FORMAT JSON) UPDATE accounts SET balance = 0");
+    assert_not_read("EXPLAIN INSERT INTO t VALUES (1)");
+    assert_not_read("EXPLAIN DROP TABLE accounts");
+    assert_not_read("EXPLAIN (FORMAT JSON) TRUNCATE accounts");
+    // EXPLAIN of a data-modifying CTE is a planned write → not-read.
+    assert_not_read("EXPLAIN (FORMAT JSON) WITH d AS (DELETE FROM t RETURNING id) SELECT * FROM d");
+}
+
+#[test]
+fn explain_then_stacked_write_is_not_a_single_read() {
+    // The TS explain-hole shape: an EXPLAIN of a read followed by a stacked write.
+    // It is multiple statements → never a single read (statement-stacking).
+    let (cls, reason) = classify_with_reason("EXPLAIN (FORMAT JSON) SELECT 1; DROP TABLE victim");
+    assert_eq!(cls, Classification::NotRead);
+    assert_eq!(reason, Some(NotReadReason::MultipleStatements));
+}
+
+#[test]
 fn data_modifying_cte_is_not_read() {
     // The classic exfil/destroy-via-CTE: a write hidden in a WITH clause must
     // never classify as a read.

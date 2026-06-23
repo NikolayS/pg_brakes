@@ -584,6 +584,16 @@ async fn explain_preflight(
     session_id: &str,
     sql: &str,
 ) -> Result<Option<PendingError>, SessionError> {
+    // An agent statement that is ITSELF a (non-ANALYZE) `EXPLAIN` of a read
+    // (`explain_plan`) PLANS only — it never executes the inner query — so there
+    // is no execution cost/volume to pre-flight. Wrapping it in another `EXPLAIN`
+    // would also be invalid ("Explain must be root of the plan"). Skip the cost
+    // pre-flight; the un-foolable floors (byte/row cutoff on the plan output, the
+    // per-window budget, statement_timeout, the warden) still apply to the
+    // statement itself.
+    if pgb_pgwire::is_explain(sql) {
+        return Ok(None);
+    }
     let decision = match run_explain_on_backend(backend, sql).await? {
         // EXPLAIN errored on the backend → fail closed.
         Err(reason) => EstimateDecision::FailClosed(format!(

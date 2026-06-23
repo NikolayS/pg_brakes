@@ -37,7 +37,7 @@ pub mod frontend;
 pub mod scram;
 
 pub use backend::BackendMessage;
-pub use classifier::{Classification, NotReadReason, classify, classify_with_reason};
+pub use classifier::{Classification, NotReadReason, classify, classify_with_reason, is_explain};
 pub use codec::{MAX_FRAME_LEN, RawFrame, read_startup_body, read_tagged_frame, write_frame};
 pub use detector::{
     RejectReason, backend_starts_copy, classify_frontend_frame, classify_frontend_tag,

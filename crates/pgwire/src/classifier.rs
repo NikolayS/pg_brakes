@@ -90,15 +90,52 @@ pub fn classify(sql: &str) -> Classification {
     classify_with_reason(sql).0
 }
 
+/// Whether `sql` is a SINGLE `EXPLAIN` statement (any form) — used by the proxy to
+/// SKIP the EXPLAIN-cost pre-flight on a statement that is *itself* an EXPLAIN
+/// (wrapping it in another `EXPLAIN` would be invalid — "Explain must be root").
+///
+/// This is purely structural: it says nothing about read/write-ness (that is the
+/// classifier's job — a non-`ANALYZE` EXPLAIN of a read is already a
+/// [`Classification::Read`]). Fail-closed: a parse error or a multi-statement
+/// input is **not** a single EXPLAIN (returns `false`).
+pub fn is_explain(sql: &str) -> bool {
+    let dialect = PostgreSqlDialect {};
+    match Parser::parse_sql(&dialect, sql) {
+        Ok(stmts) if stmts.len() == 1 => {
+            matches!(
+                stmts[0],
+                Statement::Explain { .. } | Statement::ExplainTable { .. }
+            )
+        }
+        _ => false,
+    }
+}
+
 /// Whether a single parsed statement is provably read-only.
 ///
-/// Only `SELECT` (incl. a read-only WITH/CTE) qualifies. `INSERT`/`UPDATE`/
-/// `DELETE`/`MERGE`/DDL/`COPY`/`TRUNCATE`/utility and everything else are
-/// not-read. A data-modifying CTE (`WITH x AS (DELETE …) SELECT …`) is rejected
-/// because the WITH body contains a write.
+/// Only `SELECT` (incl. a read-only WITH/CTE) and a **non-`ANALYZE` `EXPLAIN` of a
+/// read** qualify. `INSERT`/`UPDATE`/`DELETE`/`MERGE`/DDL/`COPY`/`TRUNCATE`/utility
+/// and everything else are not-read. A data-modifying CTE
+/// (`WITH x AS (DELETE …) SELECT …`) is rejected because the WITH body contains a
+/// write.
 fn is_read_statement(stmt: &Statement) -> bool {
     match stmt {
         Statement::Query(query) => query_is_read_only(query),
+        // A plain `EXPLAIN` (no ANALYZE) only PLANS — it never executes the inner
+        // statement — so `EXPLAIN [(FORMAT …)] <read>` is a read. It is read-only
+        // iff (a) it is not `ANALYZE` (which WOULD execute), in either the bare
+        // `EXPLAIN ANALYZE …` form (the `analyze` flag) or the parenthesized
+        // `EXPLAIN (ANALYZE) …` form (an `ANALYZE` utility option), AND (b) the
+        // inner statement is itself a read (so `EXPLAIN DELETE …` / `EXPLAIN
+        // SELECT 1; DROP …` are NOT reads). This lets the agent read path serve
+        // `explain_plan` THROUGH the proxy without ever planning a write — the
+        // explain-hole stays closed by construction.
+        Statement::Explain {
+            analyze,
+            statement,
+            options,
+            ..
+        } => !*analyze && !explain_options_analyze(options) && is_read_statement(statement),
         // `COPY … TO/FROM` is a not-read path regardless of direction.
         Statement::Copy { .. } => false,
         // Explicitly enumerate the common writes/DDL/utility for clarity even
@@ -117,6 +154,19 @@ fn is_read_statement(stmt: &Statement) -> bool {
         // Default-deny: any statement kind we have not positively proven to be
         // read-only is treated as a write.
         _ => false,
+    }
+}
+
+/// Whether a parenthesized `EXPLAIN (…)` option list contains `ANALYZE` (which
+/// makes EXPLAIN EXECUTE the statement). Case-insensitive; fail-closed — any
+/// option whose name is `ANALYZE` (regardless of a truthy/falsy arg we cannot
+/// fully evaluate) is treated as analyzing, so `EXPLAIN (ANALYZE) …` is not-read.
+fn explain_options_analyze(options: &Option<Vec<sqlparser::ast::UtilityOption>>) -> bool {
+    match options {
+        None => false,
+        Some(opts) => opts
+            .iter()
+            .any(|o| o.name.value.eq_ignore_ascii_case("analyze")),
     }
 }
 

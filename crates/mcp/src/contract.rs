@@ -77,6 +77,67 @@ impl BlockContract {
             false,
         )
     }
+
+    /// The cooperative read-only fast-path block (SPEC §4; mirrors the TS
+    /// `READ_ONLY` contract). The `query` / `explain_plan` read tools run only
+    /// provably-pure reads; a write/DDL/stacked statement gets this *recoverable*
+    /// block pointing at the write lifecycle, instead of a pointless round-trip to
+    /// the proxy. The proxy/WALL would reject it too (the real guarantee); this is
+    /// a cooperative fast-path, NOT the boundary. `retryable` is false: the same
+    /// statement cannot become a read by retrying.
+    pub fn read_only(detail: &str) -> Self {
+        BlockContract::new(
+            "READ_ONLY",
+            format!("this tool runs read-only statements; this looks like a {detail}"),
+            "use propose_write → dry_run → apply_write for changes",
+            false,
+        )
+    }
+
+    /// The block returned when the proxy connection is unavailable or was LOST
+    /// (the warden's `pg_terminate_backend`, a backend restart, an idle reset, or
+    /// the proxy simply being down). Mirrors the TS `PROXY_UNAVAILABLE`. It is
+    /// `retryable`: the transport re-dials the proxy on the next read, so a
+    /// transient loss recovers — this is what turns a dropped connection into a
+    /// recoverable signal instead of a crashed process.
+    pub fn proxy_unavailable(detail: &str) -> Self {
+        BlockContract::new(
+            "PROXY_UNAVAILABLE",
+            format!("the proxy connection is unavailable: {detail}"),
+            "the proxy may be down or the backend session ended (e.g. a warden \
+             terminate, restart, or idle reset); retry — the read will re-dial the proxy",
+            true,
+        )
+    }
+
+    /// The block for a proxy/WALL **least-privilege default-deny** (SQLSTATE
+    /// 42501 — `permission denied`: the hardened agent role lacks SELECT on a
+    /// non-whitelisted relation). Mirrors the TS `WALL_DENIED`. This is the
+    /// proxy/WALL enforcing the floor — a structured denial, never an opaque
+    /// crash. Not retryable: the grant does not exist.
+    pub fn wall_denied(detail: &str) -> Self {
+        BlockContract::new(
+            "WALL_DENIED",
+            format!("the proxy/WALL denied this read (least-privilege default-deny): {detail}"),
+            "the hardened agent role has no SELECT on this relation; request access \
+             to a whitelisted relation",
+            false,
+        )
+    }
+
+    /// The generic block for any other proxy/floor denial of a read (a budget
+    /// cutoff surfaced as an error, an EXPLAIN-gate block, a syntax/relation
+    /// error, a read-only rejection at the wire). Mirrors the TS `PROXY_BLOCKED`.
+    /// Not retryable by default: the statement was refused at the deterministic
+    /// floor and the same statement will be refused again.
+    pub fn proxy_blocked(detail: &str) -> Self {
+        BlockContract::new(
+            "PROXY_BLOCKED",
+            format!("the proxy refused this read at the deterministic floor: {detail}"),
+            "adjust the statement to a permitted read, or use the write lifecycle for changes",
+            false,
+        )
+    }
 }
 
 /// The `whoami` posture result (SPEC §3/§4).
@@ -150,5 +211,34 @@ mod tests {
         );
         assert_eq!(w.role, "pgb_agent");
         assert!(w.boundary.contains("proxy"));
+    }
+
+    #[test]
+    fn read_only_block_mirrors_the_ts_contract() {
+        let b = BlockContract::read_only("write/DDL");
+        assert_eq!(b.code, "READ_ONLY");
+        assert!(!b.retryable, "a write does not become a read on retry");
+        assert!(b.remedy.contains("propose_write"));
+        // The shape is the §4 contract: status/code/reason/remedy/retryable.
+        let v = serde_json::to_value(&b).unwrap();
+        for k in ["status", "code", "reason", "remedy", "retryable"] {
+            assert!(v.get(k).is_some(), "block carries `{k}`");
+        }
+        assert_eq!(v["status"], serde_json::json!("blocked"));
+    }
+
+    #[test]
+    fn proxy_unavailable_is_retryable_wall_denied_is_not() {
+        let lost = BlockContract::proxy_unavailable("connection terminated");
+        assert_eq!(lost.code, "PROXY_UNAVAILABLE");
+        assert!(lost.retryable, "a lost connection re-dials → recoverable");
+
+        let wall = BlockContract::wall_denied("permission denied for table secret_data");
+        assert_eq!(wall.code, "WALL_DENIED");
+        assert!(!wall.retryable, "no grant ⇒ retrying cannot help");
+
+        let other = BlockContract::proxy_blocked("EXPLAIN-cost gate: blocked before execution");
+        assert_eq!(other.code, "PROXY_BLOCKED");
+        assert!(!other.retryable);
     }
 }
