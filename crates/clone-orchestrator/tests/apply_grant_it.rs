@@ -423,7 +423,10 @@ fn five_tamper_cases_plus_no_grant_all_abort_with_no_mutation() {
         let grant = sign_grant(&sk, &live, &br, "n-sql", 10_000);
         let mut nonces = InMemoryNonceStore::new();
         let mut tampered = live.clone();
-        tampered.statement_text = "DELETE FROM public.accounts".to_string();
+        // A DIFFERENT but still self-determined (PK-only) statement, so the swap is
+        // caught precisely by the grant binding hash (BindingMismatch), not
+        // (incidentally) the EPIC #91 PR-A self-determined gate.
+        tampered.statement_text = "DELETE FROM public.accounts WHERE id = 1".to_string();
         let out = run_tamper(
             &url,
             &pol,

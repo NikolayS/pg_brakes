@@ -232,6 +232,22 @@
     "revert_diff_expected": true
   },
   {
+    "id": "steerable-non-pk-column-predicate",
+    "class": "dangerous",
+    "payload": "UPDATE public.accounts SET balance=0 WHERE status='cancelled'  (grant-bound write on a mutable, steerable non-PK column) → self-determined gate REFUSES",
+    "vector": "naive",
+    "expected_verdict": "REFUSED",
+    "defense_layer": "self-determined-gate"
+  },
+  {
+    "id": "steerable-subquery-predicate",
+    "class": "dangerous",
+    "payload": "UPDATE public.accounts SET balance=0 WHERE id IN (SELECT account_id FROM public.flags)  (row set steered by another table) → self-determined gate REFUSES",
+    "vector": "obfuscated",
+    "expected_verdict": "REFUSED",
+    "defense_layer": "self-determined-gate"
+  },
+  {
     "id": "legit-large-analytics-read",
     "class": "adversarial-legit",
     "payload": "SELECT count(*), date_trunc('day', created_at) FROM public.orders GROUP BY 2  (big but legit; within budget)",
@@ -310,5 +326,13 @@
     "vector": "naive",
     "expected_verdict": "ALLOW",
     "defense_layer": "certify"
+  },
+  {
+    "id": "legit-self-determined-pk-predicate",
+    "class": "adversarial-legit",
+    "payload": "UPDATE public.accounts SET balance=0 WHERE id % 2 = 0  (PK-only predicate, pinned by the immutable PK) → self-determined gate ALLOWs",
+    "vector": "naive",
+    "expected_verdict": "ALLOW",
+    "defense_layer": "self-determined-gate"
   }
 ]

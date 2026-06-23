@@ -391,3 +391,74 @@ fn flipping_the_preimage_seam_trips_the_gate() {
          captured pre-image MUST be a catastrophic FN"
     );
 }
+
+/// TEETH #7 (the EPIC #91 PR-A self-determined-predicate gate, inverted) — prove
+/// the green `steerable-non-pk-column-predicate` scenario depends specifically on
+/// the gate classifying `status` as a non-PK (steerable) column.
+///
+/// We start from the FN model (a steerable `WHERE status='cancelled'` predicate,
+/// LABELED dangerous+REFUSED) and *flip the defense*: tell the gate the PK column
+/// IS `status` (as if the gate mis-identified the steerable column as the immutable
+/// PK / was disabled). The gate then sees a "PK-only" predicate and ALLOWs it — so
+/// the steerable write would reach rehearsal/apply and the runner MUST flag a
+/// catastrophic FN. If the green scenario were ALLOWed for any OTHER reason this
+/// flip would not change the verdict — so it pins the green scenario to the
+/// non-PK-column classification.
+#[test]
+fn flipping_the_self_determined_pk_column_trips_the_gate() {
+    let neutered = dangerous_scenario(
+        "steerable-non-pk-column-predicate",
+        Verdict::Refused,
+        DefenseLayer::SelfDeterminedGate,
+        // Defense flipped: claim the steerable `status` column is the PK, so the
+        // gate treats the predicate as PK-pinned and ALLOWs the steerable write.
+        Probe::SelfDeterminedGate {
+            sql: "UPDATE public.accounts SET balance=0 WHERE status='cancelled'".into(),
+            pk_col: "status".into(),
+        },
+    );
+    let result = run_scenario(&neutered);
+
+    assert_eq!(
+        result.observed.verdict,
+        Verdict::Allow,
+        "with the steerable column mis-identified as the PK, the gate ALLOWs the steerable write"
+    );
+    assert!(
+        !result.verdict_matches,
+        "the golden expected REFUSED but the flipped gate produced ALLOW → golden diff"
+    );
+    assert!(
+        result.catastrophic_fn,
+        "THE GATE HAS TEETH: a steerable (non-PK-column) predicate allowed through MUST be a \
+         catastrophic FN"
+    );
+}
+
+/// The POSITIVE direction for the #91 gate: the GREEN
+/// `steerable-non-pk-column-predicate` scenario must be REFUSED specifically
+/// because the predicate references a non-PK column — not for any other reason.
+#[test]
+fn self_determined_gate_refuses_steerable_predicate_for_the_right_reason() {
+    let corpus = dbsafe_bench::corpus::corpus();
+    let scenario = corpus
+        .iter()
+        .find(|s| s.golden.id == "steerable-non-pk-column-predicate")
+        .expect("the #91 steerable scenario must be in the corpus");
+    let result = run_scenario(scenario);
+
+    assert_eq!(
+        result.observed.verdict,
+        Verdict::Refused,
+        "the steerable predicate must be REFUSED by the self-determined gate"
+    );
+    assert!(
+        result.observed.reason.contains("non-PK column"),
+        "the refusal must be the non-PK-column classification, got reason: {}",
+        result.observed.reason
+    );
+    assert!(
+        !result.catastrophic_fn,
+        "the green #91 scenario is contained — not an FN"
+    );
+}

@@ -487,6 +487,62 @@ pub fn probe_guarded_apply(case: &DataLossCase) -> Observed {
     }
 }
 
+// --- Self-determined-predicate gate (steerable predicate → REFUSED) -----------
+
+/// Run a grant-bound write's WHERE predicate through the REAL
+/// `self_determined_predicate_reason` gate (EPIC #91 PR-A) on PK column `pk_col`.
+/// Returns REFUSED iff the gate rejects it (the predicate is steerable — a non-PK
+/// column, a subquery/correlated ref, or a volatile function — so its row set
+/// could be re-pointed at a chosen sensitive row between approval and apply),
+/// ALLOW iff the predicate is self-determined (pinned by the immutable PK).
+///
+/// This is the SAME `pgb_clone_orchestrator` public API the dry-run/certify and
+/// grant-apply paths enforce, driven deterministically: a function-volatility
+/// resolver that mirrors `pg_proc` for the small fixed function set the corpus
+/// uses (immutable arithmetic operators have no function call; `now()`/`random()`
+/// are caught by the keyword deny-set / volatile class). No DB, no re-implementation.
+pub fn probe_self_determined_gate(sql: &str, pk_col: &str) -> Observed {
+    use pgb_clone_orchestrator::{
+        FunctionVolatility, Volatility, self_determined_predicate_reason,
+    };
+
+    /// A deterministic stand-in for the `pg_proc.provolatile` resolver: the corpus
+    /// payloads use only immutable built-ins (none, for the arithmetic shapes) or
+    /// the volatile `random`; everything else is Unknown (fail-closed), exactly as
+    /// the real `pg_proc`-backed resolver behaves for an unresolvable name.
+    struct CorpusVolatility;
+    impl FunctionVolatility for CorpusVolatility {
+        fn volatility_of(&mut self, name: &str) -> Volatility {
+            match name.rsplit('.').next().unwrap_or(name) {
+                "abs" | "lower" | "upper" | "length" | "mod" => Volatility::Immutable,
+                "random" | "clock_timestamp" | "nextval" => Volatility::Volatile,
+                _ => Volatility::Unknown,
+            }
+        }
+    }
+
+    match self_determined_predicate_reason(sql, pk_col, &mut CorpusVolatility) {
+        None => Observed {
+            verdict: crate::verdict::Verdict::Allow,
+            bytes_out: 0,
+            rows_out: 0,
+            budget_bytes: 0,
+            prod_rows_touched: 0,
+            reverted_with_verified_diff: false,
+            reason: "self_determined".to_string(),
+        },
+        Some(reason) => Observed {
+            verdict: crate::verdict::Verdict::Refused,
+            bytes_out: 0,
+            rows_out: 0,
+            budget_bytes: 0,
+            prod_rows_touched: 0,
+            reverted_with_verified_diff: false,
+            reason: format!("{reason}"),
+        },
+    }
+}
+
 // --- Default-deny certified-action set (TRUNCATE/DROP/ALTER/volatile → REFUSED) -
 
 /// Run an [`Operation`](pgb_core::inverse::Operation) through the REAL default-deny
@@ -544,6 +600,38 @@ mod tests {
     #[test]
     fn truncate_is_refused() {
         let o = probe_certify(&Operation::Truncate);
+        assert_eq!(o.verdict, crate::verdict::Verdict::Refused);
+    }
+
+    #[test]
+    fn self_determined_pk_predicate_is_allowed() {
+        // The marquee PK-only shape: `WHERE id % 2 = 0` is pinned by the immutable
+        // PK → ALLOW (reaches rehearsal).
+        let o = probe_self_determined_gate(
+            "UPDATE public.accounts SET balance = 0 WHERE id % 2 = 0",
+            "id",
+        );
+        assert_eq!(o.verdict, crate::verdict::Verdict::Allow);
+    }
+
+    #[test]
+    fn steerable_non_pk_column_predicate_is_refused() {
+        // `WHERE status='cancelled'` is steerable (an attacker can set a chosen
+        // row's status to match) → REFUSED by the self-determined gate.
+        let o = probe_self_determined_gate(
+            "UPDATE public.accounts SET balance = 0 WHERE status = 'cancelled'",
+            "id",
+        );
+        assert_eq!(o.verdict, crate::verdict::Verdict::Refused);
+        assert!(o.reason.contains("non-PK column"), "reason: {}", o.reason);
+    }
+
+    #[test]
+    fn steerable_subquery_predicate_is_refused() {
+        let o = probe_self_determined_gate(
+            "DELETE FROM public.accounts WHERE id IN (SELECT account_id FROM public.flags)",
+            "id",
+        );
         assert_eq!(o.verdict, crate::verdict::Verdict::Refused);
     }
 

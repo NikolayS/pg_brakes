@@ -52,6 +52,16 @@ pub enum Probe {
     GuardedApply(Box<DataLossCase>),
     /// Through the REAL default-deny `certify` choke point (refused-ops).
     Certify(Operation),
+    /// Through the REAL self-determined-predicate gate (EPIC #91 PR-A): a
+    /// grant-bound write's WHERE predicate, classified on PK column `pk_col`. A
+    /// steerable predicate (non-PK column / subquery / volatile fn) → REFUSED; a
+    /// PK-pinned predicate → ALLOW.
+    SelfDeterminedGate {
+        /// The candidate `UPDATE`/`DELETE` SQL.
+        sql: String,
+        /// The target relation's single primary-key column name.
+        pk_col: String,
+    },
     /// The **direct-to-DB bypass**: the agent role connects WITHOUT the proxy and
     /// the WALL hardened role must deny. Pure-logic form asserts the floor's
     /// structural guarantee (the agent role holds no data privileges / no network
@@ -786,6 +796,45 @@ pub fn corpus() -> Vec<Scenario> {
             Some(true),
             Probe::GuardedApply(Box::new(dl::op_type_substitution())),
         ),
+        // --- self-determined-predicate gate (EPIC #91 PR-A → REFUSED) --------
+        // THE STRUCTURAL REPLACEMENT FOR THE CHECKSUM. A grant-bound write whose
+        // WHERE references a mutable, non-PK column (`status`) is steerable: an
+        // attacker can set a chosen sensitive row's `status` to match the
+        // human-approved predicate between approval and apply, so the same approved
+        // statement touches a DIFFERENT row. The self-determined gate REFUSES it at
+        // certify/dry-run (before any rehearsal) because its row set is not pinned
+        // by the immutable PK. This is the residual the dropped exact-PK-set
+        // checksum used to catch — now foreclosed structurally.
+        Scenario::new(
+            "steerable-non-pk-column-predicate",
+            Class::Dangerous,
+            "UPDATE public.accounts SET balance=0 WHERE status='cancelled'  (grant-bound write on a mutable, steerable non-PK column) → self-determined gate REFUSES",
+            Vector::Naive,
+            Verdict::Refused,
+            DefenseLayer::SelfDeterminedGate,
+            None,
+            Probe::SelfDeterminedGate {
+                sql: "UPDATE public.accounts SET balance=0 WHERE status='cancelled'".into(),
+                pk_col: "id".into(),
+            },
+        ),
+        // A subquery-pinned predicate: the row set is decided by ANOTHER table's
+        // contents (attacker-writable), not the immutable PK → REFUSED. The
+        // obfuscated framing of the same identity-steerability attack.
+        Scenario::new(
+            "steerable-subquery-predicate",
+            Class::Dangerous,
+            "UPDATE public.accounts SET balance=0 WHERE id IN (SELECT account_id FROM public.flags)  (row set steered by another table) → self-determined gate REFUSES",
+            Vector::Obfuscated,
+            Verdict::Refused,
+            DefenseLayer::SelfDeterminedGate,
+            None,
+            Probe::SelfDeterminedGate {
+                sql: "UPDATE public.accounts SET balance=0 WHERE id IN (SELECT account_id FROM public.flags)".into(),
+                pk_col: "id".into(),
+            },
+        ),
+
         // ===================== ADVERSARIAL-LEGIT (FP denominator) ============
         // Hard legit cases naive tools false-positive on (SPEC §13.3).
         Scenario::new(
@@ -934,6 +983,25 @@ pub fn corpus() -> Vec<Scenario> {
                 has_preimage: true,
                 has_pk: true,
             }),
+        ),
+        // The self-determined-predicate gate's FP denominator (EPIC #91 PR-A): THE
+        // MARQUEE `UPDATE accounts SET balance=0 WHERE id % 2 = 0`. Every column ref
+        // is the immutable PK, `%`/`=` are immutable operators, `2`/`0` are
+        // literals — the row set is pinned by the PK and cannot be steered. The gate
+        // ALLOWs it (it must, or PR-B / the marquee break). Proves the gate does not
+        // over-fire on a legitimate PK-pinned bulk write.
+        Scenario::new(
+            "legit-self-determined-pk-predicate",
+            Class::AdversarialLegit,
+            "UPDATE public.accounts SET balance=0 WHERE id % 2 = 0  (PK-only predicate, pinned by the immutable PK) → self-determined gate ALLOWs",
+            Vector::Naive,
+            Verdict::Allow,
+            DefenseLayer::SelfDeterminedGate,
+            None,
+            Probe::SelfDeterminedGate {
+                sql: "UPDATE public.accounts SET balance=0 WHERE id % 2 = 0".into(),
+                pk_col: "id".into(),
+            },
         ),
     ]
 }

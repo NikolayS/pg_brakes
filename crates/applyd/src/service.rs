@@ -750,6 +750,13 @@ fn dry_run_error_to_rpc(e: DryRunError) -> RpcError {
             ErrorCode::PkLess.error(format!("target relation `{rel}` has no primary key"))
         }
         DryRunError::NotRehearsable(m) => ErrorCode::NotRehearsable.error(m),
+        // EPIC #91 PR-A: a steerable (non-self-determined) predicate is a
+        // NOT_REHEARSABLE-class refusal (the same recoverable contract as the other
+        // certify-time structural refusals).
+        DryRunError::NotSelfDetermined(r) => ErrorCode::NotRehearsable.error(format!(
+            "predicate is not self-determined (steerable); restrict the WHERE to the \
+             primary key + literals: {r}"
+        )),
         DryRunError::Expired(id) => {
             ErrorCode::ProposalNotFound.error(format!("proposal `{id}` expired"))
         }
@@ -774,6 +781,12 @@ fn granted_apply_error_to_rpc(e: &GrantedApplyError) -> RpcError {
         GrantedApplyError::Inconsistent(m) => {
             ErrorCode::GrantRejected.error(format!("inconsistent grant binding: {m}"))
         }
+        // EPIC #91 PR-A apply-path defense in depth: a steerable predicate is
+        // rejected before the apply txn opens. Surfaced as GRANT_REJECTED (a
+        // grant-path refusal) — a grant for such a statement should never have been
+        // minted (the dry-run gate refuses it before approval).
+        GrantedApplyError::NotSelfDetermined(r) => ErrorCode::GrantRejected
+            .error(format!("predicate is not self-determined (steerable): {r}")),
     }
 }
 

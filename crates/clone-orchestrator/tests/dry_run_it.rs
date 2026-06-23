@@ -31,7 +31,7 @@ use common::{
     PgRehearsal, account_balances, base_pgurl, create_seeded_db, current_wal_lsn, drop_db,
     it_enabled, row_count, staleness_lsn_bytes,
 };
-use pgb_clone_orchestrator::{DryRunError, dry_run, propose};
+use pgb_clone_orchestrator::{DryRunError, NotSelfDetermined, dry_run, propose};
 use pgb_core::{BlastRadius, LockMode, SystemClock};
 
 /// Skip-guard: returns `None` (printing why) when the IT gate is unset so the
@@ -732,5 +732,128 @@ fn record_fields_are_populated_from_real_pg() {
     // At least one lock was observed on the target during the rehearsal.
     assert!(!br.locks.is_empty(), "locks must be measured from pg_locks");
 
+    drop_db(&admin, &dbname);
+}
+
+// ===========================================================================
+//  EPIC #91 PR-A — self-determined-predicate gate against real PG18.
+//
+//  On the GRANT-BOUND prep path (PgRehearsal::with_self_determined_gate(true)),
+//  a grant-bound write's WHERE may reference ONLY the immutable single-column PK
+//  (`accounts.id`) + literals + immutable functions on it. A steerable predicate
+//  (non-PK column, subquery) is REFUSED before rehearsal; the DB is untouched.
+//  The structural replacement for the dropped exact-PK-set checksum.
+// ===========================================================================
+
+#[test]
+fn self_determined_pk_predicate_is_allowed_grant_path() {
+    let Some((admin, dbname, mut client)) = setup("sd_allow") else {
+        return;
+    };
+    // The MARQUEE PK-only shape: `WHERE id % 2 = 0`. Every column ref is the
+    // immutable PK → self-determined → ALLOWED (reaches rehearsal, rolls back).
+    let before = account_balances(&mut client);
+    let clock = SystemClock::new();
+    let statement = "UPDATE public.accounts SET balance = 0 WHERE id % 2 = 0";
+    let proposal = propose(statement, None, &clock);
+    let br = {
+        let inner_clock = SystemClock::new();
+        let mut backend =
+            PgRehearsal::new(&mut client, &inner_clock).with_self_determined_gate(true);
+        dry_run(&proposal, &mut backend, &clock)
+            .expect("PK-only predicate is self-determined → must reach rehearsal")
+    };
+    // 4 even ids in {1..8} → {2,4,6,8}.
+    assert_eq!(br.affected.by_table["public.accounts"], 4);
+    assert!(!br.predicate_volatile);
+    // Rolled back — no persistence.
+    assert_eq!(account_balances(&mut client), before);
+    eprintln!("[sd_allow] `id % 2 = 0` ALLOWED (self-determined), DB unchanged");
+    drop_db(&admin, &dbname);
+}
+
+#[test]
+fn steerable_non_pk_column_predicate_is_refused_grant_path() {
+    let Some((admin, dbname, mut client)) = setup("sd_refuse_col") else {
+        return;
+    };
+    // `WHERE owner = 'owner-3'` references the mutable, steerable `owner` column.
+    // An attacker could set a chosen sensitive row's owner to match between
+    // approval and apply → REFUSED before rehearsal (DB untouched).
+    let before = account_balances(&mut client);
+    let clock = SystemClock::new();
+    let statement = "UPDATE public.accounts SET balance = 0 WHERE owner = 'owner-3'";
+    let proposal = propose(statement, None, &clock);
+    let err = {
+        let inner_clock = SystemClock::new();
+        let mut backend =
+            PgRehearsal::new(&mut client, &inner_clock).with_self_determined_gate(true);
+        dry_run(&proposal, &mut backend, &clock).unwrap_err()
+    };
+    eprintln!("[sd_refuse_col] refused as expected: {err}");
+    match err {
+        DryRunError::NotSelfDetermined(NotSelfDetermined::NonPkColumn {
+            ref referenced, ..
+        }) => {
+            assert_eq!(referenced, "owner")
+        }
+        other => panic!("expected NotSelfDetermined(NonPkColumn), got {other:?}"),
+    }
+    // Untouched — the steerable write never ran.
+    assert_eq!(account_balances(&mut client), before);
+    drop_db(&admin, &dbname);
+}
+
+#[test]
+fn steerable_subquery_predicate_is_refused_grant_path() {
+    let Some((admin, dbname, mut client)) = setup("sd_refuse_subq") else {
+        return;
+    };
+    // `WHERE id IN (SELECT account_id FROM entries)` — the row set is decided by
+    // ANOTHER table's contents, not the immutable PK → REFUSED before rehearsal.
+    let before = account_balances(&mut client);
+    let clock = SystemClock::new();
+    let statement = "UPDATE public.accounts SET balance = 0 WHERE id IN (SELECT account_id FROM public.entries)";
+    let proposal = propose(statement, None, &clock);
+    let err = {
+        let inner_clock = SystemClock::new();
+        let mut backend =
+            PgRehearsal::new(&mut client, &inner_clock).with_self_determined_gate(true);
+        dry_run(&proposal, &mut backend, &clock).unwrap_err()
+    };
+    eprintln!("[sd_refuse_subq] refused as expected: {err}");
+    assert!(
+        matches!(
+            err,
+            DryRunError::NotSelfDetermined(NotSelfDetermined::Subquery)
+        ),
+        "expected NotSelfDetermined(Subquery), got {err:?}"
+    );
+    assert_eq!(account_balances(&mut client), before);
+    drop_db(&admin, &dbname);
+}
+
+#[test]
+fn gate_off_by_default_preview_path_unaffected() {
+    let Some((admin, dbname, mut client)) = setup("sd_gate_off") else {
+        return;
+    };
+    // NO `.with_self_determined_gate(true)` → the gate is OFF (preview path). A
+    // non-PK-column predicate (`lower(owner)`, IMMUTABLE) still PROCEEDS exactly as
+    // before — proving the gate does not regress the volatility/preview path and is
+    // a grant-path-only requirement.
+    let before = account_balances(&mut client);
+    let clock = SystemClock::new();
+    let statement = "UPDATE public.accounts SET balance = 0 WHERE lower(owner) = 'owner-3'";
+    let proposal = propose(statement, None, &clock);
+    let br = {
+        let inner_clock = SystemClock::new();
+        let mut backend = PgRehearsal::new(&mut client, &inner_clock); // gate OFF
+        dry_run(&proposal, &mut backend, &clock)
+            .expect("with the gate off, a non-PK immutable predicate still previews")
+    };
+    assert!(!br.predicate_volatile);
+    assert_eq!(account_balances(&mut client), before);
+    eprintln!("[sd_gate_off] preview path unaffected: `lower(owner)` proceeds (gate off)");
     drop_db(&admin, &dbname);
 }
