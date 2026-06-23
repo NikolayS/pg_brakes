@@ -217,7 +217,7 @@ PGB_ANCHOR_PATH=/tmp/pg_bumpers-up/verify.anchor.worm \
 ```
 
 ```text
-pgb-cli verify: the shared `_meta` chain VERIFIES (7 records) and the durable
+pgb-cli verify: the shared `_meta` chain VERIFIES and the durable
 anchored head MATCHES the chain head.
   decisions by reason_code:
     NOT_REHEARSABLE   x2   (the DROP + TRUNCATE refusals)
