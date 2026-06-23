@@ -123,6 +123,50 @@ ALTER ROLE pgb_applier SET search_path = pg_catalog, "public";
 REVOKE CREATE ON SCHEMA public FROM pgb_applier;
 GRANT  USAGE  ON SCHEMA public TO   pgb_applier;
 
+-- [REVOKE] Member-of-nothing for the APPLIER too — strip EVERY predefined pg_* role +
+-- any other (drift defense). pgb_applier is write-capable, so the destructive predefined
+-- roles (pg_execute_server_program → COPY … PROGRAM; pg_read/write_server_files → server-
+-- file read/write; pg_write_all_data) matter MORE here, not less. These are belt-and-
+-- suspenders (the role is NOSUPERUSER + member-of-nothing by construction), but re-asserting
+-- them every run is the whole point: a drifted GRANT can never silently arm the applier.
+DO $$
+DECLARE
+  r record;
+BEGIN
+  FOR r IN
+    SELECT g.rolname AS granted_role
+    FROM pg_auth_members m
+    JOIN pg_roles a ON a.oid = m.member
+    JOIN pg_roles g ON g.oid = m.roleid
+    WHERE a.rolname = 'pgb_applier'
+  LOOP
+    EXECUTE format('REVOKE %I FROM pgb_applier', r.granted_role);
+  END LOOP;
+END
+$$;
+
+-- [REVOKE] Belt-and-suspenders: explicitly REVOKE the headline predefined roles from the
+-- applier (same list + same NOTICE-silencing as pgb_agent above). The destructive-vector
+-- ones for a WRITE-capable role are pg_execute_server_program (COPY … PROGRAM),
+-- pg_read_server_files / pg_write_server_files (server-file I/O), and pg_write_all_data;
+-- the applier's IT asserts a TRUNCATE and a COPY … PROGRAM as pgb_applier are denied.
+SET LOCAL client_min_messages = error;
+REVOKE pg_read_all_data            FROM pgb_applier;
+REVOKE pg_write_all_data           FROM pgb_applier;   -- no write outside the DML grants
+REVOKE pg_read_all_settings        FROM pgb_applier;
+REVOKE pg_read_all_stats           FROM pgb_applier;
+REVOKE pg_stat_scan_tables         FROM pgb_applier;
+REVOKE pg_monitor                  FROM pgb_applier;
+REVOKE pg_execute_server_program   FROM pgb_applier;   -- the COPY … PROGRAM gate
+REVOKE pg_read_server_files        FROM pgb_applier;   -- pg_read_file / server-file read
+REVOKE pg_write_server_files       FROM pgb_applier;   -- server-file write
+REVOKE pg_maintain                 FROM pgb_applier;
+REVOKE pg_checkpoint               FROM pgb_applier;
+REVOKE pg_signal_backend           FROM pgb_applier;
+REVOKE pg_create_subscription      FROM pgb_applier;
+REVOKE pg_use_reserved_connections FROM pgb_applier;
+RESET client_min_messages;
+
 -- -------------------------------------------------------------------------------------
 -- 1. [REVOKE] Member-of-nothing — strip EVERY predefined pg_* role + any other.
 --    Enumerate ALL roles the agent is a member of and REVOKE them, so the matrix test's
