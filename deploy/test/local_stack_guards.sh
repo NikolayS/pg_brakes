@@ -1,24 +1,33 @@
 #!/usr/bin/env bash
 # pg_bumpers — local-stack.sh PATH/PID guard tests (issue #16).
 # =====================================================================================
-# Pure path/PID-logic unit tests for the two defense-in-depth hardenings flagged in the
+# Pure path/PID-logic unit tests for the defense-in-depth hardenings flagged in the
 # PR #14 review. NO real PostgreSQL is required (and none is started); NOTHING real is
 # ever killed. The test sources local-stack.sh with PG_BUMPERS_LOCALSTACK_TEST=1 so the
 # script defines its functions but does NOT run `main`, then drives the real
-# `validate_root`, `canonicalize_path`, and `pid_is_ours` functions with controlled
-# inputs.
+# `canonicalize_path`, `validate_root`, and `pid_is_ours` functions DIRECTLY with
+# controlled inputs (all confined to a private `mktemp` scratch tree + one tracked
+# `sleep` we spawn ourselves).
 #
-# It asserts BOTH hardenings, with teeth (a RED self-check proves the assertions would
-# have failed against the pre-fix logic — see the inline RED notes):
+# It asserts the hardenings, with teeth (a RED self-check proves the assertions would
+# have failed against the pre-fix logic / against a symlink-blind canonicalizer — see
+# the inline RED notes):
 #
-#   GUARD 1 — validate_root rejects a hostile PG_BUMPERS_LOCALSTACK_DIR whose `..`
-#     escapes the repo (the script die()s / exits non-zero, and NO rm -rf runs outside
-#     confinement), and ACCEPTS the safe default + a legitimate *localstack* dir.
+#   UNIT — canonicalize_path's contract, driven DIRECTLY: empty/relative inputs refuse,
+#     trailing-slash collapses, root-only is handled, a not-yet-existing multi-segment
+#     tail re-attaches under its nearest existing ancestor (incl. the ancestor == '/'
+#     case). This is the most intricate new code, so it gets dedicated unit coverage.
+#
+#   GUARD 1 — validate_root rejects a hostile PG_BUMPERS_LOCALSTACK_DIR that escapes the
+#     repo — both via a `..` segment AND via a SYMLINK whose canonical target is outside
+#     confinement (the symlink case is what `pwd -P` defends; a string-normalize would
+#     wrongly accept it). It ACCEPTS the safe default + a legitimate *localstack* dir.
 #
 #   GUARD 2 — pid_is_ours returns FALSE for a process whose args merely CONTAIN our
-#     datadir as a substring / a prefix-collision, and TRUE only for an exact canonical
-#     data-dir match. Driven against a real `sleep` process with a crafted argv — never
-#     against a real cluster, never a kill.
+#     datadir as a substring / a prefix-collision, and TRUE only for an EXACT CANONICAL
+#     data-dir match — including a datadir reached via a SYMLINK that canonicalizes to
+#     our real cluster dir (proving the compare is canonical, not literal-string). Driven
+#     against a real `sleep` with a crafted argv — never a real cluster, never a kill.
 #
 # Always-runnable (no env gate): it is pure logic, so it runs in the FAST path and in
 # CI without a live PG. SPEC §12 (graceful degradation). Issue #16.
@@ -61,6 +70,20 @@ mkdir -p "$FAKE_REPO/.localstack"
 # A subshell isolates each scenario so per-scenario env (and a die() that exits) never
 # pollutes the next assertion.
 # -------------------------------------------------------------------------------------
+
+# run_canon <input> -> prints "<rc>|<stdout>". Drives canonicalize_path DIRECTLY (it is a
+# pure path-logic function — no PG, no kill) and reports BOTH its exit status and its
+# printed result so the caller can assert the full contract (refuse vs canonical output).
+run_canon() {
+  local in="$1" out rc=0
+  out="$(
+    export PG_BUMPERS_LOCALSTACK_TEST=1
+    # shellcheck source=/dev/null
+    source "$STACK"
+    canonicalize_path "$in"
+  )" && rc=0 || rc=$?
+  printf '%s|%s\n' "$rc" "$out"
+}
 
 # run_validate_root <ROOT> <REPO_ROOT> -> prints OK / REJECT. validate_root uses die()
 # (which `exit 1`s), so we run it in a child process and key off that child's exit
@@ -106,7 +129,73 @@ run_pid_is_ours() {
 }
 
 # =====================================================================================
-# GUARD 1 — validate_root: `..` escape rejection + safe-default/localstack acceptance.
+# UNIT — canonicalize_path contract (driven DIRECTLY). The intricate new code: empty /
+# relative inputs must refuse; trailing slash collapses; root-only handled; a not-yet-
+# existing multi-segment tail re-attaches under its nearest existing ancestor (incl. the
+# ancestor == '/' first-`up` case). No PG, no kill — pure path logic.
+# =====================================================================================
+log "UNIT — canonicalize_path contract"
+
+UNIT_BASE="$SCRATCH/unit"     # an existing ancestor we hang not-yet-existing tails off of
+mkdir -p "$UNIT_BASE"
+
+# (u1) empty input -> refuses (non-zero, no output).
+got="$(run_canon "")"
+if [ "${got%%|*}" != "0" ]; then
+  okrow "empty input refused (rc=${got%%|*}, no canonical path)"
+else
+  badrow "empty input was canonicalized ($got) — must refuse"
+fi
+
+# (u2) relative input -> refuses (must be absolute).
+got="$(run_canon "relative/x")"
+if [ "${got%%|*}" != "0" ]; then
+  okrow "relative input 'relative/x' refused (must be absolute)"
+else
+  badrow "relative input was canonicalized ($got) — must refuse"
+fi
+
+# (u3) root-only "/" -> rc 0, prints "/".
+got="$(run_canon "/")"
+if [ "$got" = "0|/" ]; then
+  okrow "root-only '/' canonicalizes to '/' (rc 0)"
+else
+  badrow "root-only '/' mishandled (got '$got', want '0|/')"
+fi
+
+# (u4) trailing slash collapses to the SAME canonical as without it.
+canon_with="$(run_canon "$UNIT_BASE/notyet/")"
+canon_without="$(run_canon "$UNIT_BASE/notyet")"
+if [ "$canon_with" = "$canon_without" ] && [ "${canon_with%%|*}" = "0" ]; then
+  okrow "trailing-slash input collapses to same canonical as without ('${canon_with#*|}')"
+else
+  badrow "trailing-slash mismatch: with='$canon_with' without='$canon_without'"
+fi
+
+# (u5) a multi-segment NOT-YET-EXISTING tail under an existing ancestor re-attaches: the
+# canonical must be <canon(ancestor)>/a/b/c (exercises the first-`up` peel-and-reattach).
+ancestor_canon="$(run_canon "$UNIT_BASE")"; ancestor_canon="${ancestor_canon#*|}"
+got="$(run_canon "$UNIT_BASE/a/b/c")"
+if [ "$got" = "0|$ancestor_canon/a/b/c" ]; then
+  okrow "not-yet-existing tail 'a/b/c' re-attaches under existing ancestor ('${got#*|}')"
+else
+  badrow "not-yet-existing tail mis-reattached (got '$got', want '0|$ancestor_canon/a/b/c')"
+fi
+
+# (u6) an input whose nearest EXISTING ancestor is '/' itself (no symlink on the way), so
+# the whole non-existing tail re-attaches directly under root. Use a top-level name that
+# cannot exist (PID-stamped) so '/' is genuinely the nearest existing ancestor.
+NOEXIST_TOP="/pgb_guards_noexist_$$"
+got="$(run_canon "$NOEXIST_TOP/deep/tail")"
+if [ "$got" = "0|$NOEXIST_TOP/deep/tail" ]; then
+  okrow "tail whose nearest existing ancestor is '/' re-attaches under root ('${got#*|}')"
+else
+  badrow "ancestor=='/' case mis-handled (got '$got', want '0|$NOEXIST_TOP/deep/tail')"
+fi
+
+# =====================================================================================
+# GUARD 1 — validate_root: path confinement (`..` AND symlink escapes) + safe-default /
+# *localstack* acceptance.
 # =====================================================================================
 log "GUARD 1 — validate_root path confinement"
 
@@ -128,10 +217,10 @@ else
 fi
 
 # (1c) HOSTILE: a `..` that string-prefixes the repo but RESOLVES outside it. This is the
-# core attack. Pre-fix (unanchored string-prefix "$REPO_ROOT/*") this PASSED because the
-# literal string starts with "$REPO_ROOT/" — yet it canonicalizes to $SCRATCH/escaped,
-# OUTSIDE the repo and outside any *localstack* dir, where the later `rm -rf "$ROOT"`
-# would run. The fix must REJECT it.
+# core string-prefix attack. Pre-fix (unanchored string-prefix "$REPO_ROOT/*") this PASSED
+# because the literal string starts with "$REPO_ROOT/" — yet it canonicalizes to
+# $SCRATCH/escaped, OUTSIDE the repo and outside any *localstack* dir, where the later
+# `rm -rf "$ROOT"` would run. The fix must REJECT it (via the up-front `..` refusal).
 mkdir -p "$SCRATCH/escaped"
 HOSTILE="$FAKE_REPO/.localstack/../../escaped"
 got="$(run_validate_root "$HOSTILE" "$FAKE_REPO")"
@@ -141,22 +230,46 @@ else
   badrow "hostile '..' escape was ACCEPTED ($got) — confinement bypassed! (RED: pre-fix string-prefix lets this through)"
 fi
 
-# (1d) HOSTILE variant: `..` that escapes even the *localstack* basename allowance. The
-# literal basename here is 'tmp' after normalization, well outside the repo. (Belt: a `..`
-# chain that lands in a non-localstack dir.)
-mkdir -p "$SCRATCH/outside"
-HOSTILE2="$SCRATCH/elsewhere/my-localstack-scratch/../../outside"
-got="$(run_validate_root "$HOSTILE2" "$FAKE_REPO")"
+# (1d) HOSTILE SYMLINK escape — the headline vector `canonicalize_path`'s `pwd -P` defends.
+# With `..` segments already refused outright (1c), a SYMLINK is the ONLY remaining escape
+# vector canonicalization defends. We create a real symlink INSIDE a scratch "repo" whose
+# target is OUTSIDE the repo; the literal ROOT path has NO `..` (so the `..` guard is NOT
+# what stops it) AND its literal basename (`escape-link`) is not *localstack*. The defense
+# is purely symlink-resolution: canon -> $SCRATCH/sym-outside (outside repo, non-localstack
+# basename) -> REJECT.  >>> RED-TEETH: a regression swapping `pwd -P` for a string-normalize
+# would leave the path literally under "$REPO_ROOT/.localstack/..." and ACCEPT it, letting
+# `rm -rf "$ROOT"` run on the symlink's real (outside) target. <<<
+mkdir -p "$SCRATCH/sym-outside"
+ln -s "$SCRATCH/sym-outside" "$FAKE_REPO/.localstack/escape-link"
+SYM_ESCAPE="$FAKE_REPO/.localstack/escape-link"
+got="$(run_validate_root "$SYM_ESCAPE" "$FAKE_REPO")"
 if [ "$got" = "REJECT" ]; then
-  okrow "hostile '..' escape past the *localstack* allowance ('$HOSTILE2' -> $SCRATCH/outside) REJECTED"
+  okrow "hostile SYMLINK escape ('$SYM_ESCAPE' -> $SCRATCH/sym-outside, no '..' literal) REJECTED (symlink resolved)"
 else
-  badrow "hostile '..' escape past the *localstack* allowance was ACCEPTED ($got)"
+  badrow "hostile SYMLINK escape was ACCEPTED ($got) — \`pwd -P\` not resolving the symlink (RED: a string-normalize accepts this)"
 fi
 
-# (1e) NO rm -rf ever happens in validate_root itself — assert the scratch tree the
-# hostile ROOTs pointed at is still intact (validate_root must never delete; it only
-# gate-keeps). This proves the reject path didn't take a destructive branch.
-if [ -d "$SCRATCH/escaped" ] && [ -d "$SCRATCH/outside" ]; then
+# (1e) HOSTILE SYMLINK whose NAME matches *localstack* but whose CANONICAL TARGET is outside
+# the repo. This is the real teeth behind the "*localstack* basename allowance": a string-
+# normalize would keep the basename `evil-localstack` and ACCEPT via the *localstack* case,
+# but canonicalization resolves the link so the basename becomes the target's (`out-target`,
+# non-localstack) and the path is outside the repo -> REJECT.  (Replaces the old tautological
+# 1d, whose literal basename `outside` was already rejected pre-fix because it isn't
+# *localstack* — not because of the `..`.)  >>> RED-TEETH against a symlink-blind canonicalize.
+mkdir -p "$SCRATCH/out-target"
+ln -s "$SCRATCH/out-target" "$FAKE_REPO/evil-localstack"
+SYM_LOCALSTACK="$FAKE_REPO/evil-localstack"   # basename *localstack*, but resolves OUTSIDE
+got="$(run_validate_root "$SYM_LOCALSTACK" "$FAKE_REPO")"
+if [ "$got" = "REJECT" ]; then
+  okrow "*localstack*-NAMED symlink resolving OUTSIDE the repo ('$SYM_LOCALSTACK' -> $SCRATCH/out-target) REJECTED (canonical basename wins)"
+else
+  badrow "*localstack*-named symlink escape was ACCEPTED ($got) — basename allowance defeated by symlink (RED: a string-normalize accepts this)"
+fi
+
+# (1f) NO rm -rf ever happens in validate_root itself — assert the scratch trees the hostile
+# ROOTs pointed at are still intact (validate_root must never delete; it only gate-keeps).
+# This proves the reject path didn't take a destructive branch.
+if [ -d "$SCRATCH/escaped" ] && [ -d "$SCRATCH/sym-outside" ] && [ -d "$SCRATCH/out-target" ]; then
   okrow "no destructive side effect: validate_root left target dirs intact (gate-only)"
 else
   badrow "a target dir vanished — validate_root must NEVER rm anything"
@@ -180,6 +293,11 @@ mkdir -p "$G_PRIMARY" "$G_REPLICA" "$G_META"
 COLLIDE="${G_PRIMARY}-evil"   # ".../primary-evil" — has ".../primary" as a string prefix
 mkdir -p "$COLLIDE"
 
+# A symlinked path to our stack root, so a datadir reached VIA the symlink canonicalizes to
+# exactly our real $G_PRIMARY. Used by (2a-sym) to prove the compare is canonical.
+ln -s "$G_ROOT" "$SCRATCH/symlinked-stack"
+SYM_PRIMARY="$SCRATCH/symlinked-stack/primary"   # canon == $G_PRIMARY (via the symlink)
+
 # Spawn a `sleep` whose argv mimics `<comm> -D <dir>` IN THIS shell (NOT a command
 # substitution — that would put the job in a short-lived subshell that reaps it before we
 # can inspect it). Sets SLEEP_PID. This harmless sleep is the ONLY process we ever touch;
@@ -192,8 +310,17 @@ spawn_fake_pg() {
   # renders it as our crafted command line.
   bash -c 'exec -a "'"$comm"' -D '"$datadir"'" sleep 30' &
   SLEEP_PID="$!"
-  # Give the exec a moment so `ps` sees the renamed argv rather than the bootstrap bash.
-  sleep 0.2
+  # POLL (don't fixed-sleep) until `ps` shows the renamed argv: `exec -a` runs a beat after
+  # fork, and a loaded CI runner can lag — a fixed sleep would either flake or waste time.
+  # Bounded so a genuine failure still surfaces (fail-loud) instead of hanging.
+  local want="$comm -D $datadir"
+  for _ in $(seq 1 100); do   # ~5s ceiling at 0.05s/iter
+    case "$(ps -o command= -p "$SLEEP_PID" 2>/dev/null || true)" in
+      *"$want"*) return 0 ;;
+    esac
+    sleep 0.05
+  done
+  return 0   # fall through: the assertion itself will fail loudly if argv never appeared
 }
 reap_sleep() { [ -n "${SLEEP_PID:-}" ] && kill "$SLEEP_PID" 2>/dev/null; wait "$SLEEP_PID" 2>/dev/null || true; SLEEP_PID=""; }
 
@@ -204,6 +331,21 @@ if [ "$got" = "OURS" ]; then
   okrow "exact match: 'postgres -D $G_PRIMARY' recognized as OURS"
 else
   badrow "exact match on our primary dir was NOT recognized ($got) — fail-closed too aggressive"
+fi
+reap_sleep
+
+# (2a-sym) CANONICAL match ACROSS A SYMLINK -> OURS. The -D arg is the symlinked path, which
+# canonicalizes to exactly our real $G_PRIMARY. Proves the compare is canonical, not literal
+# string.  >>> RED-TEETH: a string-normalize canonicalize would leave the candidate as the
+# symlinked path ('.../symlinked-stack/primary') which is != '.../.localstack/primary', so it
+# would (wrongly) read NOT ours — the assertion here would fail. <<<  No kill of any cluster;
+# the crafted `sleep` is the only process touched.
+spawn_fake_pg "postgres" "$SYM_PRIMARY"
+got="$(run_pid_is_ours "$SLEEP_PID" "$G_PRIMARY" "$G_REPLICA" "$G_META" "$G_ROOT")"
+if [ "$got" = "OURS" ]; then
+  okrow "canonical match across a symlink: 'postgres -D $SYM_PRIMARY' (canon == $G_PRIMARY) is OURS"
+else
+  badrow "symlinked datadir canonicalizing to our primary was NOT recognized ($got) — compare is literal-string, not canonical (RED: a string-normalize fails this)"
 fi
 reap_sleep
 
@@ -230,12 +372,14 @@ else
 fi
 reap_sleep
 
-# (2d) FAIL-CLOSED: a non-postgres process (no `postgres` token) is never ours, even if
-# its args contain the exact datadir.
+# (2d) FAIL-CLOSED regression guard (NOT a pre-fix-RED case): a non-postgres process (no
+# `postgres` token) is never ours, even if its args contain the exact datadir. NOTE: the
+# pre-fix `*postgres*` gate already rejected this, so it does not differ pre/post-fix — it
+# is an honest regression guard against someone weakening that gate, not a RED-teeth case.
 spawn_fake_pg "not_a_db" "$G_PRIMARY"
 got="$(run_pid_is_ours "$SLEEP_PID" "$G_PRIMARY" "$G_REPLICA" "$G_META" "$G_ROOT")"
 if [ "$got" = "NOT" ]; then
-  okrow "non-postgres process with exact datadir arg correctly NOT ours (fail-closed)"
+  okrow "non-postgres process with exact datadir arg correctly NOT ours (fail-closed; regression guard)"
 else
   badrow "non-postgres process matched as OURS ($got)"
 fi
