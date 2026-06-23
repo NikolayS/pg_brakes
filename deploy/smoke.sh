@@ -21,7 +21,9 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-PGBIN="${PGBIN:-/opt/homebrew/opt/postgresql@18/bin}"
+# PG18 bin dir. Precedence (unified — issue #44): PG_BUMPERS_PG18_BIN → PGBIN
+# (legacy) → the Homebrew keg path (macOS dev fallback).
+PGBIN="${PG_BUMPERS_PG18_BIN:-${PGBIN:-/opt/homebrew/opt/postgresql@18/bin}}"
 LISTEN="localhost"
 PRIMARY_PORT="${PG_BUMPERS_PRIMARY_PORT:-54321}"
 REPLICA_PORT="${PG_BUMPERS_REPLICA_PORT:-54322}"

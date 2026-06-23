@@ -86,7 +86,8 @@ Init hooks live in `deploy/init/` and run once on first boot of `primary`
 ## Path B — `local-stack.sh` (live dev/CI substrate here)
 
 Uses the keg-only Homebrew Postgres 18 binaries
-(`/opt/homebrew/opt/postgresql@18/bin`; override with `PGBIN=`). Brings up isolated,
+(`/opt/homebrew/opt/postgresql@18/bin`; override with the unified
+`PG_BUMPERS_PG18_BIN=` — the variable CI sets — or the legacy `PGBIN=`). Brings up isolated,
 throwaway clusters under a git-ignored `./.localstack/` dir, on **dedicated high
 ports** that never touch any cluster already running on 5432.
 
@@ -246,8 +247,9 @@ bash deploy/smoke.sh
 ```
 
 The smoke harness targets the **Path B** ports by default; override via
-`PG_BUMPERS_PRIMARY_PORT` / `PG_BUMPERS_REPLICA_PORT` / `PG_BUMPERS_META_PORT` (and
-`PGBIN`) to point it at any equivalent stack.
+`PG_BUMPERS_PRIMARY_PORT` / `PG_BUMPERS_REPLICA_PORT` / `PG_BUMPERS_META_PORT` (and the
+bin dir with the unified `PG_BUMPERS_PG18_BIN` — the one variable CI sets, taking
+precedence over the legacy `PGBIN`) to point it at any equivalent stack.
 
 ---
 

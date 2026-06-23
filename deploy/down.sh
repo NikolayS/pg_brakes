@@ -12,7 +12,9 @@ IFS=$'\n\t'
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-PGBIN="${PGBIN:-/opt/homebrew/opt/postgresql@18/bin}"
+# PG18 bin dir. Precedence (unified — issue #44): PG_BUMPERS_PG18_BIN → PGBIN
+# (legacy) → the Homebrew keg path (macOS dev fallback).
+PGBIN="${PG_BUMPERS_PG18_BIN:-${PGBIN:-/opt/homebrew/opt/postgresql@18/bin}}"
 
 PRIMARY_PORT="${PG_BUMPERS_PRIMARY_PORT:-54321}"
 META_PORT="${PG_BUMPERS_META_PORT:-54323}"

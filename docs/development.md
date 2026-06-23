@@ -211,7 +211,10 @@ deploy/local-stack.sh down    # stop all clusters, remove ./.localstack/
 ```
 
 The PG18 bin dir defaults to `/opt/homebrew/opt/postgresql@18/bin`; override with
-`PGBIN` (shell scripts) or `PG_BUMPERS_PGBIN` (Rust ITs). The dry-run IT defaults
+the unified **`PG_BUMPERS_PG18_BIN`** (honored by every shell script *and* every
+Rust IT — the one variable CI sets), or the legacy per-context vars `PGBIN`
+(shell scripts) / `PG_BUMPERS_PGBIN` / `PG_BUMPERS_PG_BINDIR` (Rust ITs), which
+still work for local dev. The dry-run IT defaults
 its admin DSN to a dedicated throwaway port (`54341`) and the audit/fidelity ITs
 to `55432`/`55431` — override each with `PG_BUMPERS_PGURL` /
 `PG_BUMPERS_AUDIT_PGURL` to point at the running local-stack primary (see

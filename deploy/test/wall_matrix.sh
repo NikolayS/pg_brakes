@@ -45,7 +45,9 @@ IFS=$'\n\t'
 # --------------------------------------------------------------------------------------
 # Config
 # --------------------------------------------------------------------------------------
-PGBIN="${PGBIN:-/opt/homebrew/opt/postgresql@18/bin}"
+# PG18 bin dir. Precedence (unified — issue #44): PG_BUMPERS_PG18_BIN → PGBIN
+# (legacy) → the Homebrew keg path (macOS dev fallback).
+PGBIN="${PG_BUMPERS_PG18_BIN:-${PGBIN:-/opt/homebrew/opt/postgresql@18/bin}}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEPLOY_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 SQL_FILE="$DEPLOY_DIR/sql/10_hardened_role.sql"
@@ -129,6 +131,11 @@ cat >> "$DATADIR/data/postgresql.conf" <<EOF
 # pg_bumpers wall-matrix test cluster
 listen_addresses = '$NONPROXY_HOST,$PROXY_HOST'
 port = $TEST_PORT
+# Pin the socket dir to our (short, writable) scratch dir. PGDG PG18 on
+# Debian/Ubuntu defaults unix_socket_directories to /var/run/postgresql, which a
+# CI runner user cannot write to — so pg_ctl start would fail. All queries here
+# go over TCP anyway; the socket is only for the postmaster's own bind.
+unix_socket_directories = '$DATADIR'
 password_encryption = 'scram-sha-256'
 EOF
 

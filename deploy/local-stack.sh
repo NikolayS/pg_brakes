@@ -29,7 +29,10 @@ IFS=$'\n\t'
 # --------------------------------------------------------------------------------------
 # Configuration
 # --------------------------------------------------------------------------------------
-PGBIN="${PGBIN:-/opt/homebrew/opt/postgresql@18/bin}"
+# PG18 bin dir. Precedence (unified across every IT/CI — issue #44):
+# PG_BUMPERS_PG18_BIN (the ONE cross-IT/CI var) → PGBIN (legacy, local
+# back-compat) → the Homebrew keg path (macOS dev fallback).
+PGBIN="${PG_BUMPERS_PG18_BIN:-${PGBIN:-/opt/homebrew/opt/postgresql@18/bin}}"
 
 # Repo root = parent of this script's dir, so paths work from any cwd.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -48,6 +51,15 @@ LOG_DIR="$ROOT/logs"
 PID_BASE="${PG_BUMPERS_PID_DIR:-${TMPDIR:-/tmp}/pg_bumpers-localstack}"
 ROOT_KEY="$(printf '%s' "$ROOT" | cksum | tr -d ' ' | cut -c1-12)"
 PID_DIR="$PID_BASE/$ROOT_KEY"
+
+# Unix-socket dir for OUR clusters. We pin it explicitly (rather than relying on
+# the build's compiled default) because PGDG PG18 on Debian/Ubuntu defaults to
+# /var/run/postgresql — NOT writable by a CI runner user, so `pg_ctl start`
+# would fail there. A SHORT path under the PID base keeps us well under the
+# ~103-byte socket-path cap, and is keyed by $ROOT so distinct stacks never
+# share sockets. Connections are TCP loopback regardless; the socket is only for
+# pg_ctl's own readiness probe. Override with PG_BUMPERS_SOCK_DIR if needed.
+SOCK_DIR="${PG_BUMPERS_SOCK_DIR:-$PID_DIR/sock}"
 
 PRIMARY_PORT="${PG_BUMPERS_PRIMARY_PORT:-54321}"
 REPLICA_PORT="${PG_BUMPERS_REPLICA_PORT:-54322}"
@@ -198,6 +210,7 @@ init_primary() {
 # --- pg_bumpers local-stack: primary (SPEC §7/§12) ---
 listen_addresses = '$LISTEN'
 port = $PRIMARY_PORT
+unix_socket_directories = '$SOCK_DIR'
 wal_level = replica
 max_wal_senders = 10
 max_replication_slots = 10
@@ -283,6 +296,7 @@ init_and_start_replica() {
 # --- pg_bumpers local-stack: replica (standby) ---
 listen_addresses = '$LISTEN'
 port = $REPLICA_PORT
+unix_socket_directories = '$SOCK_DIR'
 hot_standby = on
 EOF
 
@@ -303,6 +317,7 @@ init_and_start_meta() {
 # --- pg_bumpers local-stack: meta (append-only _meta audit DB, SPEC §4) ---
 listen_addresses = '$LISTEN'
 port = $META_PORT
+unix_socket_directories = '$SOCK_DIR'
 EOF
   cat >> "$META_DIR/pg_hba.conf" <<EOF
 
@@ -430,7 +445,7 @@ cmd_up() {
   UP_IN_PROGRESS=1
   trap cleanup_on_err ERR EXIT
 
-  mkdir -p "$ROOT" "$LOG_DIR"
+  mkdir -p "$ROOT" "$LOG_DIR" "$SOCK_DIR"
   printf '%s\n' "$RUN_ID" > "$SENTINEL_FILE"
 
   init_primary
