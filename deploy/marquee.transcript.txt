@@ -1,41 +1,35 @@
 ================================================================================
  pg_bumpers — S5 MARQUEE TRANSCRIPT (issue #68)  [recorded by deploy/marquee.sh]
- generated: 2026-06-22T12:32:50Z  port: 54350  pg: initdb (PostgreSQL) 18.4 (Homebrew)
+ server: Rust pgb-mcp (crates/mcp) — the single deployable MCP server (EPIC #83)
+ generated: 2026-06-23T10:13:04Z  write-port: 54341  read-primary: 54321
+ pg: initdb (PostgreSQL) 18.4 (Homebrew)
 ================================================================================
 
---- per-damage-class transcript ---
-SAFETY: using dedicated port 54350; the founder's 5432 is NEVER touched.
-pgb-applyd up (write path: socket → guarded_apply_with_grant → PG18).
-pgb-warden up (live watchdog: 1s runtime ceiling, auditing to _meta).
-pgb-mcp up; a REAL MCP client is connected to the stdio shell.
-CLASS 1 (delete a DB): propose_write("DROP DATABASE") → REFUSED NOT_REHEARSABLE (neutralized by refusal, NOT executed).
-CLASS 1 (structural): propose_write("DROP TABLE public.accounts") → REFUSED NOT_REHEARSABLE.
-CLASS 1 (structural): propose_write("TRUNCATE public.accounts") → REFUSED NOT_REHEARSABLE.
-CLASS 1 (structural): propose_write("ALTER TABLE public.accounts DROP COLUMN balance") → REFUSED NOT_REHEARSABLE.
-CLASS 1 (read tool): query("DROP TABLE") → READ_ONLY block; accounts intact.
-CLASS 2: dry_run → blast radius BOUNDED to 4 rows, reversible=true.
-CLASS 2: apply WITHOUT a grant → APPROVAL_REQUIRED (retryable).
-CLASS 2: operator approve (CLI-minted §14.3 grant, verified at apply).
-CLASS 2: apply WITH the grant → COMMITTED, bounded (4 even zeroed, 4 odd untouched), reversible=true.
-CLASS 2 (wide-column #75): dry_run → BOUNDED to 4 rows, reversible=true.
-CLASS 2 (wide-column #75): apply WITH the grant → COMMITTED, bounded (4 even notes='audited', odd untouched), reversible=true — the written column is captured (no silent un-revertable write).
-CLASS 2 (drift): apply over drifted data → GRANT_REJECTED ABORT, row count unchanged (9), NO mutation.
-CLASS 3: launched agent-tagged runaway (pid 90835) + shared sleep (pid 90836).
-CLASS 3: warden TERMINATED the agent-tagged runaway (pid 90835 gone).
-CLASS 3: shared backend (pid 90836) SPARED (still present) — no false-positive kill.
-CLASS 3: the kill is AUDITED to _meta (WARDEN_TERMINATE naming pid 90835).
-CLASS 4: pgb-cli verify — ONE anchored _meta chain, verify_chain OK, anchored head matches.
---- pgb-cli verify output ---
-pgb-cli verify: the shared `_meta` chain VERIFIES (10 records) and the durable anchored head MATCHES the chain head.
-  head = 9821965a0391b67611554b17b3efe90a640887a945f0971af894a1a322be51d8
-  anchored_seq = 9
-  decisions by reason_code:
-    GRANT_REJECTED                   x1
-    WARDEN_TERMINATE                 x1
-    apply_committed                  x2
-    approval_required                x3
-    grant_signed                     x3
-=============================
+--- per-damage-class assertions (the [ok] lines the e2e tests emit) ---
+[ok] propose_write(DROP TABLE) → NOT_REHEARSABLE (structural refusal)
+[ok] propose_write(TRUNCATE) → NOT_REHEARSABLE
+[ok] dry_run(UPDATE…FROM) → NOT_REHEARSABLE (steerable predicate, at dry_run)
+[ok] propose_write(UPDATE … WHERE id%2=0) → proposal p-4c0f2f4434152db9
+[ok] dry_run → bounded to 4 rows, reversible; risk=ALLOW (logged-only)
+[ok] apply_write forcing function: missing→CONFIRM_REQUIRED, wrong→CONFIRM_MISMATCH
+[ok] apply_write (no grant) → APPROVAL_REQUIRED; no mutation
+[ok] request_elevation → ticket req-00000001; suggested cap_max_rows=5
+[ok] operator approve (out-of-band over the socket; signing key NOT in agent stdio)
+[ok] apply_write (granted) → COMMITTED: even rows zeroed, odd rows untouched (read back from PG18)
+[ok] apply_write (over-cap) → BLAST_DRIFT abort; row count unchanged (18)
+[ok] injection-via-data inert: a DROP with a persuasive comment → NOT_REHEARSABLE
+[ok] get_audit → 10 record(s) on the one anchored _meta chain (ALLOW + BLOCK present)
+[ok] query(mcp_read_demo) → 5 rows through pgb-proxy
+[ok] query(mcp_secret) → "WALL_DENIED" (the proxy/WALL denied the non-granted table)
+[ok] query(DELETE …) → READ_ONLY; the row is untouched (classifier fast-path)
+[ok] explain_plan(read) → a JSON plan (planned, not executed)
+[ok] explain-hole CLOSED: stacked/write explain_plan → READ_ONLY; victim row intact
+[ok] discover_schema → 6 columns; the granted table is visible
+[ok] get_audit → 7 record(s) from the `_meta` chain (incl. a blocked read)
+[ok] terminated 1 live agent-tagged backend session(s) (pg_terminate_backend)
+[ok] live loss → transparently recovered on the very next read (re-dial)
+[ok] live-loss RECOVERY: the next read re-dialed a fresh proxy session and returned 5 rows
 
-vitest result line:
-      Tests  8 passed (8)
+cargo test result lines (write-path + read-path):
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.38s
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.37s

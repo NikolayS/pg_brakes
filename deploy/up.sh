@@ -11,9 +11,11 @@
 #      meta 54323 + replica 54322; NEVER 5432). The native-role WALL `pgb_agent`
 #      is applied to the primary by local-stack (deploy/sql/10_hardened_role.sql).
 #   2. a demo DB on the primary carrying the canonical `_meta` audit chain
-#      (crates/audit/sql/10_audit_meta.sql → pgb_audit schema + pgb_audit_writer)
-#      and a single-int-PK `accounts` table (the bounded-reversible-write shape),
-#      with SELECT on the read surface GRANTed to the WALL role `pgb_agent`.
+#      (crates/audit/sql/10_audit_meta.sql → pgb_audit schema + the INSERT-capable
+#      pgb_audit_writer for the daemons + the SELECT-only pgb_audit_reader the
+#      agent-facing get_audit uses) and a single-int-PK `accounts` table (the
+#      bounded-reversible-write shape), with SELECT on the read surface GRANTed to
+#      the WALL role `pgb_agent`.
 #   3. pgb-proxy — the inline agent endpoint IN FRONT of the primary. The MCP read
 #      path connects HERE (agent SCRAM endpoint), NOT raw PG18. Dev-mode TLS is OFF
 #      (PGB_PROXY_REQUIRE_TLS=false) — stated explicitly; the proxy still does
@@ -64,7 +66,14 @@ ANCHOR_PATH="$STATE_DIR/audit.anchor.worm"
 # Dev secrets (placeholders matching the local-stack WALL role; production sources
 # them from a secret store — see deploy/proxy.env.example).
 AGENT_PASSWORD="pgb_agent_dev_pw"
+# The audit-WRITER credential: it can INSERT audit rows. It stays ONLY with the
+# proxy/applyd/warden (the path that legitimately appends the chain) — it is NEVER
+# forwarded into the agent-facing pgb-mcp process.
 AUDIT_WRITER_PASSWORD="pgb_audit_writer_dev_pw"
+# The audit-READER credential: SELECT-ONLY on the audit chain (no INSERT/UPDATE/DELETE).
+# This is what the agent-facing pgb-mcp `get_audit` connects as, so the agent process
+# can read the audit tail WITHOUT holding a credential able to forge audit rows.
+AUDIT_READER_PASSWORD="pgb_audit_reader_dev_pw"
 AUDIT_SIGNING_KEY="pgb-audit-signing-key-dev-000001"
 SESSION_ID="pgb-demo-session"
 
@@ -127,7 +136,8 @@ log "seeding demo DB '$DEMO_DB' on the primary (audit _meta chain + accounts rea
 psql_primary postgres "SELECT 1 FROM pg_database WHERE datname='$DEMO_DB'" | grep -q 1 \
   || psql_primary postgres "CREATE DATABASE \"$DEMO_DB\""
 
-# The canonical _meta schema (creates pgb_audit schema + pgb_audit_writer role +
+# The canonical _meta schema (creates pgb_audit schema + the pgb_audit_writer and
+# SELECT-only pgb_audit_reader roles +
 # the append-only audit_log). Strip psql meta-commands the -f path tolerates but
 # we keep it simple by running the file directly.
 "$PGBIN/psql" -X -h "$HOST" -p "$PRIMARY_PORT" -U postgres -d "$DEMO_DB" -v ON_ERROR_STOP=1 -q \
@@ -159,9 +169,23 @@ CREATE TABLE IF NOT EXISTS public.secret_data (id int PRIMARY KEY, secret text N
 INSERT INTO public.secret_data(id, secret) VALUES (1, 'TOP SECRET — never to the agent')
   ON CONFLICT (id) DO NOTHING;
 REVOKE ALL ON public.secret_data FROM pgb_agent;
+
+-- Drift-correct the SELECT-only audit reader's dev login password so the agent-facing
+-- reader DSN below authenticates. The role + its SELECT grant (and the REVOKE of every
+-- write) are created by 10_audit_meta.sql applied just above; this only pins the password
+-- (CREATE ROLE in that file runs once; ALTER keeps it in sync across re-runs).
+ALTER ROLE pgb_audit_reader LOGIN PASSWORD '$AUDIT_READER_PASSWORD';
 SQL
 
-META_DSN="host=$HOST port=$PRIMARY_PORT dbname=$DEMO_DB user=pgb_audit_writer password=$AUDIT_WRITER_PASSWORD"
+# The audit-WRITER DSN — used ONLY by the proxy/applyd/warden daemons (the path that
+# legitimately appends the chain). It carries the INSERT-capable credential and MUST
+# NEVER be forwarded into the agent-facing pgb-mcp process.
+META_WRITER_DSN="host=$HOST port=$PRIMARY_PORT dbname=$DEMO_DB user=pgb_audit_writer password=$AUDIT_WRITER_PASSWORD"
+# The audit-READER DSN — SELECT-only. This is what the agent-facing pgb-mcp `get_audit`
+# connects as, so the agent process can READ the audit tail but holds NO credential able
+# to forge audit rows (least privilege; the deleted TS server likewise never held a
+# write credential — it routed get_audit through applyd).
+META_READER_DSN="host=$HOST port=$PRIMARY_PORT dbname=$DEMO_DB user=pgb_audit_reader password=$AUDIT_READER_PASSWORD"
 
 # ----------------------------------------------------------------------------
 # Helpers to launch + health-check a daemon.
@@ -198,7 +222,7 @@ env \
   PGB_POLICY_PATH="$REPO_ROOT/crates/policy/policy.example.yaml" \
   PGB_POLICY_ROLE=analytics \
   PGB_STATEMENT_TIMEOUT_MS=30000 \
-  PGB_META_DSN="$META_DSN" \
+  PGB_META_DSN="$META_WRITER_DSN" \
   PGB_AUDIT_SIGNING_KEY="$AUDIT_SIGNING_KEY" \
   PGB_ANCHOR_PATH="$ANCHOR_PATH" \
   PGB_ANCHOR_INTERVAL_MS=60000 \
@@ -253,7 +277,7 @@ env \
   PGB_BACKEND_DB="$DEMO_DB" \
   PGB_BACKEND_ROLE=postgres \
   PGB_BACKEND_PASSWORD=unused-trust \
-  PGB_META_DSN="$META_DSN" \
+  PGB_META_DSN="$META_WRITER_DSN" \
   PGB_AUDIT_SIGNING_KEY="$AUDIT_SIGNING_KEY" \
   PGB_ANCHOR_PATH="$ANCHOR_PATH" \
   PGB_ANCHOR_INTERVAL_MS=60000 \
@@ -304,7 +328,11 @@ PGB_PROXY_PASSWORD=$AGENT_PASSWORD
 PGB_PROXY_APP_NAME=pgb_proxy
 PGB_ROLE=pgb_agent
 PGB_SESSION_ID=$SESSION_ID
-PGB_META_DSN=$META_DSN
+# The agent-facing PGB_META_DSN is the SELECT-only reader (get_audit reads, never
+# forges). The writer DSN is recorded separately for daemon restarts only — it is
+# NOT the value forwarded into the agent process.
+PGB_META_DSN=$META_READER_DSN
+PGB_META_WRITER_DSN=$META_WRITER_DSN
 PGB_AUDIT_SIGNING_KEY=$AUDIT_SIGNING_KEY
 PGB_ANCHOR_PATH=$ANCHOR_PATH
 PGB_APPROVER_SEED_HEX=$APPROVER_SEED
@@ -346,7 +374,7 @@ cat >&2 <<BANNER
     --env PGB_ROLE=pgb_agent \\
     --env PGB_SESSION_ID=$SESSION_ID \\
     --env PGB_APPLYD_SOCKET=$SOCKET_PATH \\
-    --env PGB_META_DSN='$META_DSN' \\
+    --env PGB_META_DSN='$META_READER_DSN' \\
     -- $MCP_BIN
 
   Then ask Claude Code to:
@@ -358,10 +386,10 @@ cat >&2 <<BANNER
         the approver seed is in $STATE_DIR/approver.seed.hex; the operator calls
         the applyd socket 'approve' RPC (see deploy/README.md / the e2e test), then
         apply_write → COMMITTED, bounded + reversible.
-    • verify:  PGB_META_DSN='$META_DSN' \\
+    • verify:  PGB_META_DSN='$META_READER_DSN' \\
                PGB_AUDIT_SIGNING_KEY=$AUDIT_SIGNING_KEY \\
                PGB_ANCHOR_PATH=$STATE_DIR/verify.anchor.worm \\
-               $REPO_ROOT/target/debug/pgb-cli verify   → the chain verifies.
+               $REPO_ROOT/target/debug/pgb-cli verify   → the chain verifies (read-only).
 
   Tear it all down:   deploy/down.sh
 ================================================================================

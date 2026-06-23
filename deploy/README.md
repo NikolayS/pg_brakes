@@ -191,9 +191,15 @@ claude mcp add pg-bumpers \
   --env PGB_PROXY_REQUIRE_TLS=false \
   --env PGB_ROLE=pgb_agent --env PGB_SESSION_ID=pgb-demo-session \
   --env PGB_APPLYD_SOCKET=<state>/applyd.sock \
-  --env PGB_META_DSN='host=127.0.0.1 port=54321 dbname=pgb_demo user=pgb_audit_writer password=...' \
+  --env PGB_META_DSN='host=127.0.0.1 port=54321 dbname=pgb_demo user=pgb_audit_reader password=...' \
   -- <repo>/target/debug/pgb-mcp
 ```
+
+The agent-facing `PGB_META_DSN` uses the **SELECT-only** `pgb_audit_reader` role (it can
+read the audit tail for `get_audit` but holds no `INSERT`/`UPDATE`/`DELETE`), so no
+audit-write credential ever enters the agent process. The INSERT-capable
+`pgb_audit_writer` stays only with the proxy/applyd/warden (the path that legitimately
+appends the chain).
 
 **The read path genuinely goes through `pgb-proxy`.** Because the proxy is
 extended-protocol-only (its statement-stacking defense), the MCP read client
