@@ -11,24 +11,38 @@
 //! applyd + warden — is the real boundary. `whoami` says so explicitly
 //! (`security_boundary: false`).
 //!
-//! PR1 (this crate) is the **skeleton**: the protocol handshake, the nine-tool
-//! catalog with correct JSON input schemas, and `whoami` FULLY implemented. The
-//! other eight tools return the recoverable `UNIMPLEMENTED` block contract
-//! naming the tracking PR — honest, never a panic. The **read paths** land in
-//! #83 PR2 and the **write paths** in #83 PR3.
+//! PR2 (this update) wires the **read path** through the live `pgb-proxy`:
+//! `query` / `explain_plan` / `discover_schema` execute THROUGH the proxy (the
+//! real boundary), and `get_audit` reads the `_meta` audit tail. The read-only
+//! fast-path REUSES the canonical Rust classifier (`pgb_pgwire::classify`) — no
+//! new classifier. The four write tools (`propose_write`/`dry_run`/`apply_write`/
+//! `request_elevation`) remain recoverable `UNIMPLEMENTED` blocks (PR3). `whoami`
+//! stays `security_boundary: false`.
 //!
-//! The three modules:
+//! The modules:
 //!   - [`catalog`] — the exact §4 tool names + descriptions + JSON input schemas.
 //!   - [`contract`] — the recoverable block contract + the `whoami` posture.
+//!   - [`proxy`] — the live `tokio-postgres` transport to the proxy's agent
+//!     endpoint (SCRAM; TLS-on or explicit dev no-TLS; lazy-connect + crash-proof
+//!     loss handling) the read tools execute through.
+//!   - [`audit`] — the read-through to the hash-chained `_meta` audit tail
+//!     (`get_audit`), reusing the `pgb_audit` crate.
 //!   - [`server`] — the rmcp [`rmcp::ServerHandler`] impl wiring it together.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod audit;
 pub mod catalog;
 pub mod contract;
+pub mod proxy;
 pub mod server;
 
+pub use audit::{AuditConfig, AuditReader, AuditRecordView};
 pub use catalog::{TOOL_NAMES, ToolSpec, catalog};
 pub use contract::{BlockContract, BlockStatus, WhoamiResult};
+pub use proxy::{
+    DEFAULT_APP_NAME, PlanJson, ProxyConfig, ProxyTransport, ReadOutcome, RowJson, SchemaColumn,
+    TlsMode,
+};
 pub use server::{PgBumpersMcp, SERVER_NAME};

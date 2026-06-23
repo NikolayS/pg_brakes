@@ -857,10 +857,22 @@ dependencies = [
 name = "pgb-mcp"
 version = "0.0.0"
 dependencies = [
+ "pgb-audit",
+ "pgb-core",
+ "pgb-pgwire",
+ "pgb-policy",
+ "pgb-proxy",
+ "postgres",
+ "rcgen",
  "rmcp",
+ "rustls",
+ "rustls-pki-types",
  "serde",
  "serde_json",
  "tokio",
+ "tokio-postgres",
+ "tokio-postgres-rustls",
+ "tokio-rustls",
 ]
 
 [[package]]
@@ -1003,6 +1015,8 @@ dependencies = [
  "bytes",
  "fallible-iterator",
  "postgres-protocol",
+ "serde_core",
+ "serde_json",
 ]
 
 [[package]]

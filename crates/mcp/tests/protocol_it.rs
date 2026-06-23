@@ -2,15 +2,18 @@
 //! an in-process duplex pipe (the same `AsyncRead`/`AsyncWrite` transport the
 //! stdio binary uses), exercising the full handshake + catalog + a tool call.
 //!
-//! This is the RED→GREEN test for EPIC #83 PR1. It asserts:
+//! This is the protocol-level RED→GREEN test for EPIC #83 (PR1 handshake/catalog +
+//! PR2 read path). It asserts:
 //!   1. `initialize` — the handshake completes; the server reports the expected
 //!      protocolVersion, server name, and the `tools` capability.
 //!   2. `tools/list` — ALL nine §4 tools are advertised with correct names +
 //!      object input schemas (with the right required fields).
 //!   3. `tools/call whoami` — returns the posture incl. `security_boundary: false`
 //!      and the nine tool names.
-//!   4. `tools/call query` — returns the recoverable `UNIMPLEMENTED` block
-//!      contract (no panic, the server stays up and serves another call).
+//!   4. `tools/call query` (PR2 read path): a WRITE is blocked `READ_ONLY` by the
+//!      cooperative classifier fast-path; a CLEAN read passes the fast-path and is
+//!      routed to the proxy (here unwired ⇒ a recoverable `PROXY_UNAVAILABLE`
+//!      block, never `UNIMPLEMENTED`). No panic; the server stays up.
 //!
 //! The driver is rmcp's real client (`().serve(...)`) — not a hand-rolled
 //! JSON-RPC stub — so the assertions exercise the genuine protocol path.
@@ -110,29 +113,72 @@ async fn initialize_lists_nine_tools_and_whoami_is_not_a_boundary() {
         "whoami reports the nine tools"
     );
 
-    // ---- 4. tools/call query: the recoverable UNIMPLEMENTED block (no panic) ----
-    let query_res = client
-        .call_tool(CallToolRequestParams::new("query"))
+    // ---- 4. tools/call query: PR2 read path through the (here-unwired) proxy ----
+    // (a) A WRITE to the read tool is blocked by the cooperative read-only
+    //     fast-path (the canonical `pgb_pgwire::classify` reuse) — a recoverable
+    //     READ_ONLY block, BEFORE it can reach the proxy. No panic; the server
+    //     stays up.
+    let write_args = {
+        let mut m = serde_json::Map::new();
+        m.insert("sql".into(), serde_json::json!("DROP TABLE orders"));
+        m
+    };
+    let write_res = client
+        .call_tool(CallToolRequestParams::new("query").with_arguments(write_args))
         .await
-        .expect("tools/call query does not error the transport");
+        .expect("tools/call query(write) does not error the transport");
     assert_eq!(
-        query_res.is_error,
+        write_res.is_error,
         Some(true),
-        "an UNIMPLEMENTED block is reported as a tool error"
+        "a write is a blocked result"
     );
-    let qsc = query_res
+    let wsc = write_res
         .structured_content
         .as_ref()
         .expect("query structuredContent");
-    assert_eq!(qsc["status"], serde_json::json!("blocked"));
-    assert_eq!(qsc["code"], serde_json::json!("UNIMPLEMENTED"));
-    assert_eq!(qsc["retryable"], serde_json::json!(false));
-    assert!(
-        qsc["remedy"].as_str().unwrap().contains("#83 PR2"),
-        "query's UNIMPLEMENTED block tracks #83 PR2"
+    assert_eq!(wsc["status"], serde_json::json!("blocked"));
+    assert_eq!(
+        wsc["code"],
+        serde_json::json!("READ_ONLY"),
+        "a write to the read tool → READ_ONLY (canonical classifier reuse)"
     );
+    assert_eq!(wsc["retryable"], serde_json::json!(false));
 
-    // The server survived the block and still serves: whoami again succeeds.
+    // (b) A CLEAN read passes the fast-path and is routed to the proxy. This test
+    //     server has NO proxy wired, so the read surfaces the recoverable
+    //     PROXY_UNAVAILABLE block (retryable) — proving the read was ALLOWED by the
+    //     fast-path and dispatched to the proxy transport, never UNIMPLEMENTED.
+    let read_args = {
+        let mut m = serde_json::Map::new();
+        m.insert("sql".into(), serde_json::json!("SELECT 1"));
+        m
+    };
+    let read_res = client
+        .call_tool(CallToolRequestParams::new("query").with_arguments(read_args))
+        .await
+        .expect("tools/call query(read) does not error the transport");
+    let rsc = read_res
+        .structured_content
+        .as_ref()
+        .expect("query structuredContent");
+    assert_ne!(
+        rsc["code"],
+        serde_json::json!("READ_ONLY"),
+        "a clean read is NOT blocked by the fast-path"
+    );
+    assert_ne!(
+        rsc["code"],
+        serde_json::json!("UNIMPLEMENTED"),
+        "query is wired in PR2 — never UNIMPLEMENTED"
+    );
+    assert_eq!(
+        rsc["code"],
+        serde_json::json!("PROXY_UNAVAILABLE"),
+        "no proxy wired ⇒ the read routed to the proxy and got a recoverable block"
+    );
+    assert_eq!(rsc["retryable"], serde_json::json!(true));
+
+    // The server survived the blocks and still serves: whoami again succeeds.
     let again = client
         .call_tool(CallToolRequestParams::new("whoami"))
         .await
