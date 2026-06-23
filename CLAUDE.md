@@ -47,14 +47,41 @@ The **process** spec lives in GitHub issue #1.
   reviews personally. Creates issues, dispatches agents, drives the PR lifecycle.
 - **Implementer:** picks up one issue in its **own git worktree**, builds it red/green,
   verifies all CI commands locally, opens a **draft PR**, posts evidence. **No self-merge.**
-- **Reviewer:** a **different** agent (never the author) reviews every PR using the
-  REV methodology and posts a verdict. Reviews are mandatory.
+- **Reviewer:** a **different** agent (never the author) reviews every PR by running the
+  **real samorev agents** (§4, step 2) — not a generic reviewer merely *told* to "apply samorev" —
+  and posts a verdict. Reviews are mandatory.
 
 ## 4. PR lifecycle — enforce in order, loop until satisfied
 
 1. **CI green** — all jobs pass on the PR (paste the run link).
-2. **REV review** — apply the review checklists from
-   <https://gitlab.com/postgres-ai/rev/> to the GitHub diff. **Ignore all SOC2 items.**
+2. **samorev review** — run the **actual samorev review agents**
+   ([samorev](https://github.com/Tanya301/samorev), checked out locally at `~/github/samorev`,
+   Apache-2.0), **not** a generic reviewer merely told to "apply samorev." samorev has **two
+   surfaces**: (a) the **Bun CLI `samorev review --fetch`** is a *deterministic* gate that
+   checks **CI status + draft state only** and runs **no** AI agents (its
+   Security/Bugs/Tests/Guidelines/Docs rows are always `0`); (b) the **`/review-mr` Claude Code
+   slash command** runs the **5–6 parallel LLM review agents**. `/review-mr` targets both GitLab
+   MRs and GitHub PRs (its posting/report formatting is GitLab-leaning), and the agents
+   themselves are provider-agnostic — pg_bumpers is on **GitHub**, so the reviewer runs **the
+   agents directly** against the GitHub PR diff, each loading its real definition from
+   `~/github/samorev/agents/*.md`:
+   **security-reviewer** (Opus, **blocking**) · **bug-hunter** (Opus, **blocking**) ·
+   **test-analyzer** (Sonnet, non-blocking/configurable) · **guidelines-checker** (Sonnet,
+   non-blocking) · **docs-reviewer** (Sonnet, non-blocking). (samorev's optional
+   **sqitch-migration-checker** is **N/A** — pg_bumpers is Rust with no Sqitch migrations.)
+   The **guidelines-checker** loads the project's repo-specific rules — for pg_bumpers that is
+   **this CLAUDE.md** (there is no separate rules dir to point at). Score each finding with
+   samorev's **0–10 confidence** and its three tiers (blocking / non-blocking / potential); a
+   finding **blocks merge** when its severity is **CRITICAL/HIGH/MEDIUM** and **confidence ≥ 8**
+   (samorev's agent-agnostic `classify_finding` keys on severity + confidence only, never on
+   which agent raised it). In practice that means **security-reviewer or bug-hunter**, since the
+   other in-scope agents emit mostly lower-severity findings (the optional sqitch checker is
+   N/A here).
+   - **Omit all SOC2 items — they are NOT relevant to this project** (a single self-hostable
+     OSS control plane with no SOC2 scope; samorev's `/review-mr` SOC2 check is optional and we
+     leave it **off**). No agent may raise, score, or block on a SOC2 finding.
+   - samorev's agents are **LLM-driven and non-deterministic**: take the **union of findings
+     across runs** — never let a lucky clean re-run hide a real finding a prior run surfaced.
 3. **Real testing with evidence on the PR** — command outputs, integration runs,
    numbers. Docker/integration tests are env-gated but **actually run** with evidence.
 4. **Verdict by a non-author reviewer** — a formal GitHub **APPROVE**, or (if the bot
