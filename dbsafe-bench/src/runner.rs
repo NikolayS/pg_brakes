@@ -14,6 +14,7 @@
 use crate::corpus::{Probe, Scenario};
 use crate::floor::{
     Observed, probe_byte_cutoff, probe_certify, probe_guarded_apply, probe_proxy_read_gate,
+    probe_self_determined_gate,
 };
 use crate::verdict::{Class, GoldenRecord, Vector, Verdict};
 
@@ -90,6 +91,7 @@ fn run_probe(probe: &Probe) -> Observed {
         } => probe_byte_cutoff(*n_rows, *row_bytes, *max_bytes, *max_rows),
         Probe::GuardedApply(case) => probe_guarded_apply(case),
         Probe::Certify(op) => probe_certify(op),
+        Probe::SelfDeterminedGate { sql, pk_col } => probe_self_determined_gate(sql, pk_col),
         Probe::WallDirectBypass { .. } => {
             // Pure-logic plane: the WALL's guarantee is structural — the agent
             // role has NO network path but the proxy (so a direct connection is

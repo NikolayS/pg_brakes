@@ -117,6 +117,12 @@ pub enum DefenseLayer {
     /// The default-deny certified-action set (`pgb_core::certify`) — yields
     /// REFUSED.
     Certify,
+    /// The self-determined-predicate gate (EPIC #91 PR-A): the grant-bound write's
+    /// WHERE must reference only the immutable PK + literals + immutable functions
+    /// on it; a steerable predicate (non-PK column, subquery, volatile fn) is
+    /// REFUSED at certify/dry-run before any rehearsal. The structural replacement
+    /// for the dropped exact-PK-set checksum. Yields REFUSED.
+    SelfDeterminedGate,
 }
 
 /// One golden expected-outcome record (SPEC §10.6 schema).

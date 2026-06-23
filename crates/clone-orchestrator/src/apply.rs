@@ -426,6 +426,21 @@ pub trait ApplyConn {
     /// (post-snapshot rows) is caught symmetrically with the target.
     fn recompute_pk_checksum(&mut self, relation: &str) -> Result<PkChecksum, ApplyError>;
 
+    /// The **single primary-key column name** of `relation`, for the apply-path
+    /// self-determined-predicate gate (EPIC #91 PR-A) — a `pg_index`/`pg_attribute`
+    /// read only, never the candidate. Returns `Some(col)` for a single-column PK
+    /// (the MVP shape) so the grant-bound caller can re-check structurally that the
+    /// WHERE references only that immutable PK before opening the apply txn (defense
+    /// in depth over the dry-run/certify gate). `None` ⇒ the caller skips the
+    /// apply-path structural re-check (composite/absent PKs are refused upstream).
+    ///
+    /// Default `None` — the scripted in-memory `ApplyConn`s in the unit tests opt in
+    /// explicitly; the real [`crate::conn::PgApplyConn`] overrides it.
+    fn self_determined_pk_column(&mut self, relation: &str) -> Option<String> {
+        let _ = relation;
+        None
+    }
+
     /// **Step 4 — run the forward op with `RETURNING`**, capturing each written
     /// row's PK + full pre-image, **and the pre-images of every cascade-affected
     /// child row** (captured before the forward op deletes them, so the inverse can

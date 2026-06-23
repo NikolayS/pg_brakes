@@ -116,6 +116,19 @@ pub enum GrantedApplyError {
     /// checksum). Fail-closed: refuse rather than guess. **No apply txn opened.**
     #[error("INVALID GRANT BINDING: {0}")]
     Inconsistent(String),
+
+    /// The grant-bound write's WHERE predicate is **not self-determined** (EPIC
+    /// #91 PR-A) — at apply time, a **structural** re-check (defense in depth over
+    /// the dry-run/certify gate) found the predicate references something other
+    /// than the immutable single-column PK + literals (a non-PK column or a
+    /// subquery), so its row set could be steered to a chosen sensitive row. The
+    /// immutable PK pins the row identity, so a self-determined predicate's row set
+    /// is fixed by the grant-bound `statement_text` alone — this is the structural
+    /// replacement for the dropped exact-PK-set checksum. **No apply txn opened**
+    /// (fail-closed). A grant for such a statement should never exist (the dry-run
+    /// gate refuses it before approval); this is the second, independent gate.
+    #[error("GRANT REJECTED at apply: predicate is not self-determined (steerable) — {0}")]
+    NotSelfDetermined(crate::predicate::NotSelfDetermined),
 }
 
 /// Which provider the policy selects for the apply path, and the apply's PITR
@@ -180,6 +193,27 @@ pub fn guarded_apply_with_grant(
     clock: &dyn Clock,
 ) -> Result<(AppliedWrite, BridgedApplyConfig), GrantedApplyError> {
     let bridged = BridgedApplyConfig::from_policy(policy);
+
+    // (a0) Self-determined-predicate gate (EPIC #91 PR-A), apply-path defense in
+    //      depth. Re-check STRUCTURALLY (PK-only columns, no subquery) that the
+    //      grant-bound statement's WHERE is pinned by the immutable PK, BEFORE the
+    //      apply txn is opened. A grant for a non-self-determined statement should
+    //      never exist (the dry-run/certify gate refuses it before the human can
+    //      approve), but we re-assert it here as a second, independent gate so the
+    //      apply path never opens a txn for a steerable predicate. Volatility was
+    //      proven at dry-run on this byte-identical (grant-bound) statement and the
+    //      apply seam has no `pg_proc` resolver, so this re-check is structural-only
+    //      (see `self_determined_predicate_structural_reason`). When the conn cannot
+    //      resolve a single PK column, the structural re-check is skipped
+    //      (composite/absent PKs are refused upstream).
+    if let Some(pk_col) = conn.self_determined_pk_column(relation)
+        && let Some(reason) = crate::predicate::self_determined_predicate_structural_reason(
+            &live.statement_text,
+            &pk_col,
+        )
+    {
+        return Err(GrantedApplyError::NotSelfDetermined(reason));
+    }
 
     // (a) The blast radius must be the one this apply is for, and carry the target
     //     PK-set checksum. (guarded_apply re-checks proposal_id too, but we need
@@ -418,6 +452,12 @@ mod tests {
         fn create_restore_point(&mut self, _label: &str) -> Result<String, ApplyError> {
             Ok("0/16B6358".to_string())
         }
+        fn self_determined_pk_column(&mut self, _relation: &str) -> Option<String> {
+            // EPIC #91 PR-A: the test relation's single PK column is `id`, so the
+            // apply-path structural re-check runs against `id` exactly as the real
+            // PgApplyConn would report it.
+            Some("id".to_string())
+        }
         fn begin(&mut self, _timeout_ms: u64) -> Result<(), ApplyError> {
             self.inner().began = true;
             Ok(())
@@ -618,9 +658,13 @@ mod tests {
         let clock = MockClock::starting_at(5_000);
         let mut conn = MockConn::new(REL, &[2, 4, 6, 8]);
 
-        // The attacker presents a DIFFERENT statement at apply time.
+        // The attacker presents a DIFFERENT statement at apply time. It is itself
+        // self-determined (PK-only `WHERE id = 1`) so it passes the EPIC #91 PR-A
+        // structural gate and the swap is caught precisely by the binding hash
+        // (BindingMismatch) — proving the SQL-swap defense is the grant binding,
+        // not (incidentally) the predicate gate.
         let mut tampered = live.clone();
-        tampered.statement_text = "DELETE FROM public.orders".to_string();
+        tampered.statement_text = "DELETE FROM public.orders WHERE id = 1".to_string();
         let err = run(
             &policy,
             &grant,
@@ -852,6 +896,117 @@ mod tests {
         assert_no_mutation(&conn);
         // Expiry checked before the nonce is burned.
         assert!(nonces.consume("n-exp"));
+    }
+
+    // =======================================================================
+    //  Self-determined-predicate gate at the apply path (EPIC #91 PR-A) —
+    //  defense in depth: a steerable predicate is refused BEFORE the txn opens,
+    //  and a PK-only (self-determined) predicate still commits.
+    // =======================================================================
+
+    #[test]
+    fn apply_path_refuses_non_self_determined_predicate_before_txn() {
+        // The grant-bound statement references a non-PK column (`status`) — a
+        // steerable predicate. The apply-path structural gate REFUSES it before the
+        // apply txn opens (no mutation), even though a (hypothetical) matching grant
+        // is presented. This is the second, independent gate.
+        let (sk, vk) = keypair();
+        let br = blast_radius_for("p-sd", REL, &[2, 4, 6, 8]);
+        let mut live = live_for("p-sd");
+        live.statement_text =
+            "UPDATE public.orders SET status='x' WHERE status = 'cancelled'".into();
+        let grant = sign_grant(&sk, &live, &br, REL, "n-sd", 10_000);
+        let policy = policy_with(CloneProvider::None, false);
+        let mut nonces = InMemoryNonceStore::new();
+        let clock = MockClock::starting_at(5_000);
+        let mut conn = MockConn::new(REL, &[2, 4, 6, 8]);
+
+        let err = run(
+            &policy,
+            &grant,
+            &live,
+            &vk,
+            &mut nonces,
+            &br,
+            &mut conn,
+            &clock,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                GrantedApplyError::NotSelfDetermined(
+                    crate::predicate::NotSelfDetermined::NonPkColumn { .. }
+                )
+            ),
+            "got {err:?}"
+        );
+        assert_no_mutation(&conn);
+        // The nonce was NOT burned by the structural refusal (it precedes verify).
+        assert!(nonces.consume("n-sd"));
+    }
+
+    #[test]
+    fn apply_path_refuses_subquery_predicate_before_txn() {
+        let (sk, vk) = keypair();
+        let br = blast_radius_for("p-sq", REL, &[2, 4, 6, 8]);
+        let mut live = live_for("p-sq");
+        live.statement_text =
+            "DELETE FROM public.orders WHERE id IN (SELECT order_id FROM public.flags)".into();
+        let grant = sign_grant(&sk, &live, &br, REL, "n-sq", 10_000);
+        let policy = policy_with(CloneProvider::None, false);
+        let mut nonces = InMemoryNonceStore::new();
+        let clock = MockClock::starting_at(5_000);
+        let mut conn = MockConn::new(REL, &[2, 4, 6, 8]);
+
+        let err = run(
+            &policy,
+            &grant,
+            &live,
+            &vk,
+            &mut nonces,
+            &br,
+            &mut conn,
+            &clock,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                GrantedApplyError::NotSelfDetermined(crate::predicate::NotSelfDetermined::Subquery)
+            ),
+            "got {err:?}"
+        );
+        assert_no_mutation(&conn);
+    }
+
+    #[test]
+    fn apply_path_pk_only_predicate_still_commits() {
+        // The marquee `WHERE id % 2 = 0` is self-determined → the apply-path gate
+        // passes and the bounded write commits (no regression from adding the gate).
+        let (sk, vk) = keypair();
+        let br = blast_radius_for("p-ok", REL, &[2, 4, 6, 8]);
+        let live = live_for("p-ok"); // statement is `… WHERE id % 2 = 0`
+        let grant = sign_grant(&sk, &live, &br, REL, "n-ok", 10_000);
+        let policy = policy_with(CloneProvider::None, false);
+        let mut nonces = InMemoryNonceStore::new();
+        let clock = MockClock::starting_at(5_000);
+        let mut conn = MockConn::new(REL, &[2, 4, 6, 8]);
+        let probe = conn.clone();
+
+        let (applied, _bridged) = run(
+            &policy,
+            &grant,
+            &live,
+            &vk,
+            &mut nonces,
+            &br,
+            &mut conn,
+            &clock,
+        )
+        .expect("a self-determined (PK-only) predicate must pass the apply-path gate and commit");
+        assert_eq!(applied.rows_written, 4);
+        assert!(probe.inner().committed);
     }
 
     // =======================================================================

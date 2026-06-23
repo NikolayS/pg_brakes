@@ -84,8 +84,9 @@ pub use dry_run::{
     dry_run,
 };
 pub use predicate::{
-    FunctionVolatility, NONDETERMINISTIC_KEYWORDS, NoFunctionVolatility, VolatileReason,
-    Volatility, predicate_volatile_reason,
+    FunctionVolatility, NONDETERMINISTIC_KEYWORDS, NoFunctionVolatility, NotSelfDetermined,
+    VolatileReason, Volatility, predicate_volatile_reason, self_determined_predicate_reason,
+    self_determined_predicate_structural_reason,
 };
 pub use proposal::{DEFAULT_TTL_MILLIS, Proposal, propose, propose_with_ttl};
 pub use provider::{

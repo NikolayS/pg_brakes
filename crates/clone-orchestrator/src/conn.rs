@@ -73,12 +73,38 @@ enum PkShape {
 pub struct PgRehearsal<'c, C: Clock> {
     client: &'c mut Client,
     clock: &'c C,
+    /// Whether the **self-determined-predicate gate** (EPIC #91 PR-A) is enforced
+    /// at dry-run/certify for this rehearsal. `false` (the default) ⇒ the gate is
+    /// off, so the backend reports no PK column to the engine and the gate is
+    /// skipped — the volatility/PK-less/blast-radius *preview* path is unchanged.
+    /// `true` ⇒ the gate is enforced: the **grant-bound** prep path sets this so a
+    /// steerable predicate is REFUSED before rehearsal. (The apply-path gate in
+    /// `guarded_apply_with_grant` is always on; this flag governs the dry-run side.)
+    gate_self_determined: bool,
 }
 
 impl<'c, C: Clock> PgRehearsal<'c, C> {
-    /// Wrap a connection + injected clock as the baseline rehearsal backend.
+    /// Wrap a connection + injected clock as the baseline rehearsal backend. The
+    /// self-determined-predicate gate is **off** by default (preview path); use
+    /// [`with_self_determined_gate`](Self::with_self_determined_gate) to enforce it
+    /// on the grant-bound prep path.
     pub fn new(client: &'c mut Client, clock: &'c C) -> Self {
-        PgRehearsal { client, clock }
+        PgRehearsal {
+            client,
+            clock,
+            gate_self_determined: false,
+        }
+    }
+
+    /// Enable (or disable) the self-determined-predicate gate (EPIC #91 PR-A) for
+    /// this rehearsal. The **grant-bound** prep path sets `true` so a steerable
+    /// predicate (non-PK column / subquery / volatile fn) is REFUSED at
+    /// dry-run/certify, before any rehearsal. The plain blast-radius *preview* path
+    /// leaves it `false` (the immutable PK constraint is a grant-path requirement,
+    /// not a precondition of previewing a write).
+    pub fn with_self_determined_gate(mut self, enabled: bool) -> Self {
+        self.gate_self_determined = enabled;
+        self
     }
 
     /// Look up `pg_proc.provolatile` for `name`, folding overloads to the most
@@ -146,6 +172,46 @@ impl<'c, C: Clock> PgRehearsal<'c, C> {
             1 if rows[0].get::<_, String>(0) == "int4" => Ok(PkShape::SingleInt4),
             _ => Ok(PkShape::Other),
         }
+    }
+
+    /// The **single primary-key column name** of `relation`, for the
+    /// self-determined-predicate gate (EPIC #91 PR-A). Reads
+    /// `pg_index`/`pg_attribute` only; never executes the candidate.
+    ///
+    /// Returns `Some(name)` iff the relation has a primary key of **exactly one**
+    /// column (the MVP single-`int4`-PK shape `certify_apply_shape` already
+    /// constrains writes to). Returns `None` for a composite or absent PK — those
+    /// are refused by `certify_apply_shape` (`PkShape::Other`) / the §10.2 `PkLess`
+    /// guard respectively, so the gate need not (and must not, without an
+    /// unambiguous single PK column) fire here.
+    fn single_pk_column_name(&mut self, relation: &str) -> Option<String> {
+        let cols = self.pk_column_names(relation).ok()?;
+        match cols.as_slice() {
+            [single] => Some(single.clone()),
+            _ => None,
+        }
+    }
+
+    /// All primary-key column names of `relation`, in key order (`pg_index`/
+    /// `pg_attribute` read only).
+    fn pk_column_names(&mut self, relation: &str) -> Result<Vec<String>, String> {
+        let (schema, table) = split_relation(relation);
+        let rows = self
+            .client
+            .query(
+                r#"
+                SELECT a.attname
+                FROM pg_index i
+                JOIN pg_class c   ON c.oid = i.indrelid
+                JOIN pg_namespace n ON n.oid = c.relnamespace
+                JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum = ANY(i.indkey)
+                WHERE n.nspname = $1 AND c.relname = $2 AND i.indisprimary
+                ORDER BY array_position(i.indkey, a.attnum)
+                "#,
+                &[&schema, &table],
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(rows.iter().map(|r| r.get::<_, String>(0)).collect())
     }
 
     /// Of `columns`, those on `relation` whose type the MVP reversible-capture does
@@ -258,6 +324,19 @@ impl<C: Clock> Rehearsal for PgRehearsal<'_, C> {
             }
         }
         None
+    }
+
+    fn self_determined_pk_column(&mut self, target_relation: &str) -> Option<String> {
+        // EPIC #91 PR-A: on the GRANT-BOUND path (gate enabled), hand the engine the
+        // single PK column name so it can require the WHERE predicate to reference
+        // ONLY that immutable PK. On the plain preview path (gate disabled, the
+        // default) report no PK column so the engine skips the gate — the
+        // volatility/PK-less/blast-radius preview is unchanged. A
+        // `pg_index`/`pg_attribute` read; the candidate is never executed.
+        if !self.gate_self_determined {
+            return None;
+        }
+        self.single_pk_column_name(target_relation)
     }
 
     fn rehearse(
@@ -469,6 +548,34 @@ impl ApplyConn for PgApplyConn<'_> {
                 .map_err(|e| ApplyError::Backend(e.to_string()))?;
         }
         b.finalize().map_err(|e| ApplyError::Backend(e.to_string()))
+    }
+
+    fn self_determined_pk_column(&mut self, relation: &str) -> Option<String> {
+        // EPIC #91 PR-A apply-path defense in depth: report the single PK column
+        // name so the grant-bound caller can structurally re-check that the WHERE
+        // is pinned by the immutable PK before the apply txn opens. A
+        // `pg_index`/`pg_attribute` read; the candidate is never executed. `None`
+        // for a composite/absent PK (refused upstream).
+        let (schema, table) = split_relation(relation);
+        let rows = self
+            .client
+            .query(
+                r#"
+                SELECT a.attname
+                FROM pg_index i
+                JOIN pg_class c   ON c.oid = i.indrelid
+                JOIN pg_namespace n ON n.oid = c.relnamespace
+                JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum = ANY(i.indkey)
+                WHERE n.nspname = $1 AND c.relname = $2 AND i.indisprimary
+                ORDER BY array_position(i.indkey, a.attnum)
+                "#,
+                &[&schema, &table],
+            )
+            .ok()?;
+        match rows.as_slice() {
+            [single] => Some(single.get::<_, String>(0)),
+            _ => None,
+        }
     }
 
     fn apply_forward(

@@ -51,7 +51,7 @@
 
 use std::ops::ControlFlow;
 
-use sqlparser::ast::{Expr, FunctionArguments, ObjectName, Statement, visit_expressions};
+use sqlparser::ast::{Expr, FunctionArguments, Ident, ObjectName, Statement, visit_expressions};
 use sqlparser::dialect::PostgreSqlDialect;
 use sqlparser::parser::Parser;
 
@@ -297,6 +297,383 @@ pub fn predicate_volatile_reason(
 
     // Every predicate element positively shown non-volatile.
     None
+}
+
+// ===========================================================================
+//  Self-determined-predicate gate (EPIC #91 PR-A) — the structural replacement
+//  for the exact-PK-set checksum.
+// ===========================================================================
+//
+// The checksum's only real job was catching "same statement, same count,
+// DIFFERENT rows" predicate-meaning drift: an attacker mutates *other* data so a
+// human-approved predicate matches a different (chosen, sensitive) row between
+// approval and apply. That residual lives **entirely in predicates whose truth
+// can be steered by other writes**.
+//
+// This gate forecloses it structurally: on the **grant-bound** apply/certify
+// path, a write's WHERE may reference **only the immutable primary-key column +
+// literal constants + immutable functions/operators on the PK**. A row's
+// *immutable PK* cannot be re-pointed at a sensitive row by any other write, so
+// the approved `statement_text` itself pins the row set — the checksum becomes
+// redundant for identity-steerability.
+//
+// The cap (PR-B) handles magnitude drift (e.g. INSERTs into a PK range); this
+// gate's job is purely **identity-steerability**.
+
+/// Why a predicate is **not** self-determined (i.e. its row set can be steered by
+/// other writes), for the grant-bound gate (EPIC #91 PR-A). Every variant means
+/// **REFUSE** (fail-closed, `NOT_REHEARSABLE`-class). The row set of a
+/// self-determined predicate is pinned by the immutable PK and the literal
+/// statement text alone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NotSelfDetermined {
+    /// The predicate references a **non-PK column** (`status`, `owner`, …). A
+    /// mutable column is steerable: an attacker can set a chosen sensitive row's
+    /// column to match the approved predicate between approval and apply.
+    NonPkColumn {
+        /// The PK column the predicate is allowed to reference.
+        pk_col: String,
+        /// The offending non-PK column the predicate referenced.
+        referenced: String,
+    },
+    /// The predicate contains a **subquery / correlated reference / `EXISTS` /
+    /// `IN (SELECT …)` / `= ANY/ALL (SELECT …)`**. Its truth depends on other
+    /// rows/tables an attacker can write, so it is not pinned by the PK.
+    Subquery,
+    /// The predicate references a **volatile / non-immutable function or special
+    /// value** (`now()`, `random()`, `current_user`, …). Carries the underlying
+    /// [`VolatileReason`] — a non-immutable predicate is steerable across the
+    /// approval/apply boundary even when every column reference is the PK.
+    NonImmutable(VolatileReason),
+    /// The statement could not be parsed, or is not an `UPDATE`/`DELETE` with a
+    /// vettable predicate → fail-closed (cannot prove self-determined).
+    Unclassifiable,
+}
+
+impl std::fmt::Display for NotSelfDetermined {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            NotSelfDetermined::NonPkColumn { pk_col, referenced } => write!(
+                f,
+                "predicate references non-PK column `{referenced}` (only the immutable \
+                 primary-key column `{pk_col}` + literals + immutable functions on it are \
+                 self-determined; a mutable column is steerable to a chosen row)"
+            ),
+            NotSelfDetermined::Subquery => write!(
+                f,
+                "predicate contains a subquery / correlated reference / EXISTS / IN (SELECT …) \
+                 (its row set is not pinned by the immutable primary key)"
+            ),
+            NotSelfDetermined::NonImmutable(reason) => {
+                write!(f, "predicate is not immutable: {reason}")
+            }
+            NotSelfDetermined::Unclassifiable => write!(
+                f,
+                "predicate could not be classified as self-determined (fail-closed)"
+            ),
+        }
+    }
+}
+
+/// Classify whether `sql`'s WHERE predicate is **self-determined** on the
+/// single-column primary key `pk_col` (EPIC #91 PR-A grant-bound gate).
+///
+/// Returns `Some(reason)` if the statement must be **REFUSED** (the predicate's
+/// row set could be steered by other writes), or `None` only when the predicate
+/// has been *positively shown* self-determined: every column reference is the PK
+/// column, there is no subquery/correlated/EXISTS node, and every function is
+/// immutable (resolved via `resolver`, the same `pg_proc.provolatile` seam the
+/// volatility check uses).
+///
+/// `pk_col` is compared case-insensitively on its bare (unqualified) name, so a
+/// qualified reference (`accounts.id`, `t.id`) to the PK is accepted while a
+/// reference to any *other* column is refused.
+///
+/// Fail-closed:
+/// - an unparseable / non-`UPDATE`/`DELETE` statement → `Some(Unclassifiable)`;
+/// - a **missing/empty WHERE** → `Some(Unclassifiable)` (a no-WHERE write is not a
+///   self-determined *predicate*; the grant path must not treat the absence of a
+///   predicate as a bypass — it is handled by the cap / row-count guards
+///   elsewhere, but this gate refuses to certify it as self-determined);
+/// - a function whose volatility cannot be resolved → `Some(NonImmutable(...))`;
+/// - any column reference that is not the PK → `Some(NonPkColumn { .. })`.
+///
+/// It only *reads* via `resolver`; it never executes the candidate statement.
+pub fn self_determined_predicate_reason(
+    sql: &str,
+    pk_col: &str,
+    resolver: &mut dyn FunctionVolatility,
+) -> Option<NotSelfDetermined> {
+    let dialect = PostgreSqlDialect {};
+    let parsed = match Parser::parse_sql(&dialect, sql) {
+        Ok(p) if p.len() == 1 => p,
+        _ => return Some(NotSelfDetermined::Unclassifiable),
+    };
+
+    let predicate = match predicate_of(&parsed[0]) {
+        // No WHERE clause → not a self-determined *predicate* (fail-closed: the
+        // grant path must not treat a no-WHERE write as self-determined).
+        Some(None) | None => return Some(NotSelfDetermined::Unclassifiable),
+        Some(Some(p)) => p,
+    };
+
+    // (a) Structural walk FIRST: refuse any subquery/correlated node, and require
+    //     every column identifier to be the PK column. A subquery is a structural
+    //     refusal independent of the functions inside it, so this runs before the
+    //     volatility delegation (which would otherwise report a function *inside*
+    //     the subquery — e.g. `(SELECT max(id) …)` — instead of the subquery
+    //     itself). The two checks together pin the row set to the immutable PK +
+    //     literals.
+    let pk_bare = bare_name(&pk_col.to_lowercase());
+    if let Some(reason) = classify_self_determined_expr(predicate, &pk_bare) {
+        return Some(reason);
+    }
+
+    // (b) Reuse the volatility machinery on the (now subquery-free, PK-only)
+    //     predicate: every function must be immutable (the keyword deny-set +
+    //     pg_proc.provolatile resolver). A non-immutable / unresolvable /
+    //     nondeterministic-keyword predicate is steerable across the approval/apply
+    //     boundary → refuse. We re-derive the reason from the *whole* statement so
+    //     the function walk + keyword check is identical to the volatility gate
+    //     (single source of truth).
+    if let Some(reason) = predicate_volatile_reason(sql, resolver) {
+        return Some(NotSelfDetermined::NonImmutable(reason));
+    }
+
+    None
+}
+
+/// The **structural-only** half of the self-determined gate (no volatility seam):
+/// classify whether `sql`'s WHERE predicate references only the PK column +
+/// literals + (structurally) functions/operators, refusing non-PK columns and
+/// subqueries/correlated nodes — but **not** resolving function volatility.
+///
+/// This is the apply-path **defense-in-depth** form (EPIC #91 PR-A): at apply
+/// time the statement text is grant-bound (byte-identical to the one the dry-run
+/// gate already vetted for volatility), and the apply seam has no
+/// `pg_proc.provolatile` resolver in hand, so re-proving volatility here would
+/// either need a second resolver or fail-closed-refuse every immutable function
+/// the dry-run already allowed. We therefore re-check only the **structural**
+/// identity-steerability (PK-only columns, no subquery) — the part that pins the
+/// row set to the immutable PK — as a second, independent gate before the apply
+/// txn opens. The full (volatility-resolving) gate is
+/// [`self_determined_predicate_reason`], enforced at dry-run/certify.
+///
+/// Fail-closed identically: unparseable / non-`UPDATE`/`DELETE` / missing-WHERE →
+/// `Some(Unclassifiable)`; a non-PK column → `Some(NonPkColumn)`; a subquery →
+/// `Some(Subquery)`. Returns `None` only when the predicate is structurally
+/// self-determined on `pk_col`.
+pub fn self_determined_predicate_structural_reason(
+    sql: &str,
+    pk_col: &str,
+) -> Option<NotSelfDetermined> {
+    let dialect = PostgreSqlDialect {};
+    let parsed = match Parser::parse_sql(&dialect, sql) {
+        Ok(p) if p.len() == 1 => p,
+        _ => return Some(NotSelfDetermined::Unclassifiable),
+    };
+    let predicate = match predicate_of(&parsed[0]) {
+        Some(None) | None => return Some(NotSelfDetermined::Unclassifiable),
+        Some(Some(p)) => p,
+    };
+    let pk_bare = bare_name(&pk_col.to_lowercase());
+    classify_self_determined_expr(predicate, &pk_bare)
+}
+
+/// Recursively classify `expr`: refuse subqueries/correlated nodes and any
+/// non-PK column reference. Returns `Some(reason)` on the first violation, `None`
+/// if the whole subtree is self-determined.
+///
+/// We hand-walk (rather than reuse `visit_expressions`) so we can REFUSE a
+/// subquery node *as a whole* — descending into a subquery's body and inspecting
+/// its column identifiers would be both wrong (those columns belong to another
+/// query scope) and a bypass risk.
+fn classify_self_determined_expr(expr: &Expr, pk_bare: &str) -> Option<NotSelfDetermined> {
+    match expr {
+        // --- column references: the bare name must be the PK column -----------
+        Expr::Identifier(ident) => non_pk_column(ident, pk_bare),
+        Expr::CompoundIdentifier(parts) => {
+            // `table.col` / `schema.table.col` — the *last* part is the column.
+            match parts.last() {
+                Some(col) => non_pk_column(col, pk_bare),
+                None => Some(NotSelfDetermined::Unclassifiable),
+            }
+        }
+        // A field/subscript access (`a.b`, `a['k']`, `a[1]`) is rooted at a
+        // column expr — vet the root (and any index exprs).
+        Expr::CompoundFieldAccess { root, access_chain } => {
+            if let Some(r) = classify_self_determined_expr(root, pk_bare) {
+                return Some(r);
+            }
+            // The access operations may carry index expressions; vet them too.
+            // A subscript that is a literal is fine; a column ref inside is not.
+            // We conservatively stringify-and-reparse-free: walk via visitor over
+            // the access chain's exprs using the same per-expr classifier.
+            let mut found = None;
+            let _ = visit_expressions(expr, |e| {
+                // Skip the root (already vetted) and the outer node itself.
+                if std::ptr::eq(e, expr) {
+                    return ControlFlow::Continue(());
+                }
+                if let Some(r) = classify_atom_only(e, pk_bare) {
+                    found = Some(r);
+                    return ControlFlow::Break(());
+                }
+                ControlFlow::Continue(())
+            });
+            let _ = access_chain;
+            found
+        }
+
+        // --- subquery / correlated / set nodes: REFUSE as a whole ------------
+        Expr::Subquery(_) | Expr::Exists { .. } => Some(NotSelfDetermined::Subquery),
+        Expr::InSubquery { .. } => Some(NotSelfDetermined::Subquery),
+        Expr::AnyOp { right, .. } | Expr::AllOp { right, .. } => {
+            // `= ANY(<subquery>)` / `= ALL(<subquery>)` — the right side is a
+            // subquery-or-array. Either way it is not pinned by the PK → refuse.
+            // (An array literal would be self-determined, but ANY/ALL over a
+            // (sub)query is the steerable form; we refuse the whole construct
+            // fail-closed rather than try to distinguish, since the grant path
+            // has no need for ANY/ALL — `id IN (1,2,3)` covers the literal case.)
+            let _ = right;
+            Some(NotSelfDetermined::Subquery)
+        }
+        Expr::InUnnest { .. } => Some(NotSelfDetermined::Subquery),
+
+        // --- boolean / comparison / arithmetic structure: recurse ------------
+        Expr::BinaryOp { left, right, .. } => classify_self_determined_expr(left, pk_bare)
+            .or_else(|| classify_self_determined_expr(right, pk_bare)),
+        Expr::UnaryOp { expr, .. }
+        | Expr::Nested(expr)
+        | Expr::IsTrue(expr)
+        | Expr::IsNotTrue(expr)
+        | Expr::IsFalse(expr)
+        | Expr::IsNotFalse(expr)
+        | Expr::IsNull(expr)
+        | Expr::IsNotNull(expr)
+        | Expr::IsUnknown(expr)
+        | Expr::IsNotUnknown(expr) => classify_self_determined_expr(expr, pk_bare),
+        Expr::Between {
+            expr, low, high, ..
+        } => classify_self_determined_expr(expr, pk_bare)
+            .or_else(|| classify_self_determined_expr(low, pk_bare))
+            .or_else(|| classify_self_determined_expr(high, pk_bare)),
+        Expr::InList { expr, list, .. } => {
+            if let Some(r) = classify_self_determined_expr(expr, pk_bare) {
+                return Some(r);
+            }
+            list.iter()
+                .find_map(|e| classify_self_determined_expr(e, pk_bare))
+        }
+        Expr::Like { expr, pattern, .. }
+        | Expr::ILike { expr, pattern, .. }
+        | Expr::SimilarTo { expr, pattern, .. }
+        | Expr::RLike { expr, pattern, .. } => classify_self_determined_expr(expr, pk_bare)
+            .or_else(|| classify_self_determined_expr(pattern, pk_bare)),
+        Expr::Cast { expr, .. } | Expr::Collate { expr, .. } => {
+            classify_self_determined_expr(expr, pk_bare)
+        }
+        Expr::IsDistinctFrom(a, b) | Expr::IsNotDistinctFrom(a, b) => {
+            classify_self_determined_expr(a, pk_bare)
+                .or_else(|| classify_self_determined_expr(b, pk_bare))
+        }
+        Expr::Case {
+            operand,
+            conditions,
+            else_result,
+            ..
+        } => {
+            if let Some(op) = operand
+                && let Some(r) = classify_self_determined_expr(op, pk_bare)
+            {
+                return Some(r);
+            }
+            for when in conditions {
+                if let Some(r) = classify_self_determined_expr(&when.condition, pk_bare) {
+                    return Some(r);
+                }
+                if let Some(r) = classify_self_determined_expr(&when.result, pk_bare) {
+                    return Some(r);
+                }
+            }
+            if let Some(er) = else_result
+                && let Some(r) = classify_self_determined_expr(er, pk_bare)
+            {
+                return Some(r);
+            }
+            None
+        }
+
+        // --- functions: their immutability was already proven in step (a). Their
+        //     ARGUMENTS may still reference a non-PK column (`lower(status)`), so
+        //     vet every argument expression via the generic atom walk. -----------
+        Expr::Function(_) => {
+            let mut found = None;
+            let _ = visit_expressions(expr, |e| {
+                if std::ptr::eq(e, expr) {
+                    return ControlFlow::Continue(());
+                }
+                // A nested subquery inside a function arg is still a subquery.
+                if let Some(r) = classify_atom_only(e, pk_bare) {
+                    found = Some(r);
+                    return ControlFlow::Break(());
+                }
+                ControlFlow::Continue(())
+            });
+            found
+        }
+
+        // --- literals / constants: always self-determined --------------------
+        Expr::Value(_) | Expr::TypedString { .. } | Expr::Interval(_) => None,
+
+        // --- anything else we do not explicitly model: fail-closed. New SQL
+        //     surface (lambdas, JSON access over columns, struct/map literals,
+        //     `AT TIME ZONE`, …) is REFUSED rather than waved through, so the gate
+        //     never silently admits an un-vetted construct. -----------------------
+        _ => {
+            // Conservatively walk the subtree: if it contains ANY non-PK column or
+            // subquery atom, refuse with that reason; otherwise refuse as
+            // unclassifiable (a construct we do not model).
+            let mut found = None;
+            let _ = visit_expressions(expr, |e| {
+                if let Some(r) = classify_atom_only(e, pk_bare) {
+                    found = Some(r);
+                    return ControlFlow::Break(());
+                }
+                ControlFlow::Continue(())
+            });
+            Some(found.unwrap_or(NotSelfDetermined::Unclassifiable))
+        }
+    }
+}
+
+/// Classify a *single* node for the "atom" sweep used inside function args and
+/// unmodeled constructs: a non-PK column ref or a subquery node → its reason;
+/// everything else → `None` (the visitor keeps descending).
+fn classify_atom_only(e: &Expr, pk_bare: &str) -> Option<NotSelfDetermined> {
+    match e {
+        Expr::Identifier(ident) => non_pk_column(ident, pk_bare),
+        Expr::CompoundIdentifier(parts) => parts.last().and_then(|col| non_pk_column(col, pk_bare)),
+        Expr::Subquery(_)
+        | Expr::Exists { .. }
+        | Expr::InSubquery { .. }
+        | Expr::AnyOp { .. }
+        | Expr::AllOp { .. }
+        | Expr::InUnnest { .. } => Some(NotSelfDetermined::Subquery),
+        _ => None,
+    }
+}
+
+/// `Some(NonPkColumn)` if `ident`'s bare name is not the PK column, else `None`.
+fn non_pk_column(ident: &Ident, pk_bare: &str) -> Option<NotSelfDetermined> {
+    if ident.value.to_lowercase() == pk_bare {
+        None
+    } else {
+        Some(NotSelfDetermined::NonPkColumn {
+            pk_col: pk_bare.to_string(),
+            referenced: ident.value.clone(),
+        })
+    }
 }
 
 /// Extract the WHERE-clause predicate of a certified `UPDATE`/`DELETE`.
@@ -713,5 +1090,266 @@ mod tests {
                 .to_string()
                 .contains("provolatile = 'v'")
         );
+    }
+
+    // =======================================================================
+    //  Self-determined-predicate gate (EPIC #91 PR-A).
+    //
+    //  ALLOW  ⇒ self_determined_predicate_reason(...) == None
+    //  REFUSE ⇒ Some(<the steerability reason>)
+    //
+    //  PK column is `id` for the single-int4-PK shape.
+    // =======================================================================
+
+    fn sd(sql: &str) -> Option<NotSelfDetermined> {
+        self_determined_predicate_reason(sql, "id", &mut immutable_world())
+    }
+
+    // --- ALLOW: PK-only predicates (literals + immutable ops on the PK) -------
+
+    #[test]
+    fn pk_equality_is_self_determined() {
+        assert_eq!(sd("UPDATE accounts SET balance=0 WHERE id = 42"), None);
+    }
+
+    #[test]
+    fn pk_in_list_is_self_determined() {
+        assert_eq!(
+            sd("UPDATE accounts SET balance=0 WHERE id IN (1,2,3)"),
+            None
+        );
+        assert_eq!(sd("DELETE FROM accounts WHERE id IN (1, 2, 3)"), None);
+    }
+
+    #[test]
+    fn pk_between_is_self_determined() {
+        assert_eq!(
+            sd("UPDATE accounts SET balance=0 WHERE id BETWEEN 1 AND 100"),
+            None
+        );
+    }
+
+    #[test]
+    fn marquee_pk_modulo_is_self_determined() {
+        // THE MARQUEE shape: `WHERE id % 2 = 0` — every column ref is the PK,
+        // `%` is an immutable operator, `2`/`0` are literals. MUST be ALLOWED so
+        // PR-B / the marquee do not break.
+        assert_eq!(sd("UPDATE accounts SET balance=0 WHERE id % 2 = 0"), None);
+    }
+
+    #[test]
+    fn pk_boolean_combinations_are_self_determined() {
+        assert_eq!(sd("UPDATE t SET x=0 WHERE id = 42 OR id = 99"), None);
+        assert_eq!(sd("UPDATE t SET x=0 WHERE id > 10 AND id < 20"), None);
+        assert_eq!(sd("UPDATE t SET x=0 WHERE NOT (id = 5)"), None);
+        assert_eq!(
+            sd("DELETE FROM t WHERE (id = 1 OR id = 2) AND id < 100"),
+            None
+        );
+    }
+
+    #[test]
+    fn immutable_function_on_pk_is_self_determined() {
+        // abs(id) is IMMUTABLE and its only column arg is the PK.
+        assert_eq!(sd("UPDATE t SET x=0 WHERE abs(id) > 100"), None);
+    }
+
+    #[test]
+    fn qualified_pk_reference_is_self_determined() {
+        // `accounts.id` / `t.id` — the column is still the PK (last component).
+        assert_eq!(
+            sd("UPDATE accounts SET balance=0 WHERE accounts.id = 7"),
+            None
+        );
+    }
+
+    #[test]
+    fn case_insensitive_pk_match() {
+        // The PK column name compare is case-insensitive.
+        assert_eq!(
+            self_determined_predicate_reason(
+                "UPDATE t SET x=0 WHERE ID = 1",
+                "id",
+                &mut immutable_world()
+            ),
+            None
+        );
+    }
+
+    // --- REFUSE: non-PK column references (steerable mutable columns) ---------
+
+    #[test]
+    fn non_pk_column_is_refused() {
+        assert!(matches!(
+            sd("UPDATE accounts SET balance=0 WHERE status = 'cancelled'"),
+            Some(NotSelfDetermined::NonPkColumn { ref referenced, .. }) if referenced == "status"
+        ));
+    }
+
+    #[test]
+    fn bare_boolean_non_pk_column_is_refused() {
+        assert!(matches!(
+            sd("UPDATE accounts SET balance=0 WHERE flagged"),
+            Some(NotSelfDetermined::NonPkColumn { ref referenced, .. }) if referenced == "flagged"
+        ));
+    }
+
+    #[test]
+    fn pk_and_non_pk_mix_is_refused() {
+        // Even mixed with the PK, a non-PK column makes the row set steerable.
+        // (My task prompt: only the PK column may be referenced.)
+        assert!(matches!(
+            sd("UPDATE accounts SET balance=0 WHERE id = 42 AND status = 'x'"),
+            Some(NotSelfDetermined::NonPkColumn { ref referenced, .. }) if referenced == "status"
+        ));
+    }
+
+    #[test]
+    fn column_to_column_comparison_is_refused() {
+        // `WHERE a = b` — `a` (non-PK) is the first violation.
+        assert!(matches!(
+            sd("UPDATE t SET x=0 WHERE a = b"),
+            Some(NotSelfDetermined::NonPkColumn { .. })
+        ));
+        // `WHERE id = other` — the PK compared to another (mutable) column.
+        assert!(matches!(
+            sd("UPDATE t SET x=0 WHERE id = other_col"),
+            Some(NotSelfDetermined::NonPkColumn { ref referenced, .. }) if referenced == "other_col"
+        ));
+    }
+
+    #[test]
+    fn non_pk_column_inside_function_arg_is_refused() {
+        // lower() is IMMUTABLE, but its argument is a non-PK column → steerable.
+        assert!(matches!(
+            sd("UPDATE t SET x=0 WHERE lower(status) = 'x'"),
+            Some(NotSelfDetermined::NonPkColumn { ref referenced, .. }) if referenced == "status"
+        ));
+    }
+
+    // --- REFUSE: subqueries / correlated / EXISTS / IN(SELECT) / ANY/ALL ------
+
+    #[test]
+    fn in_subquery_is_refused() {
+        assert_eq!(
+            sd("UPDATE accounts SET balance=0 WHERE id IN (SELECT account_id FROM flags)"),
+            Some(NotSelfDetermined::Subquery)
+        );
+    }
+
+    #[test]
+    fn scalar_subquery_is_refused() {
+        assert_eq!(
+            sd("UPDATE accounts SET balance=0 WHERE id = (SELECT max(id) FROM accounts)"),
+            Some(NotSelfDetermined::Subquery)
+        );
+    }
+
+    #[test]
+    fn exists_subquery_is_refused() {
+        assert_eq!(
+            sd(
+                "DELETE FROM accounts WHERE EXISTS (SELECT 1 FROM flags WHERE flags.id = accounts.id)"
+            ),
+            Some(NotSelfDetermined::Subquery)
+        );
+    }
+
+    #[test]
+    fn any_subquery_is_refused() {
+        assert_eq!(
+            sd("UPDATE t SET x=0 WHERE id = ANY (SELECT id FROM s)"),
+            Some(NotSelfDetermined::Subquery)
+        );
+    }
+
+    // --- REFUSE: volatile / non-immutable predicate (delegated to volatility) -
+
+    #[test]
+    fn volatile_now_against_non_pk_column_is_refused() {
+        // `now() > created`: BOTH a volatile function AND a non-PK column. The
+        // structural (column) check fires first — either refusal is correct; what
+        // matters is that this steerable predicate is REFUSED, never allowed.
+        assert!(matches!(
+            sd("UPDATE accounts SET balance=0 WHERE now() > created"),
+            Some(NotSelfDetermined::NonPkColumn { .. }) | Some(NotSelfDetermined::NonImmutable(_))
+        ));
+    }
+
+    #[test]
+    fn volatile_now_with_pk_only_columns_is_refused_as_non_immutable() {
+        // PK-only columns but a volatile function → the volatility delegation
+        // catches it as non-immutable (the steerability is the function, not a
+        // column). This isolates the (b) volatility path of the gate.
+        assert!(matches!(
+            sd("UPDATE accounts SET balance=0 WHERE id % 2 = 0 AND now() > localtimestamp"),
+            Some(NotSelfDetermined::NonImmutable(
+                VolatileReason::NondeterministicKeyword(_)
+            ))
+        ));
+    }
+
+    #[test]
+    fn volatile_random_with_pk_only_is_refused_as_non_immutable() {
+        // random() is VOLATILE (pg_proc.provolatile='v'); no column references at
+        // all, so only the volatility path can catch it.
+        assert!(matches!(
+            sd("DELETE FROM accounts WHERE random() < 0.5 OR id = 1"),
+            Some(NotSelfDetermined::NonImmutable(
+                VolatileReason::VolatileFunction(_)
+            ))
+        ));
+    }
+
+    // --- fail-closed: no WHERE / unparseable / non-update-delete -------------
+
+    #[test]
+    fn no_where_clause_is_not_self_determined() {
+        // A no-WHERE write is NOT a self-determined *predicate*; the grant path
+        // must not treat the absence of a predicate as a bypass.
+        assert_eq!(
+            sd("UPDATE accounts SET balance=0"),
+            Some(NotSelfDetermined::Unclassifiable)
+        );
+    }
+
+    #[test]
+    fn unparseable_is_fail_closed() {
+        assert_eq!(
+            sd("UPDATE WHERE )( garbage"),
+            Some(NotSelfDetermined::Unclassifiable)
+        );
+    }
+
+    #[test]
+    fn non_update_delete_is_fail_closed() {
+        assert_eq!(
+            sd("SELECT * FROM t WHERE id = 1"),
+            Some(NotSelfDetermined::Unclassifiable)
+        );
+    }
+
+    #[test]
+    fn unresolvable_function_is_refused_fail_closed() {
+        // An unknown function (not immutable-provable) → non-immutable refuse.
+        assert!(matches!(
+            sd("UPDATE t SET x=0 WHERE mystery_fn(id) = 1"),
+            Some(NotSelfDetermined::NonImmutable(
+                VolatileReason::UnresolvableFunction(_)
+            ))
+        ));
+    }
+
+    #[test]
+    fn reasons_render_human_readable() {
+        assert!(
+            NotSelfDetermined::NonPkColumn {
+                pk_col: "id".into(),
+                referenced: "status".into()
+            }
+            .to_string()
+            .contains("non-PK column `status`")
+        );
+        assert!(NotSelfDetermined::Subquery.to_string().contains("subquery"));
     }
 }

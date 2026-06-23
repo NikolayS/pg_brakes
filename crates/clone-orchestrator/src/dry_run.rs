@@ -46,7 +46,10 @@ use std::collections::BTreeMap;
 use pgb_core::blast_radius::{Affected, ConstraintViolation, OpCounts};
 use pgb_core::{BlastRadius, Clock, InverseKind, LockHeld, LockMode, PkChecksum, TriggerFired};
 
-use crate::predicate::{FunctionVolatility, VolatileReason, Volatility, predicate_volatile_reason};
+use crate::predicate::{
+    FunctionVolatility, NotSelfDetermined, VolatileReason, Volatility, predicate_volatile_reason,
+    self_determined_predicate_reason,
+};
 use crate::proposal::Proposal;
 
 /// The statement class the dry-run engine recognizes (advisory parse, SPEC §4).
@@ -98,6 +101,18 @@ pub enum DryRunError {
     /// rather than executed (default-deny, §10.3).
     #[error("REFUSED: statement is not a rehearsable certified write ({0})")]
     NotRehearsable(String),
+
+    /// The grant-bound write's WHERE predicate is **not self-determined** (EPIC
+    /// #91 PR-A): it references something other than the immutable primary-key
+    /// column + literals + immutable functions on the PK (a non-PK column, a
+    /// subquery/correlated ref, or a volatile function), so its row set can be
+    /// steered by other writes between approval and apply. **REFUSED before
+    /// rehearsal**, fail-closed (`NOT_REHEARSABLE`-class). This is the structural
+    /// replacement for the exact-PK-set checksum: the immutable PK pins the row
+    /// identity, so the approved `statement_text` itself cannot be re-pointed at a
+    /// chosen sensitive row.
+    #[error("REFUSED: predicate is not self-determined (steerable) — {0}")]
+    NotSelfDetermined(NotSelfDetermined),
 
     /// The target relation has **no primary key**, so the affected-row set cannot
     /// be keyed across the dry-run/apply boundary. **REFUSED, no `ctid` fallback**
@@ -254,6 +269,28 @@ pub trait Rehearsal {
         None
     }
 
+    /// The **single primary-key column name** of `target_relation`, for the
+    /// self-determined-predicate gate (EPIC #91 PR-A) — a `pg_index`/`pg_attribute`
+    /// read only, never the candidate statement.
+    ///
+    /// Returns `Some(col)` for a relation whose PK is a single column (the MVP
+    /// single-`int4`-PK shape `certify_apply_shape` already constrains to), so the
+    /// engine can require the WHERE predicate to reference **only** that immutable
+    /// PK column (+ literals + immutable functions on it). Returns `None` when the
+    /// backend cannot/does not resolve a single-column PK name — in which case the
+    /// engine **skips** the self-determined gate (the `certify_apply_shape`
+    /// single-`int4`-PK constraint and the §10.2 `PkLess` refusal still apply; a
+    /// genuinely composite/absent PK is refused there, not here).
+    ///
+    /// The default implementation returns `None` — the DB-free mock backends in the
+    /// unit tests opt in explicitly when they want to exercise the gate; the real
+    /// [`crate::conn::PgRehearsal`] overrides it and the env-gated integration tests
+    /// prove the refusal against real PG18.
+    fn self_determined_pk_column(&mut self, target_relation: &str) -> Option<String> {
+        let _ = target_relation;
+        None
+    }
+
     /// Rehearse `statement` (a certified `kind` write on `target_relation`) in a
     /// rolled-back transaction and return the [`Measurement`].
     ///
@@ -364,12 +401,19 @@ fn stmt_label(stmt: &sqlparser::ast::Statement) -> &'static str {
 ///    `now()`/`CURRENT_TIMESTAMP`/`random()`/a volatile UDF *before* executing,
 ///    resolving function volatility from the backend's `pg_proc` (fail-closed on
 ///    unknown). Steps 2–3 only parse / read `pg_proc`; no forward write runs.
-/// 4. **Rehearse** — the backend runs the statement in a rolled-back txn and
+/// 4. **Self-determined-predicate gate** (EPIC #91 PR-A) — refuse a grant-bound
+///    write whose WHERE references anything other than the immutable single-column
+///    PK + literals + immutable functions on it (a non-PK column, a
+///    subquery/correlated ref, a volatile fn). The immutable PK pins the row
+///    identity so the approved statement cannot be re-pointed at a chosen row —
+///    the structural replacement for the exact-PK-set checksum. `pg_index`/
+///    `pg_attribute` read only; refused *before* rehearsal.
+/// 5. **Rehearse** — the backend runs the statement in a rolled-back txn and
 ///    measures the blast radius (PK set + cascades + triggers + locks + WAL +
 ///    duration + LSN/staleness).
-/// 5. **PK-less guard** — refuse if the target (or any cascade) has no primary
+/// 6. **PK-less guard** — refuse if the target (or any cascade) has no primary
 ///    key (no `ctid` fallback).
-/// 6. **Assemble** — fold the measurement into the §10.1 [`BlastRadius`] record.
+/// 7. **Assemble** — fold the measurement into the §10.1 [`BlastRadius`] record.
 ///
 /// On success the returned record reflects a write that was rehearsed and then
 /// **rolled back** — no row was persisted.
@@ -410,6 +454,30 @@ pub fn dry_run(
     if let Some(reason) = rehearsal.certify_apply_shape(&proposal.statement, kind, &target_relation)
     {
         return Err(DryRunError::NotRehearsable(reason));
+    }
+
+    // (3c) Self-determined-predicate gate (EPIC #91 PR-A) — REFUSE, before
+    //      rehearsing, a grant-bound write whose WHERE predicate is steerable: it
+    //      may reference ONLY the immutable single-column primary key + literals +
+    //      immutable functions on the PK. A non-PK column, a subquery/correlated
+    //      ref, or a volatile function means the approved predicate's row set could
+    //      be re-pointed at a chosen sensitive row between approval and apply — the
+    //      exact residual the dropped exact-PK-set checksum used to catch. The
+    //      immutable PK pins the row identity, so this forecloses it structurally.
+    //
+    //      This needs the PK column name; the backend supplies it via
+    //      `self_determined_pk_column` (a `pg_index`/`pg_attribute` READ only — the
+    //      candidate is never executed). When the backend cannot resolve a single
+    //      PK column, the gate is skipped (the single-`int4`-PK certify constraint +
+    //      §10.2 PkLess refusal already cover composite/absent PKs). Fail-closed: a
+    //      non-self-determined predicate is REFUSED here, before any rehearsal.
+    if let Some(pk_col) = rehearsal.self_determined_pk_column(&target_relation) {
+        let mut resolver = RehearsalVolatility(rehearsal);
+        if let Some(reason) =
+            self_determined_predicate_reason(&proposal.statement, &pk_col, &mut resolver)
+        {
+            return Err(DryRunError::NotSelfDetermined(reason));
+        }
     }
 
     // (4) Rehearse in a rolled-back txn (the backend owns BEGIN/ROLLBACK).
@@ -534,6 +602,11 @@ mod tests {
         /// Records the statement the engine asked us to rehearse (to assert the
         /// engine refuses *before* calling us on the volatile path).
         rehearsed: Option<String>,
+        /// The single PK column name this backend reports for the
+        /// self-determined-predicate gate (EPIC #91 PR-A). `None` ⇒ the engine
+        /// skips the gate (default mock behavior, so the pre-existing tests that
+        /// do not exercise the gate are unaffected); `Some("id")` ⇒ the gate runs.
+        pk_column: Option<String>,
     }
 
     fn checksum_of(rel: &str, ids: &[i64]) -> PkChecksum {
@@ -571,6 +644,7 @@ mod tests {
                     staleness_lsn_bytes: 0,
                 },
                 rehearsed: None,
+                pk_column: None,
             }
         }
 
@@ -578,6 +652,13 @@ mod tests {
             let mut m = Self::with_target(rel, &[1, 2, 3]);
             m.measurement.target.checksum = None;
             m
+        }
+
+        /// Opt this mock into the self-determined-predicate gate by reporting a
+        /// single PK column name (EPIC #91 PR-A).
+        fn with_pk_column(mut self, col: &str) -> Self {
+            self.pk_column = Some(col.to_string());
+            self
         }
     }
 
@@ -594,6 +675,10 @@ mod tests {
                 }
                 _ => Volatility::Unknown,
             }
+        }
+
+        fn self_determined_pk_column(&mut self, _target_relation: &str) -> Option<String> {
+            self.pk_column.clone()
         }
 
         fn rehearse(
@@ -837,5 +922,166 @@ mod tests {
             "the trigger-written audit table's INSERT is in the measured footprint, typed as ins"
         );
         assert_eq!(audit.del, 0, "the audit table is INSERT-only, not deleted");
+    }
+
+    // =======================================================================
+    //  Self-determined-predicate gate wired into dry_run (EPIC #91 PR-A).
+    //  The gate runs ONLY when the backend reports a single PK column name
+    //  (`with_pk_column`); it REFUSES a steerable predicate BEFORE rehearsal.
+    // =======================================================================
+
+    #[test]
+    fn marquee_pk_modulo_predicate_reaches_rehearsal() {
+        // THE MARQUEE: `WHERE id % 2 = 0` is PK-only → self-determined → ALLOWED
+        // (reaches rehearsal). This must keep working so PR-B / the marquee don't
+        // break.
+        let clock = MockClock::new();
+        let p = propose(
+            "UPDATE public.accounts SET balance = 0 WHERE id % 2 = 0",
+            None,
+            &clock,
+        );
+        let mut backend =
+            MockRehearsal::with_target("public.accounts", &[2, 4]).with_pk_column("id");
+        let br = dry_run(&p, &mut backend, &clock).expect("PK-only predicate is self-determined");
+        assert_eq!(br.proposal_id, p.id);
+        assert!(
+            backend.rehearsed.is_some(),
+            "a self-determined predicate must reach the rehearsal backend"
+        );
+    }
+
+    #[test]
+    fn non_pk_column_predicate_is_refused_before_rehearsal() {
+        // `WHERE status='cancelled'` references a mutable, steerable column → the
+        // gate REFUSES it before rehearsal (an attacker could set a chosen
+        // sensitive row's `status` to match between approval and apply).
+        let clock = MockClock::new();
+        let p = propose(
+            "UPDATE public.accounts SET balance = 0 WHERE status = 'cancelled'",
+            None,
+            &clock,
+        );
+        let mut backend = MockRehearsal::with_target("public.accounts", &[1]).with_pk_column("id");
+        let err = dry_run(&p, &mut backend, &clock).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                DryRunError::NotSelfDetermined(NotSelfDetermined::NonPkColumn { .. })
+            ),
+            "got {err:?}"
+        );
+        assert!(
+            backend.rehearsed.is_none(),
+            "a steerable (non-PK-column) predicate must NOT reach the rehearsal backend"
+        );
+    }
+
+    #[test]
+    fn subquery_predicate_is_refused_before_rehearsal() {
+        // `WHERE id IN (SELECT …)` — the row set is not pinned by the immutable PK
+        // → REFUSED before rehearsal.
+        let clock = MockClock::new();
+        let p = propose(
+            "DELETE FROM public.accounts WHERE id IN (SELECT account_id FROM public.flags)",
+            None,
+            &clock,
+        );
+        let mut backend = MockRehearsal::with_target("public.accounts", &[1]).with_pk_column("id");
+        let err = dry_run(&p, &mut backend, &clock).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                DryRunError::NotSelfDetermined(NotSelfDetermined::Subquery)
+            ),
+            "got {err:?}"
+        );
+        assert!(backend.rehearsed.is_none());
+    }
+
+    #[test]
+    fn column_to_column_predicate_is_refused_before_rehearsal() {
+        // `WHERE a = b` — a column-to-column comparison is steerable → REFUSED.
+        let clock = MockClock::new();
+        let p = propose(
+            "UPDATE public.accounts SET balance = 0 WHERE owner = manager",
+            None,
+            &clock,
+        );
+        let mut backend = MockRehearsal::with_target("public.accounts", &[1]).with_pk_column("id");
+        let err = dry_run(&p, &mut backend, &clock).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                DryRunError::NotSelfDetermined(NotSelfDetermined::NonPkColumn { .. })
+            ),
+            "got {err:?}"
+        );
+        assert!(backend.rehearsed.is_none());
+    }
+
+    #[test]
+    fn no_where_grant_path_is_refused_as_not_self_determined() {
+        // A no-WHERE write is not a self-determined *predicate*; on the gated
+        // (grant) path it is REFUSED so the absence of a WHERE is never a
+        // self-determined bypass. (Magnitude is PR-B's cap; identity is here.)
+        let clock = MockClock::new();
+        let p = propose("UPDATE public.accounts SET balance = 0", None, &clock);
+        let mut backend =
+            MockRehearsal::with_target("public.accounts", &[1, 2, 3]).with_pk_column("id");
+        let err = dry_run(&p, &mut backend, &clock).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                DryRunError::NotSelfDetermined(NotSelfDetermined::Unclassifiable)
+            ),
+            "got {err:?}"
+        );
+        assert!(backend.rehearsed.is_none());
+    }
+
+    #[test]
+    fn gate_is_skipped_when_backend_reports_no_pk_column() {
+        // When the backend does NOT report a single PK column (default mock), the
+        // gate is skipped and a non-PK-column predicate still reaches rehearsal —
+        // proving the gate is gated on the backend's PK-column seam (the
+        // single-int4-PK certify constraint + §10.2 PkLess cover the rest), and
+        // that pre-existing non-gate tests are unaffected.
+        let clock = MockClock::new();
+        let p = propose(
+            "UPDATE public.accounts SET balance = 0 WHERE status = 'cancelled'",
+            None,
+            &clock,
+        );
+        // No `.with_pk_column(...)` → pk_column = None → gate skipped.
+        let mut backend = MockRehearsal::with_target("public.accounts", &[1, 2, 3]);
+        let br = dry_run(&p, &mut backend, &clock)
+            .expect("with no PK column reported, the self-determined gate is skipped");
+        assert_eq!(br.proposal_id, p.id);
+        assert!(backend.rehearsed.is_some());
+    }
+
+    #[test]
+    fn gate_runs_after_volatility_and_shares_its_refusal() {
+        // A volatile predicate is still caught (the volatility gate at step 3 fires
+        // first); proving the new gate does not mask the existing volatility
+        // refusal. `now()` against the PK column → Volatile refusal (step 3),
+        // never reaching the self-determined step.
+        let clock = MockClock::new();
+        let p = propose(
+            "UPDATE public.accounts SET balance = 0 WHERE id = 1 AND created > now()",
+            None,
+            &clock,
+        );
+        let mut backend = MockRehearsal::with_target("public.accounts", &[1]).with_pk_column("id");
+        let err = dry_run(&p, &mut backend, &clock).unwrap_err();
+        // `created` is non-PK AND `now()` is volatile; step 3 (volatility) runs
+        // before step 3c, so this is the Volatile refusal — either way REFUSED
+        // before rehearsal.
+        assert!(
+            matches!(err, DryRunError::Volatile(_)),
+            "the volatility gate (step 3) fires before the self-determined gate, got {err:?}"
+        );
+        assert!(backend.rehearsed.is_none());
     }
 }
