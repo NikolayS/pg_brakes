@@ -63,10 +63,10 @@ fn it_enabled() -> bool {
 //  port, with a clean teardown. Mirrors the deploy convention (high port, local).
 // =============================================================================
 
-/// A throwaway PG18 instance: its own data dir + a dedicated high port, dropped on
-/// teardown. The bin dir comes from `PG_BUMPERS_PG18_BIN` (then the legacy
-/// `PG_BUMPERS_PG_BINDIR`, then the Homebrew keg path); the port from
-/// `PG_BUMPERS_PRIMARY_PORT` (54360).
+/// A throwaway PG instance: its own data dir + a dedicated high port, dropped on
+/// teardown. The bin dir comes from `PG_BUMPERS_PG_BIN` (then the legacy
+/// `PG_BUMPERS_PG_BINDIR`, then the version-neutral Homebrew keg path); the port
+/// from `PG_BUMPERS_PRIMARY_PORT` (54360). Version-agnostic across PG 14-18.
 struct Pg {
     datadir: PathBuf,
     port: u16,
@@ -74,13 +74,13 @@ struct Pg {
 }
 
 impl Pg {
-    /// The PG18 bin dir, via the ONE shared resolver (issue #44). Precedence
-    /// (unified across every IT): `PG_BUMPERS_PG18_BIN` (non-empty) →
-    /// `PG_BUMPERS_PG_BINDIR` (this crate's legacy var, non-empty) → the Homebrew
-    /// keg path. The precedence — including the set-but-empty fall-through — is
-    /// unit-tested in `pgb-test-support`.
+    /// The PG bin dir, via the ONE shared resolver (issues #44, #102). Precedence
+    /// (unified across every IT): `PG_BUMPERS_PG_BIN` (non-empty) →
+    /// `PG_BUMPERS_PG_BINDIR` (this crate's legacy var, non-empty) → the
+    /// version-neutral Homebrew keg path. The precedence — including the
+    /// set-but-empty fall-through — is unit-tested in `pgb-test-support`.
     fn bindir() -> PathBuf {
-        pgb_test_support::resolve_pg18_bin("PG_BUMPERS_PG_BINDIR")
+        pgb_test_support::resolve_pg_bin("PG_BUMPERS_PG_BINDIR")
     }
 
     fn port() -> u16 {

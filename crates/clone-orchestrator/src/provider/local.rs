@@ -1,10 +1,12 @@
 //! The `local` clone provider — an **isolated `pg_basebackup` clone cluster**
-//! (SPEC §12, the founder-approved local-PG18 stand-in for DBLab; the moat).
+//! (SPEC §12, the founder-approved local-PG stand-in for DBLab; the moat).
+//! Version-agnostic across the supported PG 14-18 range — the bin dir is
+//! configured ([`LocalCloneConfig::pg_bin`]), never pinned to a single major.
 //!
 //! Where the baseline (`none`) rehearses in a rolled-back txn **on the primary**
 //! — holding the primary's locks for the rehearsal's duration (SPEC §12) — this
 //! provider takes a **physical base backup** of the primary into a **separate
-//! PG18 data directory on a dedicated port** and runs the rehearsal *there*. The
+//! PG data directory on a dedicated port** and runs the rehearsal *there*. The
 //! rehearsal therefore has **zero write/lock impact on the primary**: that
 //! isolation is the moat the product sells ("clone rehearsal — pre-flight
 //! blast-radius preview on an isolated clone, zero prod impact", SPEC §12 table).
@@ -86,7 +88,9 @@ impl PrimaryRef {
 /// Configuration for the [`LocalCloneProvider`].
 #[derive(Debug, Clone)]
 pub struct LocalCloneConfig {
-    /// PG18 bin dir holding `pg_basebackup` / `pg_ctl` (`/opt/homebrew/opt/postgresql@18/bin`).
+    /// PG bin dir holding `pg_basebackup` / `pg_ctl` (e.g. the version-neutral
+    /// `/opt/homebrew/opt/postgresql/bin` keg, or `/usr/lib/postgresql/<major>/bin`
+    /// on Debian/Ubuntu). Version-agnostic across the supported PG 14-18 range.
     pub pg_bin: PathBuf,
     /// The git-ignored root under which clone datadirs are created (e.g.
     /// `<repo>/.localstack/clones`). Created `0700`.
@@ -326,7 +330,7 @@ impl CloneProvider for LocalCloneProvider {
 }
 
 /// Read `pg_current_wal_lsn()` from the clone via a one-shot `psql` (from the
-/// configured PG18 bin dir, since `psql` is keg-only / not on PATH here). We
+/// configured PG bin dir, since `psql` is keg-only / not on PATH here). We
 /// avoid adding a runtime `postgres` dep to the library by shelling out for this
 /// single read; failure is non-fatal (the LSN is informational on the handle).
 fn read_clone_lsn(psql: &Path, conn: &str) -> Result<String, CloneError> {

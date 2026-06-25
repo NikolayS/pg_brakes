@@ -42,10 +42,11 @@ IFS=$'\n\t'
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-# PG18 bin dir. Precedence (unified — issue #44): PG_BUMPERS_PG18_BIN → PGBIN
-# (legacy) → the Homebrew keg path (macOS dev fallback).
-PGBIN="${PG_BUMPERS_PG18_BIN:-${PGBIN:-/opt/homebrew/opt/postgresql@18/bin}}"
-# The write-path e2e stands up its OWN throwaway PG18 on this dedicated high port.
+# PG bin dir. Precedence (unified — issues #44, #102): PG_BUMPERS_PG_BIN → PGBIN
+# (legacy) → the version-neutral Homebrew keg path (macOS dev fallback).
+# Version-agnostic across the supported PG 14-18 range.
+PGBIN="${PG_BUMPERS_PG_BIN:-${PGBIN:-/opt/homebrew/opt/postgresql/bin}}"
+# The write-path e2e stands up its OWN throwaway PG on this dedicated high port.
 PORT="${PG_BUMPERS_MARQUEE_PORT:-54341}"
 # The read-path e2e connects to the local-stack primary (a separate high port).
 PRIMARY_PORT="${PG_BUMPERS_PRIMARY_PORT:-54321}"

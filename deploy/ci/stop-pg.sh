@@ -8,7 +8,9 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-PGBIN="${PG_BUMPERS_PG18_BIN:-${PGBIN:-/opt/homebrew/opt/postgresql@18/bin}}"
+# PG bin dir (unified — issues #44, #102): PG_BUMPERS_PG_BIN → PGBIN → the
+# version-neutral Homebrew keg. Version-agnostic across the supported PG 14-18 range.
+PGBIN="${PG_BUMPERS_PG_BIN:-${PGBIN:-/opt/homebrew/opt/postgresql/bin}}"
 
 PORT="${1:?usage: stop-pg.sh <port> [datadir-root]}"
 ROOT="${2:-${PG_BUMPERS_CI_PGROOT:-${TMPDIR:-/tmp}/pgb-ci-pg}}"

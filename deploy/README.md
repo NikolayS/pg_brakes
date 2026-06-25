@@ -31,7 +31,8 @@ and a separate append-only **`_meta`** audit DB (SPEC §4). (Path C — the one-
 
 ## Path A — docker-compose (shipped artifact, for users)
 
-Image: `postgres:18`. Services: `primary` + `meta` (always on), `replica` (profile
+Image: `postgres:${PG_MAJOR:-16}` (any supported major 14–18; override with
+`PG_MAJOR`). Services: `primary` + `meta` (always on), `replica` (profile
 `replica`), `dblab` (profile `dblab`, a documented placeholder — a real Database Lab
 Engine is OPTIONAL per §12 and lands in S2).
 
@@ -85,9 +86,10 @@ Init hooks live in `deploy/init/` and run once on first boot of `primary`
 
 ## Path B — `local-stack.sh` (live dev/CI substrate here)
 
-Uses the keg-only Homebrew Postgres 18 binaries
-(`/opt/homebrew/opt/postgresql@18/bin`; override with the unified
-`PG_BUMPERS_PG18_BIN=` — the variable CI sets — or the legacy `PGBIN=`). Brings up isolated,
+Uses the keg-only Homebrew Postgres binaries (any supported major, 14–18; the
+version-neutral `/opt/homebrew/opt/postgresql/bin` by default — override with the
+unified `PG_BUMPERS_PG_BIN=` the variable CI sets per-major, or the legacy
+`PGBIN=`). Brings up isolated,
 throwaway clusters under a git-ignored `./.localstack/` dir, on **dedicated high
 ports** that never touch any cluster already running on 5432.
 
@@ -251,7 +253,7 @@ bash deploy/smoke.sh
 
 The smoke harness targets the **Path B** ports by default; override via
 `PG_BUMPERS_PRIMARY_PORT` / `PG_BUMPERS_REPLICA_PORT` / `PG_BUMPERS_META_PORT` (and the
-bin dir with the unified `PG_BUMPERS_PG18_BIN` — the one variable CI sets, taking
+bin dir with the unified `PG_BUMPERS_PG_BIN` — the one variable CI sets, taking
 precedence over the legacy `PGBIN`) to point it at any equivalent stack.
 
 ---

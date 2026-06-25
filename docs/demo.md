@@ -19,11 +19,12 @@ against the **real code in this tree**. It is honest about status:
 | **S5** | deterministic benchmark · marquee MCP-bypass repro | upcoming / fast-follow |
 | — | LLM risk-gating engine | upcoming (the MVP `RiskEngine` is a **stub returning `Allow`**) |
 
-> **Substrate.** Live tests run against **local Postgres 18** (Homebrew
-> `postgresql@18`: `initdb` / `pg_basebackup` / `pg_ctl`), the founder-approved
-> docker→local-PG18 pivot. The shipped `deploy/docker-compose.yml` is bumped to
-> `postgres:18` and kept as the user-facing artifact. See
-> [`docs/spec/SPEC.amendments.md`](spec/SPEC.amendments.md).
+> **Substrate.** Live tests run against **local Postgres** (any supported major,
+> **14–18**; spec v0.8.1 §0.5) via Homebrew kegs (`initdb` / `pg_basebackup` /
+> `pg_ctl`), the founder-approved docker→local-PG pivot. The shipped
+> `deploy/docker-compose.yml` parameterizes the image as `postgres:${PG_MAJOR:-16}`
+> and is kept as the user-facing artifact; the CI matrix exercises all five majors.
+> See [`docs/spec/SPEC.amendments.md`](spec/SPEC.amendments.md).
 
 Source of truth: [`docs/spec/SPEC.md`](spec/SPEC.md) (v0.8).
 

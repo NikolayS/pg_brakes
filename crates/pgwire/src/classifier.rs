@@ -190,6 +190,21 @@ fn is_read_statement(stmt: &Statement) -> bool {
 /// (e.g. `COSTS false`, `BUFFERS true`, `FORMAT json`) does not change whether the
 /// name is plan-only, so it is not consulted — an allowlisted name with any arg
 /// stays plan-only, and a non-allowlisted name is not-read regardless of arg.
+///
+/// VERSION DEGRADE — FAIL-CLOSED ACROSS PG 14-18 (C1 #102, spec v0.8.1 §0.5):
+/// some allowlisted option names were INTRODUCED in a specific major —
+/// `GENERIC_PLAN` is **16+** and `MEMORY` is **17+** (`SERIALIZE` is 17+ too, and
+/// is deliberately EXCLUDED here regardless). This classifier is purely about
+/// *plan-only-ness*; it never gates on PG version, so an agent's
+/// `EXPLAIN (GENERIC_PLAN) …` is classified read on any major. The version
+/// degrade is handled **downstream and fail-closed**: the EXPLAIN-cost gate
+/// (`pgb-proxy`'s `explain.rs`) runs the `EXPLAIN (…)` on the *real backend*, so a
+/// PG 14/15 backend that doesn't know `GENERIC_PLAN` (or a PG ≤16 that doesn't
+/// know `MEMORY`) returns an ERROR and the gate **blocks the statement** (it
+/// refuses anything whose EXPLAIN it cannot prove is under the ceiling). So a
+/// version-specific option on an older backend degrades to a *deny*, never a
+/// silent execute — the supported-range posture stays least-privilege with no
+/// per-version branching here.
 const EXPLAIN_PLAN_ONLY_OPTIONS: &[&str] = &[
     "FORMAT",
     "VERBOSE",

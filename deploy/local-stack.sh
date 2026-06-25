@@ -29,10 +29,11 @@ IFS=$'\n\t'
 # --------------------------------------------------------------------------------------
 # Configuration
 # --------------------------------------------------------------------------------------
-# PG18 bin dir. Precedence (unified across every IT/CI — issue #44):
-# PG_BUMPERS_PG18_BIN (the ONE cross-IT/CI var) → PGBIN (legacy, local
-# back-compat) → the Homebrew keg path (macOS dev fallback).
-PGBIN="${PG_BUMPERS_PG18_BIN:-${PGBIN:-/opt/homebrew/opt/postgresql@18/bin}}"
+# PG bin dir. Precedence (unified across every IT/CI — issues #44, #102):
+# PG_BUMPERS_PG_BIN (the ONE cross-IT/CI var, per-major in the matrix) → PGBIN
+# (legacy, local back-compat) → the version-neutral Homebrew keg path (macOS dev
+# fallback). Version-agnostic across the supported PG 14-18 range.
+PGBIN="${PG_BUMPERS_PG_BIN:-${PGBIN:-/opt/homebrew/opt/postgresql/bin}}"
 
 # Repo root = parent of this script's dir, so paths work from any cwd. The
 # ${BASH_SOURCE[0]:-$0} fallback keeps this robust under `set -u` when the file is sourced

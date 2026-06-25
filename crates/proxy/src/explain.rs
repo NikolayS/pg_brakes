@@ -24,6 +24,19 @@
 //! permission error, a backend error) or its output can't be parsed into an
 //! estimate, the statement is **blocked** — the gate refuses anything it cannot
 //! prove is under the ceiling, exactly like the read-only classifier.
+//!
+//! ## Version degrade across PG 14-18 (fail-closed)
+//!
+//! This gate runs the agent's `EXPLAIN (…)` on the **real backend**, so it is
+//! transparently version-agnostic across the supported PG 14-18 range (C1 #102,
+//! spec v0.8.1 §0.5) — *and* it makes version-specific EXPLAIN options degrade
+//! **fail-closed**. Some plan-only options the classifier allowlists are
+//! major-gated: `GENERIC_PLAN` is **16+**, `MEMORY` is **17+** (`SERIALIZE` is
+//! 17+ and excluded anyway). When an agent sends such an option to an OLDER
+//! backend that doesn't recognize it (e.g. `EXPLAIN (GENERIC_PLAN) …` to PG 14),
+//! the backend returns an ERROR — and because this gate treats any EXPLAIN error
+//! as a **block**, the statement is denied rather than silently executed. So the
+//! degrade is to least-privilege, with no per-version branching in the proxy.
 
 use pgb_policy::RoleBudget;
 

@@ -7,10 +7,12 @@ lifecycle. This is the engineering process; the **product** spec is
 in [`CLAUDE.md`](../CLAUDE.md). When this guide and `CLAUDE.md` disagree, `CLAUDE.md`
 wins; when either disagrees with `SPEC.md` on product behavior, the SPEC wins.
 
-> **Substrate note.** Live DB tests run against **local Postgres 18** (Homebrew
-> `postgresql@18`: `initdb` / `pg_basebackup` / `pg_ctl`), not Docker. This is the
-> founder-approved docker→local-PG18 pivot; `deploy/docker-compose.yml` remains the
-> shipped artifact for users. Full rationale: [`docs/spec/SPEC.amendments.md`](spec/SPEC.amendments.md),
+> **Substrate note.** Live DB tests run against **local Postgres** (any supported
+> major, **14–18**; spec v0.8.1 §0.5) via Homebrew kegs (`initdb` /
+> `pg_basebackup` / `pg_ctl`), not Docker. This is the founder-approved
+> docker→local-PG pivot; `deploy/docker-compose.yml` remains the shipped artifact
+> for users. The CI integration matrix runs the full safety suite against all five
+> majors. Full rationale: [`docs/spec/SPEC.amendments.md`](spec/SPEC.amendments.md),
 > "S0 integration substrate".
 
 ---
@@ -210,9 +212,10 @@ PG_BUMPERS_IT=1 deploy/smoke.sh
 deploy/local-stack.sh down    # stop all clusters, remove ./.localstack/
 ```
 
-The PG18 bin dir defaults to `/opt/homebrew/opt/postgresql@18/bin`; override with
-the unified **`PG_BUMPERS_PG18_BIN`** (honored by every shell script *and* every
-Rust IT — the one variable CI sets), or the legacy per-context vars `PGBIN`
+The PG bin dir defaults to the version-neutral keg `/opt/homebrew/opt/postgresql/bin`
+(any supported major, 14–18); override with the unified **`PG_BUMPERS_PG_BIN`**
+(honored by every shell script *and* every Rust IT — the one variable CI sets
+per-major in the matrix), or the legacy per-context vars `PGBIN`
 (shell scripts) / `PG_BUMPERS_PGBIN` / `PG_BUMPERS_PG_BINDIR` (Rust ITs), which
 still work for local dev. The dry-run IT defaults
 its admin DSN to a dedicated throwaway port (`54341`) and the audit/fidelity ITs

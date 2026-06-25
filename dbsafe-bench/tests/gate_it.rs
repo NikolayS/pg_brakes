@@ -35,13 +35,13 @@ fn it_enabled() -> bool {
     std::env::var(IT_ENV).map(|v| v == "1").unwrap_or(false)
 }
 
-/// The PG18 bin dir, via the ONE shared resolver (issue #44). Precedence
-/// (unified across every IT): `PG_BUMPERS_PG18_BIN` (non-empty) →
-/// `PG_BUMPERS_PGBIN` (legacy, non-empty) → the Homebrew keg path. The precedence
-/// — including the set-but-empty fall-through — is unit-tested in `pgb-test-support`
-/// against this exact function.
+/// The PG bin dir, via the ONE shared resolver (issues #44, #102). Precedence
+/// (unified across every IT): `PG_BUMPERS_PG_BIN` (non-empty) →
+/// `PG_BUMPERS_PGBIN` (legacy, non-empty) → the version-neutral Homebrew keg path.
+/// The precedence — including the set-but-empty fall-through — is unit-tested in
+/// `pgb-test-support` against this exact function. Version-agnostic across PG 14-18.
 fn pg_bin() -> PathBuf {
-    pgb_test_support::resolve_pg18_bin("PG_BUMPERS_PGBIN")
+    pgb_test_support::resolve_pg_bin("PG_BUMPERS_PGBIN")
 }
 
 fn tool(name: &str) -> PathBuf {
