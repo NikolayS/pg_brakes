@@ -159,8 +159,19 @@ fn provision_applier(admin_url: &str, over_grant: bool) {
     // DML-only on the app table; USAGE on the schema; NO CREATE on public (the
     // structural DDL denial). Ownership stays with the seeding superuser, so the
     // applier can mutate ROWS but cannot ALTER/DROP the table.
+    //
+    // VERSION-AGNOSTIC (C1 #102, spec v0.8.1 §0.5 — supported PG 14-18): we MUST
+    // also `REVOKE CREATE ON SCHEMA public FROM PUBLIC`, exactly as the production
+    // deploy/sql/10_hardened_role.sql does. On **PG 15+** PUBLIC already lacks
+    // CREATE on `public` by default, so revoking only the role's direct grant is
+    // enough; but on **PG 14** PUBLIC RETAINS CREATE on `public`, so `pgb_applier`
+    // would inherit it via PUBLIC and `CREATE TABLE` would SUCCEED — breaking the
+    // DML-only DDL-denial assertion below. Re-asserting the PUBLIC revoke makes the
+    // role hardening match the real WALL on every supported major (a no-op on 15+,
+    // the actual denial on 14).
     c.batch_execute(
-        "REVOKE CREATE ON SCHEMA public FROM pgb_applier;\n\
+        "REVOKE CREATE ON SCHEMA public FROM PUBLIC;\n\
+         REVOKE CREATE ON SCHEMA public FROM pgb_applier;\n\
          GRANT USAGE ON SCHEMA public TO pgb_applier;\n\
          GRANT SELECT, INSERT, UPDATE, DELETE ON public.accounts TO pgb_applier;",
     )
