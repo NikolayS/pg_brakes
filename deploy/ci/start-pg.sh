@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# pg_bumpers — CI helper: start a THROWAWAY plain PG18 admin cluster on a
+# pg_bumpers — CI helper: start a THROWAWAY plain Postgres admin cluster on a
 # dedicated high port (issue #44 — the CI integration job).
 #
 # Several env-gated Rust ITs do NOT self-provision; they connect to an
@@ -21,13 +21,14 @@
 # Usage:  deploy/ci/start-pg.sh <port> [datadir-root]
 #         deploy/ci/stop-pg.sh  <port> [datadir-root]
 #
-# PG18 bin dir precedence (unified — issue #44):
-#   PG_BUMPERS_PG18_BIN → PGBIN → the Homebrew keg path (macOS dev fallback).
+# PG bin dir precedence (unified — issues #44, #102):
+#   PG_BUMPERS_PG_BIN → PGBIN → the version-neutral Homebrew keg path (macOS dev
+#   fallback). Version-agnostic across the supported PG 14-18 range.
 
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-PGBIN="${PG_BUMPERS_PG18_BIN:-${PGBIN:-/opt/homebrew/opt/postgresql@18/bin}}"
+PGBIN="${PG_BUMPERS_PG_BIN:-${PGBIN:-/opt/homebrew/opt/postgresql/bin}}"
 
 PORT="${1:?usage: start-pg.sh <port> [datadir-root]}"
 ROOT="${2:-${PG_BUMPERS_CI_PGROOT:-${TMPDIR:-/tmp}/pgb-ci-pg}}"
@@ -39,7 +40,7 @@ SOCKDIR="$ROOT/sock-$PORT"
 LOGFILE="$ROOT/pg-$PORT.log"
 
 for b in initdb pg_ctl psql pg_isready; do
-  [ -x "$PGBIN/$b" ] || { echo "[start-pg] missing $PGBIN/$b — set PG_BUMPERS_PG18_BIN" >&2; exit 1; }
+  [ -x "$PGBIN/$b" ] || { echo "[start-pg] missing $PGBIN/$b — set PG_BUMPERS_PG_BIN" >&2; exit 1; }
 done
 
 echo "[start-pg] port=$PORT datadir=$DATADIR bin=$PGBIN"
@@ -74,6 +75,6 @@ for _ in $(seq 1 60); do
   sleep 0.5
 done
 
-echo "[start-pg] PG18 did not become ready on :$PORT — log tail:" >&2
+echo "[start-pg] Postgres did not become ready on :$PORT — log tail:" >&2
 tail -n 40 "$LOGFILE" >&2 || true
 exit 1

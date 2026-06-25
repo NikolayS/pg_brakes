@@ -1,5 +1,6 @@
-//! Real-PG18 integration tests for `pgb-applyd` (issue #67, S5). Env-gated behind
-//! `PG_BUMPERS_IT=1`; runs against a throwaway PG18 on a dedicated high port
+//! Real-Postgres integration tests for `pgb-applyd` (issue #67, S5). Env-gated behind
+//! `PG_BUMPERS_IT=1`; runs against a throwaway Postgres (any supported major, 14-18)
+//! on a dedicated high port
 //! (⚠️ NEVER 5432). Run:
 //!
 //! ```sh
@@ -8,7 +9,7 @@
 //!
 //! Two layers are exercised:
 //!
-//! 1. **the Service over a real `postgres::Client` + seeded PG18** — the
+//! 1. **the Service over a real `postgres::Client` + seeded Postgres** — the
 //!    `propose → dry_run → (operator) approve → apply` lifecycle runs
 //!    `guarded_apply_with_grant`, COMMITS a bounded UPDATE, and a REVERT via the
 //!    captured typed-inverse **restores the pre-state byte-for-byte** (we assert
@@ -22,7 +23,7 @@
 //!    which drives the same binary end-to-end).
 //!
 //! The §4 guards + the grant crypto are REUSED; this asserts the daemon's wiring
-//! + the bounded/reversible/fail-closed guarantees end-to-end on real PG18.
+//! + the bounded/reversible/fail-closed guarantees end-to-end on the live backend.
 
 use std::collections::BTreeMap;
 
@@ -159,8 +160,19 @@ fn provision_applier(admin_url: &str, over_grant: bool) {
     // DML-only on the app table; USAGE on the schema; NO CREATE on public (the
     // structural DDL denial). Ownership stays with the seeding superuser, so the
     // applier can mutate ROWS but cannot ALTER/DROP the table.
+    //
+    // VERSION-AGNOSTIC (C1 #102, spec v0.8.1 §0.5 — supported PG 14-18): we MUST
+    // also `REVOKE CREATE ON SCHEMA public FROM PUBLIC`, exactly as the production
+    // deploy/sql/10_hardened_role.sql does. On **PG 15+** PUBLIC already lacks
+    // CREATE on `public` by default, so revoking only the role's direct grant is
+    // enough; but on **PG 14** PUBLIC RETAINS CREATE on `public`, so `pgb_applier`
+    // would inherit it via PUBLIC and `CREATE TABLE` would SUCCEED — breaking the
+    // DML-only DDL-denial assertion below. Re-asserting the PUBLIC revoke makes the
+    // role hardening match the real WALL on every supported major (a no-op on 15+,
+    // the actual denial on 14).
     c.batch_execute(
-        "REVOKE CREATE ON SCHEMA public FROM pgb_applier;\n\
+        "REVOKE CREATE ON SCHEMA public FROM PUBLIC;\n\
+         REVOKE CREATE ON SCHEMA public FROM pgb_applier;\n\
          GRANT USAGE ON SCHEMA public TO pgb_applier;\n\
          GRANT SELECT, INSERT, UPDATE, DELETE ON public.accounts TO pgb_applier;",
     )
@@ -227,7 +239,7 @@ fn service(vk: VerifyingKey) -> Svc {
     Service::new(flow, sink, InMemoryNonceStore::new(), vk, policy())
 }
 
-/// Run propose → dry_run → request_elevation → approve over real PG18, returning
+/// Run propose → dry_run → request_elevation → approve over the live backend, returning
 /// `(proposal_id, total_rows, confirm_token)`.
 fn approve_through(
     svc: &mut Svc,
@@ -297,7 +309,7 @@ fn lifecycle_apply_commits_bounded_update_and_revert_restores_prestate() {
             &NoopBarrier::new(),
             &clock,
         )
-        .expect("the grant-gated apply must commit on real PG18")
+        .expect("the grant-gated apply must commit on the live backend")
     };
     assert!(res.applied);
     assert_eq!(res.rows_written, 4);

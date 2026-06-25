@@ -65,14 +65,14 @@ pgb-audit = { path = "../audit", features = ["pg"] }
 rmcp = { version = "1.7", features = ["client"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-util", "net"] }
 # The env-gated e2e spawns the REAL pgb-proxy in-process (TLS + SCRAM) in front
-# of live PG18 and drives the read tools THROUGH it. Reuses the proxy's own
+# of the live backend and drives the read tools THROUGH it. Reuses the proxy's own
 # integration harness deps (all cargo-deny-approved permissive licenses).
 pgb-proxy = { path = "../proxy" }
 # `pgb-policy` is a main dependency (intent capture + the RiskEngine stub); the
 # e2e tests reuse it for the budget/policy fixtures too.
 pgb-core = { path = "../core" }
 # The env-gated write-path e2e spawns the REAL pgb-applyd binary (Unix socket) in
-# front of live PG18 and drives the write tools THROUGH it. The dep makes cargo
+# front of the live backend and drives the write tools THROUGH it. The dep makes cargo
 # build the binary + set CARGO_BIN_EXE_pgb-applyd for the test to exec.
 pgb-applyd = { path = "../applyd" }
 postgres = "0.19"
@@ -84,7 +84,7 @@ rcgen = { version = "0.13", default-features = false, features = ["ring", "pem"]
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 rand_core = { version = "0.6", features = ["getrandom"] }
 hex = "0.4"
-# The ONE shared PG18 bin-dir resolver every env-gated IT calls (issue #44), so
-# the `PG_BUMPERS_PG18_BIN → PG_BUMPERS_PG_BINDIR → Homebrew` precedence lives + is
+# The ONE shared PG bin-dir resolver every env-gated IT calls (issue #44), so
+# the `PG_BUMPERS_PG_BIN → PG_BUMPERS_PG_BINDIR → Homebrew` precedence lives + is
 # unit-tested in exactly one place (no per-resolver drift).
 pgb-test-support = { path = "../test-support" }

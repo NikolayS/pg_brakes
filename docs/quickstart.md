@@ -1,7 +1,8 @@
 # pg_bumpers — Quickstart
 
 Get a local checkout building, bring up the dev substrate, and run the env-gated
-integration suite against **real PostgreSQL 18**.
+integration suite against **real PostgreSQL** — any supported major (**14–18**;
+spec v0.8.1 §0.5). CI runs the full safety suite against every major in that range.
 
 > **Source of truth:** [`docs/spec/SPEC.md`](spec/SPEC.md) (v0.8). The dev-substrate
 > deviation (docker → local PG 18) is logged in
@@ -37,22 +38,27 @@ This is an MVP under active construction. Honest status as of this writing:
 | Tool | Version | Notes |
 |------|---------|-------|
 | Rust | **1.90.0** | Pinned by [`rust-toolchain.toml`](../rust-toolchain.toml) (rustfmt + clippy). `rustup` auto-selects it. |
-| PostgreSQL | **18** | Client + server binaries (`initdb`, `pg_ctl`, `pg_basebackup`, `psql`, `pg_isready`). |
+| PostgreSQL | **14–18** | Client + server binaries (`initdb`, `pg_ctl`, `pg_basebackup`, `psql`, `pg_isready`). |
 | `cargo-deny` | latest | License/advisory gate: `cargo install cargo-deny`. |
 
-### Install PostgreSQL 18 (macOS, Homebrew)
+### Install PostgreSQL 14–18 (macOS, Homebrew)
 
-`postgresql@18` is **keg-only**, so its binaries are not symlinked onto `PATH`. They
-live at `/opt/homebrew/opt/postgresql@18/bin` — the path every dev script defaults to
-(override with the unified `PG_BUMPERS_PG18_BIN` — the one variable CI sets, honored by
-every shell script *and* every Rust IT and taking precedence over the legacy `PGBIN=` /
-`PG_BUMPERS_PGBIN=`).
+Any supported major (14, 15, 16, 17, 18) works — the proxy and the native-role WALL are
+version-agnostic (spec v0.8.1 §0.5). Homebrew kegs are **keg-only**, so their binaries
+are not symlinked onto `PATH`. The dev scripts default to the **version-neutral**
+`postgresql` keg at `/opt/homebrew/opt/postgresql/bin`; override with the unified
+`PG_BUMPERS_PG_BIN` (the one variable CI sets per-major in the matrix, honored by every
+shell script *and* every Rust IT and taking precedence over the legacy `PGBIN=` /
+`PG_BUMPERS_PGBIN=`) to point at a specific major's keg.
 
 ```sh
-brew install postgresql@18
+brew install postgresql          # latest stable; or `postgresql@17`, `postgresql@16`, …
 
-# Verify the keg-only binaries are present (this is the path the scripts use):
-/opt/homebrew/opt/postgresql@18/bin/pg_ctl --version     # -> pg_ctl (PostgreSQL) 18.x
+# Verify the keg-only binaries are present (this is the path the scripts default to):
+/opt/homebrew/opt/postgresql/bin/pg_ctl --version        # -> pg_ctl (PostgreSQL) 1x.y
+
+# To pin a specific major for the scripts/ITs:
+#   export PG_BUMPERS_PG_BIN=/opt/homebrew/opt/postgresql@17/bin
 ```
 
 > You do **not** need to start a system Postgres service or add it to `PATH`. The dev
@@ -85,8 +91,9 @@ the build is Rust-only).
 
 ## 3. The local dev stack
 
-`deploy/local-stack.sh` is the **live dev/CI substrate** here: isolated, throwaway PG 18
-clusters under a git-ignored `./.localstack/`, built from the keg-only Homebrew binaries
+`deploy/local-stack.sh` is the **live dev/CI substrate** here: isolated, throwaway PG
+clusters (any supported major, 14–18) under a git-ignored `./.localstack/`, built from
+the keg-only Homebrew binaries
 (no Docker). It models the same shape as the shipped compose: a streaming-replication
 **primary**, a streaming **replica**, and a separate append-only **`_meta`** audit DB.
 
@@ -108,14 +115,14 @@ against the primary on every run.
 | meta    | **54323** | separate cluster hosting the append-only `_meta` audit DB (§4) |
 
 Override per-cluster with `PG_BUMPERS_PRIMARY_PORT` / `PG_BUMPERS_REPLICA_PORT` /
-`PG_BUMPERS_META_PORT`, the bin dir with the unified `PG_BUMPERS_PG18_BIN` (the one
+`PG_BUMPERS_META_PORT`, the bin dir with the unified `PG_BUMPERS_PG_BIN` (the one
 variable CI sets, taking precedence over the legacy `PGBIN`), and the data dir with
 `PG_BUMPERS_LOCALSTACK_DIR`.
 
 Connect (trust auth, loopback only — throwaway dev clusters; `-X` bypasses your `~/.psqlrc`):
 
 ```sh
-PGBIN=/opt/homebrew/opt/postgresql@18/bin
+PGBIN=/opt/homebrew/opt/postgresql/bin   # version-neutral keg; or a pinned @NN keg
 $PGBIN/psql -X "host=localhost port=54321 user=postgres dbname=postgres"   # primary
 $PGBIN/psql -X "host=localhost port=54322 user=postgres dbname=postgres"   # replica (read-only)
 $PGBIN/psql -X "host=localhost port=54323 user=postgres dbname=_meta"      # meta / audit
@@ -135,7 +142,7 @@ Integration tests are gated by **`PG_BUMPERS_IT`** so the default `cargo test` a
 stay fast and DB-free:
 
 - `PG_BUMPERS_IT` unset / `!= 1` → integration assertions **skip** (exit 0).
-- `PG_BUMPERS_IT=1` → they **run for real** against a live PG 18 stack.
+- `PG_BUMPERS_IT=1` → they **run for real** against a live PG stack (any supported major, 14–18).
 
 > **DSN defaults differ by suite.** Some suites default to the local-stack primary
 > (`54321`); others default to a *dedicated* throwaway port (e.g. dry-run `54341`,
@@ -174,14 +181,14 @@ bash deploy/smoke.sh
 ### 4b. The WALL matrix — `deploy/test/wall_matrix.sh`
 
 The role-hardening test matrix (SPEC §3 layers 0–1). It spins its **own** dedicated
-throwaway PG 18 cluster on **54331** (you do *not* need `local-stack` up for this one),
+throwaway PG cluster (any supported major, 14-18) on **54331** (you do *not* need `local-stack` up for this one),
 applies the hardened-role SQL + the Layer 0 boundary `pg_hba`, then asserts one row per
 matrix item by **attempting each denied action as the `pgb_agent` role and proving it
 fails with a permission error** (plus: whitelisted SELECT succeeds, member-of-nothing,
 boundary refused/allowed).
 
 ```sh
-# GREEN — every matrix row passes against real PG18 (exit 0):
+# GREEN — every matrix row passes against the real PG (any supported major, exit 0):
 PG_BUMPERS_IT=1 deploy/test/wall_matrix.sh
 
 # RED — an UN-hardened role CAN do denied things; assertions fail (exit non-0):
@@ -191,10 +198,10 @@ PG_BUMPERS_IT=1 deploy/test/wall_matrix.sh --red
 deploy/test/wall_matrix.sh
 ```
 
-### 4c. Crate integration suites (against PG 18)
+### 4c. Crate integration suites (against PG 14–18)
 
 ```sh
-# Proxy end-to-end against PG18 (TLS + SCRAM, WALL role, byte/row cutoff,
+# Proxy end-to-end against the live PG (TLS + SCRAM, WALL role, byte/row cutoff,
 # statement-stacking block, read-only gate). Default admin DSN: 54321 (local-stack primary).
 PG_BUMPERS_IT=1 cargo test -p pgb-proxy --test proxy_it -- --nocapture
 #   override: PG_BUMPERS_PROXY_PGURL="host=127.0.0.1 port=54321 user=postgres dbname=postgres"
@@ -206,18 +213,19 @@ PG_BUMPERS_IT=1 cargo test -p pgb-clone-orchestrator --test dry_run_it -- --noca
 #   override: PG_BUMPERS_PGURL="host=127.0.0.1 port=54321 user=postgres dbname=postgres"
 ```
 
-The **clone-governance** suite is self-contained — it spins its *own* throwaway PG 18
+The **clone-governance** suite is self-contained — it spins its *own* throwaway PG
 clusters (primary on `54360 + offset`, clone on `54370 + offset`) via
-`PG_BUMPERS_PG18_BIN` (or the legacy `PG_BUMPERS_PGBIN`; both default to the keg
-path), so `local-stack` does not need to be up:
+`PG_BUMPERS_PG_BIN` (or the legacy `PG_BUMPERS_PGBIN`; both default to the
+version-neutral keg path), so `local-stack` does not need to be up:
 
 ```sh
 PG_BUMPERS_IT=1 cargo test -p pgb-clone-orchestrator --test clone_governance_it -- --nocapture
 ```
 
 The **`_meta` audit sink** suite (`pgb-audit`, default feature `pg`) needs an
-admin/superuser PG 18 cluster; it creates fresh databases via `CREATE DATABASE`. Its
-default DSN is `127.0.0.1:55432`, so point it at the local-stack primary (or any PG 18):
+admin/superuser PG cluster (any supported major); it creates fresh databases via
+`CREATE DATABASE`. Its default DSN is `127.0.0.1:55432`, so point it at the local-stack
+primary (or any supported PG):
 
 ```sh
 PG_BUMPERS_AUDIT_PGURL="host=127.0.0.1 port=54321 user=postgres dbname=postgres" \
@@ -245,8 +253,9 @@ PG_BUMPERS_PGURL="host=127.0.0.1 port=54321 user=postgres dbname=postgres" \
 
 ## 5. The shipped artifact — docker-compose
 
-`deploy/docker-compose.yml` (image `postgres:18`) is the **shipped artifact** for real
-users and for CI on a docker-healthy machine: `primary` + `meta` always on, `replica`
+`deploy/docker-compose.yml` (image `postgres:${PG_MAJOR:-16}`, any supported major
+14–18) is the **shipped artifact** for real users and for CI on a docker-healthy
+machine: `primary` + `meta` always on, `replica`
 behind the `replica` profile, `dblab` behind the `dblab` profile (a documented
 placeholder; a real Database Lab Engine is OPTIONAL per §12). The
 hardened-role WALL SQL drops in via `deploy/init/` on first boot.

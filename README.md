@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/NikolayS/pg_bumpers/actions/workflows/ci.yml/badge.svg)](https://github.com/NikolayS/pg_bumpers/actions/workflows/ci.yml)
 ![license](https://img.shields.io/badge/license-Apache--2.0-3ddc97)
-![status](https://img.shields.io/badge/status-MVP%20·%20runnable%20on%20PG18-3ddc97)
+![postgres](https://img.shields.io/badge/PostgreSQL-14--18-3ddc97)
 
 **A self-hostable control plane that lets AI agents read and write your
 _production_ Postgres — safely.** Your agent connects through a proxy and gets a
@@ -58,7 +58,8 @@ gate is a stub that returns `Allow` — the floor is doing all the work.
 ## Try it in ~5 minutes
 
 This walkthrough is the real flow, captured from an actual run on a throwaway
-PostgreSQL 18. It launches the full stack, prints a `claude mcp add` line you
+PostgreSQL (any supported major, 14–18). It launches the full stack, prints a
+`claude mcp add` line you
 paste into Claude Code, and lets you watch a `DROP TABLE` get refused and a
 bounded write get approved.
 
@@ -73,11 +74,15 @@ bounded write get approved.
 ### 1. Prerequisites
 
 - **Rust 1.90** (pinned by `rust-toolchain.toml`)
-- **PostgreSQL 18** — on macOS, the Homebrew keg `postgresql@18` (the launcher
-  uses `initdb` / `pg_ctl` from `/opt/homebrew/opt/postgresql@18/bin`):
+- **PostgreSQL 14–18** (any supported major — the proxy + WALL are
+  version-agnostic). On macOS, a Homebrew keg works; the launcher resolves
+  `initdb` / `pg_ctl` from the version-neutral `postgresql` keg by default, or
+  set `PG_BUMPERS_PG_BIN` to a specific keg's `bin`:
   ```sh
-  brew install postgresql@18
-  export PATH="/opt/homebrew/opt/postgresql@18/bin:$PATH"
+  brew install postgresql          # latest stable, or `postgresql@17` etc.
+  export PATH="/opt/homebrew/opt/postgresql/bin:$PATH"
+  # To pin a specific major for the launcher/ITs:
+  #   export PG_BUMPERS_PG_BIN=/opt/homebrew/opt/postgresql@17/bin
   ```
 - **[Claude Code](https://claude.com/claude-code)** (the agent you'll connect)
 
@@ -101,18 +106,18 @@ cargo build --locked -p pgb-proxy -p pgb-applyd -p pgb-warden -p pgb-cli -p pgb-
 bash deploy/up.sh          # add --no-build if you built in step 2
 ```
 
-It brings up a hardened throwaway PG18, launches the proxy + write-path daemon +
+It brings up a hardened throwaway Postgres, launches the proxy + write-path daemon +
 warden, and prints a ready-to-paste connect line. Real output:
 
 ```text
 ================================================================================
- pg_bumpers stack is UP. Reads route through pgb-proxy (NOT raw PG18). :5432 untouched.
+ pg_bumpers stack is UP. Reads route through pgb-proxy (NOT raw Postgres). :5432 untouched.
 ================================================================================
 
   pgb-proxy  : 127.0.0.1:6432   (agent SCRAM endpoint, TLS OFF dev-mode, WALL role pgb_agent)
   pgb-applyd : /tmp/pg_bumpers-up/applyd.sock        (write-path Unix socket)
   pgb-warden : live
-  PG18       : primary 54321, meta 54323  (throwaway; NEVER 5432)
+  Postgres   : primary 54321, meta 54323  (throwaway; NEVER 5432)
   demo DB    : pgb_demo  (accounts read surface + the _meta audit chain)
 
   Connect a REAL Claude Code to this stack — paste this single line:
@@ -241,7 +246,7 @@ Stops the three daemons, drops the throwaway clusters, frees the high ports, and
 verifies `:5432` was never touched.
 
 > The same end-to-end flow runs as env-gated Rust integration tests against a
-> throwaway PG18:
+> throwaway Postgres:
 > `PG_BUMPERS_IT=1 cargo test -p pgb-mcp --test write_path_e2e --test read_path_e2e`
 > drives the shipped `pgb-mcp` handler through the write path (via `pgb-applyd`)
 > and the read path (via `pgb-proxy`) — see
@@ -265,7 +270,9 @@ Full write-up: [`docs/architecture.md`](docs/architecture.md). Product spec:
 
 ## Status & scope
 
-This is an **MVP**, runnable today on PostgreSQL 18.
+This is an **MVP**. Supported PostgreSQL: **14, 15, 16, 17, 18** — the wire proxy
+and the native-role WALL are version-agnostic, and the CI matrix runs the full
+safety integration suite against every major in that range (spec v0.8.1 §0.5).
 
 - **Works now:** the native-role WALL + proxy-only network path; the enforcing
   proxy (read-only, byte/row cutoff, `statement_timeout`, anti-statement-stacking,

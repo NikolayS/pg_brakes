@@ -57,7 +57,7 @@ jobs:
 
       # local-stack.sh PATH/PID guard unit tests (issue #16). Pure path/PID logic —
       # NO PostgreSQL required and nothing real is ever started or killed — so it runs in
-      # this FAST gate (not the PG18 integration job). bash -n first as a syntax gate.
+      # this FAST gate (not the integration matrix job). bash -n first as a syntax gate.
       # No untrusted GitHub-event input is used; both commands are static.
       - name: deploy guard tests — local-stack.sh validate_root / pid_is_ours
         run: |
@@ -82,11 +82,15 @@ jobs:
   # server was removed with that tree in EPIC #83; no replacement step is needed.
 
   # ===========================================================================
-  # THE SAFETY INTEGRATION JOB (issue #44) — runs the REAL deterministic-floor
-  # ITs against a REAL PostgreSQL 18 on EVERY push/PR. These tests are env-gated
-  # behind PG_BUMPERS_IT=1 and need a live PG18, so the fast `rust` job above
-  # (which NEVER sets PG_BUMPERS_IT) skips them. A regression that breaks the
-  # moat would otherwise leave CI green — this job is the backstop.
+  # THE SAFETY INTEGRATION MATRIX (issues #44, #102) — runs the REAL
+  # deterministic-floor ITs against a REAL PostgreSQL on EVERY push/PR, across
+  # the FULL supported range PG 14·15·16·17·18 (spec v0.8.1 §0.5: "Supported
+  # PostgreSQL: 14, 15, 16, 17, 18 … do NOT pin to 18 … the wire proxy + role
+  # wall are version-agnostic; CI matrix tests against this range"). These tests
+  # are env-gated behind PG_BUMPERS_IT=1 and need a live PG, so the fast `rust`
+  # job above (which NEVER sets PG_BUMPERS_IT) skips them. A regression that
+  # breaks the moat — OR a version-pin that breaks an older major — would
+  # otherwise leave CI green; this matrix is the backstop on EVERY supported PG.
   #
   # ⚠️ Throwaway clusters ONLY, on dedicated HIGH ports (54321/54341/54355/
   # 55431/55432/543xx). NEVER :5432.
@@ -101,24 +105,39 @@ jobs:
   #   • PROXY / READ-PATH ITs need the native-role WALL → deploy/local-stack.sh.
   # ===========================================================================
   integration:
-    name: Integration (real PG18 — the safety ITs)
+    name: Integration (PG ${{ matrix.pg }} — the safety ITs)
     runs-on: ubuntu-latest
     timeout-minutes: 40
+    strategy:
+      # Don't let one major's failure cancel the others — we want to SEE which
+      # majors pass/fail in a single run.
+      fail-fast: false
+      matrix:
+        # The full supported range — every safety IT runs against each major
+        # (spec v0.8.1 §0.5; issue #102). matrix.pg is a static, trusted list
+        # (never untrusted event input), so interpolating it into run: is safe.
+        pg: [14, 15, 16, 17, 18]
     env:
-      # The ONE cross-IT/CI PG18 bin-dir variable (issue #44). PGDG installs
-      # PostgreSQL 18 here on Ubuntu; every IT resolver honors this first.
-      PG_BUMPERS_PG18_BIN: /usr/lib/postgresql/18/bin
+      # The ONE cross-IT/CI PG bin-dir variable (issues #44, #102). PGDG installs
+      # PostgreSQL ${{ matrix.pg }} here on Ubuntu; every IT resolver honors this
+      # first. Renamed from PG_BUMPERS_PG18_BIN (hard rename, no alias) now that
+      # the substrate is version-agnostic across the supported range.
+      PG_BUMPERS_PG_BIN: /usr/lib/postgresql/${{ matrix.pg }}/bin
+      # The major as an env var so run: steps never interpolate ${{ … }} into a
+      # shell command (defense-in-depth against workflow injection, even though
+      # matrix.pg is a trusted literal).
+      PG_MAJOR: ${{ matrix.pg }}
       PG_BUMPERS_IT: "1"
     steps:
       - name: Checkout
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
 
-      - name: Install PostgreSQL 18 from the PGDG apt repo
+      - name: Install PostgreSQL from the PGDG apt repo
         run: |
           set -Eeuo pipefail
           # The official apt.postgresql.org setup, pinned reproducibly. The
           # ubuntu runner ships its own libpq/clients — purge first so the only
-          # PG on PATH is PGDG's 18.
+          # PG on PATH is PGDG's ${PG_MAJOR}.
           sudo systemctl stop postgresql || true
           sudo apt-get purge -y 'postgresql-*' || true
           sudo install -d /usr/share/postgresql-common/pgdg
@@ -143,17 +162,18 @@ jobs:
             https://apt.postgresql.org/pub/repos/apt ${VERSION_CODENAME}-pgdg main" \
             | sudo tee /etc/apt/sources.list.d/pgdg.list >/dev/null
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends postgresql-18 postgresql-client-18
+          sudo apt-get install -y --no-install-recommends \
+            "postgresql-${PG_MAJOR}" "postgresql-client-${PG_MAJOR}"
           # Verify the bin dir + the exact tools every IT needs are present.
-          ls -l "$PG_BUMPERS_PG18_BIN"
+          ls -l "$PG_BUMPERS_PG_BIN"
           for t in initdb pg_ctl pg_basebackup psql pg_isready; do
-            test -x "$PG_BUMPERS_PG18_BIN/$t" || { echo "missing $t in $PG_BUMPERS_PG18_BIN" >&2; exit 1; }
+            test -x "$PG_BUMPERS_PG_BIN/$t" || { echo "missing $t in $PG_BUMPERS_PG_BIN" >&2; exit 1; }
           done
-          "$PG_BUMPERS_PG18_BIN/initdb" --version
+          "$PG_BUMPERS_PG_BIN/initdb" --version
           # PGDG auto-starts a default cluster on :5432 owned by the `postgres`
           # OS user — stop it so nothing of ours can ever collide with it. (Our
           # ITs use high ports only; this is belt + suspenders.)
-          sudo pg_ctlcluster 18 main stop || true
+          sudo pg_ctlcluster "${PG_MAJOR}" main stop || true
 
       - name: Install Rust 1.90.0
         uses: dtolnay/rust-toolchain@67ef31d5b988238dd797d409d6f9574278e20537 # master
@@ -163,7 +183,9 @@ jobs:
       - name: Cache cargo build
         uses: Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
         with:
-          key: integration
+          # Per-major cache slot so the 5 matrix legs don't race to write the
+          # same key (the Rust build itself is PG-version-independent).
+          key: integration-pg${{ matrix.pg }}
 
       - name: Build the workspace (test + bins the ITs drive)
         run: cargo build --workspace --locked
@@ -181,7 +203,7 @@ jobs:
       - name: IT — clone-orchestrator governance (dry_run clone + guarded apply + SIGKILL teardown)
         run: cargo test -p pgb-clone-orchestrator --test clone_governance_it --locked -- --nocapture --test-threads=1
 
-      - name: IT — MCP write-path e2e (mcp -> applyd socket -> guarded_apply -> PG18)
+      - name: IT — MCP write-path e2e (mcp -> applyd socket -> guarded_apply -> the live backend)
         run: cargo test -p pgb-mcp --test write_path_e2e --locked -- --nocapture --test-threads=1
 
       # ---- STACK-BACKED ITs (connect to a pre-provisioned admin server) ----

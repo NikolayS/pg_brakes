@@ -1,14 +1,14 @@
 # `deploy/` — local dev/test stack & deployment assets
 
 > **One command to a connected demo:** `deploy/up.sh` launches the FULL assembled
-> stack — `pgb-proxy` (the agent read endpoint, in front of PG18), `pgb-applyd`
+> stack — `pgb-proxy` (the agent read endpoint, in front of Postgres), `pgb-applyd`
 > (the write-path socket), and `pgb-warden` (the live watchdog) — and prints a
 > ready-to-paste `claude mcp add` line. Connect a real Claude Code, then watch a
 > `DROP TABLE` get REFUSED, a no-`WHERE` `UPDATE` get bounded + approval-gated, and
 > the audit chain verify. Tear it all down with `deploy/down.sh`. See
 > [Path C](#path-c--upsh--the-one-command-runnable-demo) below. The MCP read path
 > genuinely traverses `pgb-proxy` (extended-protocol-only, WALL-enforced) — not raw
-> PG18.
+> Postgres.
 
 The dev/test substrate for pg_bumpers (SPEC §3, §7, §12). There are **three paths**:
 
@@ -31,7 +31,8 @@ and a separate append-only **`_meta`** audit DB (SPEC §4). (Path C — the one-
 
 ## Path A — docker-compose (shipped artifact, for users)
 
-Image: `postgres:18`. Services: `primary` + `meta` (always on), `replica` (profile
+Image: `postgres:${PG_MAJOR:-16}` (any supported major 14–18; override with
+`PG_MAJOR`). Services: `primary` + `meta` (always on), `replica` (profile
 `replica`), `dblab` (profile `dblab`, a documented placeholder — a real Database Lab
 Engine is OPTIONAL per §12 and lands in S2).
 
@@ -85,9 +86,10 @@ Init hooks live in `deploy/init/` and run once on first boot of `primary`
 
 ## Path B — `local-stack.sh` (live dev/CI substrate here)
 
-Uses the keg-only Homebrew Postgres 18 binaries
-(`/opt/homebrew/opt/postgresql@18/bin`; override with the unified
-`PG_BUMPERS_PG18_BIN=` — the variable CI sets — or the legacy `PGBIN=`). Brings up isolated,
+Uses the keg-only Homebrew Postgres binaries (any supported major, 14–18; the
+version-neutral `/opt/homebrew/opt/postgresql/bin` by default — override with the
+unified `PG_BUMPERS_PG_BIN=` the variable CI sets per-major, or the legacy
+`PGBIN=`). Brings up isolated,
 throwaway clusters under a git-ignored `./.localstack/` dir, on **dedicated high
 ports** that never touch any cluster already running on 5432.
 
@@ -152,7 +154,7 @@ ports are actually free**, then fails loudly if any are still bound:
 Claude Code**. It:
 
 1. builds the binaries + the MCP shell (skip with `--no-build`);
-2. brings up the hardened throwaway PG18 via `local-stack.sh up` (primary `54321`,
+2. brings up the hardened throwaway Postgres via `local-stack.sh up` (primary `54321`,
    meta `54323`, replica `54322`; **never** 5432), seeds a demo DB (`pgb_demo`) on the
    primary with the canonical `_meta` audit chain
    (`crates/audit/sql/10_audit_meta.sql`) and a single-int-PK `accounts` table, and
@@ -168,7 +170,7 @@ Claude Code**. It:
      Dev-mode **TLS is OFF** (`PGB_PROXY_REQUIRE_TLS=false`) — stated explicitly; the
      proxy still does SCRAM-SHA-256 of the agent and enforces extended-protocol-only /
      read-only / byte-row budgets / `statement_timeout` / the audit chain. The
-     **MCP read path is wired through this endpoint** (`PGB_PROXY_*`), not raw PG18.
+     **MCP read path is wired through this endpoint** (`PGB_PROXY_*`), not raw Postgres.
      The proxy is the audit-chain anchor **owner**.
    - **`pgb-applyd`** on a Unix socket — the grant-gated `guarded_apply_with_grant`
      write floor. It connects to the primary as the **constrained, DML-only applier
@@ -251,7 +253,7 @@ bash deploy/smoke.sh
 
 The smoke harness targets the **Path B** ports by default; override via
 `PG_BUMPERS_PRIMARY_PORT` / `PG_BUMPERS_REPLICA_PORT` / `PG_BUMPERS_META_PORT` (and the
-bin dir with the unified `PG_BUMPERS_PG18_BIN` — the one variable CI sets, taking
+bin dir with the unified `PG_BUMPERS_PG_BIN` — the one variable CI sets, taking
 precedence over the legacy `PGBIN`) to point it at any equivalent stack.
 
 ---
@@ -270,13 +272,13 @@ proxy** — and refuses any agent connection that doesn't originate from the pro
 | `hba/pg_hba.agent-boundary.conf.template` | **Layer 0** `pg_hba` rules: agent role permitted **only from the proxy host's CIDR**; every other origin `reject`ed. |
 | `hba/render-hba.sh` | Generator that substitutes the template's placeholders (`--proxy-cidr 10.0.0.5/32 …`). Append its output to `$PGDATA/pg_hba.conf` **above** any catch-all. |
 | `hba/NETWORK-POLICY.md` | The network-policy companion (firewall / security-group / k8s NetworkPolicy half of the boundary) + how the local test models "proxy host vs. elsewhere". |
-| `test/wall_matrix.sh` | The **role-hardening test matrix** (env-gated `PG_BUMPERS_IT=1`): spins a dedicated throwaway PG18 cluster on **54331**, applies the SQL + the boundary `pg_hba`, then asserts **one row per matrix item** by *attempting* each denied action as the agent and proving it fails (+ whitelisted SELECT succeeds, member-of-nothing, boundary refused/allowed). |
+| `test/wall_matrix.sh` | The **role-hardening test matrix** (env-gated `PG_BUMPERS_IT=1`): spins a dedicated throwaway PG cluster (any supported major, 14-18) on **54331**, applies the SQL + the boundary `pg_hba`, then asserts **one row per matrix item** by *attempting* each denied action as the agent and proving it fails (+ whitelisted SELECT succeeds, member-of-nothing, boundary refused/allowed). |
 
 Wired in: `local-stack.sh` applies `sql/10_hardened_role.sql` against the primary on every
 `up` (idempotent); the docker compose picks up `init/10_hardened_role.sql` on first boot.
 
 ```sh
-# GREEN — every matrix row passes against real PG18 (exit 0):
+# GREEN — every matrix row passes against the live backend (exit 0):
 PG_BUMPERS_IT=1 deploy/test/wall_matrix.sh
 
 # RED — a freshly-created, UN-hardened role CAN do denied things; assertions fail (exit 1):
@@ -314,7 +316,7 @@ deploy/hba/render-hba.sh --agent-role pgb_agent --proxy-cidr 10.0.0.5/32 >> "$PG
 > injection; the default `pg_catalog, "public"` matches the migration). Every brokered session
 > is a fresh origination the proxy re-pins, so no agent-chosen path survives into a new session
 > — proven by `crates/proxy/tests/proxy_it.rs::proxy_pins_search_path_on_every_brokered_session`
-> (env-gated PG18 IT). The WALL's real guarantee does **not** depend on `search_path`: reads
+> (env-gated IT against the live backend). The WALL's real guarantee does **not** depend on `search_path`: reads
 > are via fully-qualified **explicit SELECT grants** only, and the agent can neither CREATE
 > schemas/objects (so no trojan-shadowing) nor write anywhere — therefore **no `search_path`
 > the agent chooses can widen its read surface or escalate**. The matrix proves this

@@ -136,9 +136,10 @@ fn is_read_statement(stmt: &Statement) -> bool {
         //       `EXPLAIN SELECT 1; DROP …` are NOT reads).
         // This lets the agent read path serve `explain_plan` THROUGH the proxy
         // without ever planning *or executing* a write — the explain-hole stays
-        // closed by construction. Live-verified on PostgreSQL 18.4 that
-        // `EXPLAIN (ANALYSE) …` executes (it mutates/deletes/side-effects) while
-        // every allowlisted option below only plans.
+        // closed by construction. Live-verified that `EXPLAIN (ANALYSE) …`
+        // executes (it mutates/deletes/side-effects) while every allowlisted
+        // option below only plans — behaviour shared across the supported PG
+        // 14-18 range (now exercised across the 14-18 CI matrix).
         Statement::Explain {
             analyze,
             statement,
@@ -166,15 +167,17 @@ fn is_read_statement(stmt: &Statement) -> bool {
     }
 }
 
-/// The `EXPLAIN (…)` options that we have **proven** (live, on PostgreSQL 18.4)
-/// only PLAN the statement — they never execute it, so they have no side effects
-/// and are safe on the read path. The list is intentionally an **allowlist**, not
-/// a denylist: anything not on it is fail-closed to not-read.
+/// The `EXPLAIN (…)` options that we have **proven** (live) only PLAN the
+/// statement — they never execute it, so they have no side effects and are safe
+/// on the read path. The list is intentionally an **allowlist**, not a denylist:
+/// anything not on it is fail-closed to not-read.
 ///
-/// Proven plan-only on PG18.4 (verified against a side-effecting `SELECT bump()`
-/// that mutates a sentinel — the sentinel stayed `0`, i.e. no execution):
+/// Proven plan-only (verified against a side-effecting `SELECT bump()` that
+/// mutates a sentinel — the sentinel stayed `0`, i.e. no execution):
 /// `FORMAT`, `VERBOSE`, `COSTS`, `SETTINGS`, `GENERIC_PLAN`, `SUMMARY`, `MEMORY`,
-/// and standalone `BUFFERS` (PG18 reports planning buffers without running).
+/// and standalone `BUFFERS` (Postgres reports planning buffers without running);
+/// the option semantics are stable across the supported PG 14-18 range and are
+/// now exercised across the 14-18 CI matrix.
 ///
 /// **Deliberately excluded** (each EXECUTES the statement — proven live, or by PG
 /// rule cannot stand alone without `ANALYZE`, which executes):
@@ -190,6 +193,21 @@ fn is_read_statement(stmt: &Statement) -> bool {
 /// (e.g. `COSTS false`, `BUFFERS true`, `FORMAT json`) does not change whether the
 /// name is plan-only, so it is not consulted — an allowlisted name with any arg
 /// stays plan-only, and a non-allowlisted name is not-read regardless of arg.
+///
+/// VERSION DEGRADE — FAIL-CLOSED ACROSS PG 14-18 (C1 #102, spec v0.8.1 §0.5):
+/// some allowlisted option names were INTRODUCED in a specific major —
+/// `GENERIC_PLAN` is **16+** and `MEMORY` is **17+** (`SERIALIZE` is 17+ too, and
+/// is deliberately EXCLUDED here regardless). This classifier is purely about
+/// *plan-only-ness*; it never gates on PG version, so an agent's
+/// `EXPLAIN (GENERIC_PLAN) …` is classified read on any major. The version
+/// degrade is handled **downstream and fail-closed**: the EXPLAIN-cost gate
+/// (`pgb-proxy`'s `explain.rs`) runs the `EXPLAIN (…)` on the *real backend*, so a
+/// PG 14/15 backend that doesn't know `GENERIC_PLAN` (or a PG ≤16 that doesn't
+/// know `MEMORY`) returns an ERROR and the gate **blocks the statement** (it
+/// refuses anything whose EXPLAIN it cannot prove is under the ceiling). So a
+/// version-specific option on an older backend degrades to a *deny*, never a
+/// silent execute — the supported-range posture stays least-privilege with no
+/// per-version branching here.
 const EXPLAIN_PLAN_ONLY_OPTIONS: &[&str] = &[
     "FORMAT",
     "VERBOSE",

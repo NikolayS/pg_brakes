@@ -7,8 +7,10 @@
 //!    read the `StartupMessage`;
 //! 2. **client-side SCRAM-SHA-256 auth** — prove the agent before any backend
 //!    work ([`crate::auth`]);
-//! 3. **originate the backend** — open a fresh PG18 session as the WALL role and
-//!    inject `statement_timeout` (terminate-and-originate);
+//! 3. **originate the backend** — open a fresh PG session as the WALL role and
+//!    inject `statement_timeout` (terminate-and-originate), capturing the
+//!    backend's real `server_version` to pass through to the agent (C1 #102 —
+//!    transparent version proxy across the supported PG 14-18 range);
 //! 4. **the query loop** — read each frontend frame, run the [`Enforcement`]
 //!    gate, forward allowed frames, and relay backend responses while the
 //!    [`Budget`] meters **every** bulk path — `DataRow` *and* backend-COPY
@@ -121,12 +123,19 @@ pub async fn serve_connection(
     // (2) Authenticate the agent over SCRAM-SHA-256.
     authenticate_agent(&mut stream, &cfg).await?;
 
-    // Auth ok → send the post-auth startup sequence to the agent.
-    finish_agent_startup(&mut stream).await?;
-
-    // (3) Originate the backend session as the WALL role.
+    // (3) Originate the backend session as the WALL role FIRST — before the
+    // agent's post-auth startup tail — so we can capture the backend's REAL
+    // `server_version` from its ParameterStatus and pass it through transparently
+    // (C1 #102, spec v0.8.1 §0.5: the wire proxy is version-agnostic across PG
+    // 14-18; it must NOT advertise a hardcoded 18.0 to a 14-17 backend). If the
+    // backend is unreachable the session fails closed here, before the agent sees
+    // an AuthenticationOk it can't follow up on.
     let mut backend =
         connect_backend(&cfg.backend, cfg.statement_timeout_ms, &cfg.search_path).await?;
+
+    // Auth ok + backend up → send the post-auth startup sequence to the agent,
+    // forwarding the backend's real `server_version`.
+    finish_agent_startup(&mut stream, &backend.server_version).await?;
 
     // (4) The enforced query loop.
     query_loop(&mut stream, &mut backend, &cfg, &recorder, &session_id).await
@@ -293,13 +302,30 @@ where
 
 /// Send the post-auth startup tail to the agent: `AuthenticationOk`, a couple of
 /// `ParameterStatus` messages, a `BackendKeyData`, and `ReadyForQuery`.
-async fn finish_agent_startup<S>(stream: &mut S) -> Result<(), SessionError>
+///
+/// `backend_server_version` is the REAL `server_version` captured from the
+/// backend's startup (C1 #102, spec v0.8.1 §0.5). The proxy is a transparent
+/// version pass-through across the supported PG 14-18 range — it forwards the
+/// backend's actual version (tagged so a reader can see it traversed pg_bumpers)
+/// rather than a hardcoded `18.0`, which would mislead an agent connected through
+/// to a 14-17 backend. If the backend somehow reported no version (it always
+/// does), we fail safe to a neutral `"unknown"` tag rather than inventing 18.0.
+async fn finish_agent_startup<S>(
+    stream: &mut S,
+    backend_server_version: &str,
+) -> Result<(), SessionError>
 where
     S: AsyncWrite + Unpin,
 {
     write_frame(stream, &BackendMessage::AuthenticationOk.encode()).await?;
+    let raw = if backend_server_version.is_empty() {
+        "unknown"
+    } else {
+        backend_server_version
+    };
+    let server_version = format!("{raw} (pg_bumpers proxy)");
     for (name, value) in [
-        ("server_version", "18.0 (pg_bumpers proxy)"),
+        ("server_version", server_version.as_str()),
         ("client_encoding", "UTF8"),
         ("DateStyle", "ISO, MDY"),
         ("standard_conforming_strings", "on"),
@@ -330,9 +356,15 @@ where
     Ok(())
 }
 
-/// A backend (proxy→PG18) connection as the WALL role.
+/// A backend (proxy→PG) connection as the WALL role.
 struct Backend {
     stream: TcpStream,
+    /// The backend's real `server_version`, captured from its startup
+    /// `ParameterStatus` (C1 #102) and forwarded verbatim to the agent so the
+    /// proxy is a transparent version pass-through across the supported PG 14-18
+    /// range (never a hardcoded 18.0). Empty only if the backend never sent one
+    /// (it always does — handled with a fail-safe fallback at the call site).
+    server_version: String,
 }
 
 /// Open the backend session as the WALL role and inject the per-session GUCs the
@@ -370,8 +402,11 @@ async fn connect_backend(
     };
     write_frame(&mut stream, &startup.encode()).await?;
 
-    // Drive auth to AuthenticationOk, then to the first ReadyForQuery.
-    wait_for_ready(&mut stream, target).await?;
+    // Drive auth to AuthenticationOk, then to the first ReadyForQuery, capturing
+    // the backend's real `server_version` from its startup ParameterStatus stream
+    // (C1 #102 — forwarded to the agent so the proxy is a transparent version
+    // pass-through, never a hardcoded 18.0).
+    let server_version = wait_for_ready(&mut stream, target).await?;
 
     // (4a) search_path pin — set the authoritative per-session search_path on the
     // fresh backend session BEFORE any agent statement (the agent never sees a
@@ -385,16 +420,31 @@ async fn connect_backend(
     if statement_timeout_ms > 0 {
         inject_statement_timeout(&mut stream, statement_timeout_ms).await?;
     }
-    Ok(Backend { stream })
+    Ok(Backend {
+        stream,
+        server_version,
+    })
 }
 
 /// Consume backend startup messages until the first `ReadyForQuery`. Handles the
 /// trust/cleartext/MD5 auth replies the local-stack might send; SCRAM to the
 /// backend is not required on the loopback boundary.
-async fn wait_for_ready(
-    stream: &mut TcpStream,
-    target: &BackendTarget,
-) -> Result<(), SessionError> {
+///
+/// Returns the backend's real `server_version`, captured from the startup
+/// `ParameterStatus('S')` stream (C1 #102) so the proxy can forward it verbatim
+/// to the agent (a transparent version pass-through across PG 14-18, never a
+/// hardcoded 18.0). The empty string if the backend never reports one (it always
+/// does in practice; the call site applies a fail-safe fallback).
+///
+/// Generic over the stream type so the capture path can be exercised DB-free
+/// against a synthesized backend startup byte-stream (production drives it on a
+/// `TcpStream`). Requires `AsyncWrite` because a cleartext-password backend prompt
+/// must be answered mid-startup.
+async fn wait_for_ready<S>(stream: &mut S, target: &BackendTarget) -> Result<String, SessionError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let mut server_version = String::new();
     loop {
         let frame = read_tagged_frame(stream)
             .await?
@@ -422,8 +472,13 @@ async fn wait_for_ready(
                     diag(&fields)
                 )));
             }
-            BackendMessage::ReadyForQuery { .. } => return Ok(()),
-            // ParameterStatus / BackendKeyData / NoticeResponse: ignore.
+            // Capture the backend's real server_version to pass through to the
+            // agent (C1 #102 — transparent version proxy).
+            BackendMessage::ParameterStatus { name, value } if name == "server_version" => {
+                server_version = value;
+            }
+            BackendMessage::ReadyForQuery { .. } => return Ok(server_version),
+            // Other ParameterStatus / BackendKeyData / NoticeResponse: ignore.
             _ => {}
         }
     }
@@ -1096,6 +1151,187 @@ mod tests {
         let as_trait: Arc<Mutex<dyn Sink + Send>> = inner.clone();
         let clock: Arc<dyn Clock> = Arc::new(MockClock::starting_at(1_700_000_000_000));
         (Recorder::new(as_trait, clock, "pgb_agent"), inner)
+    }
+
+    /// Walk a buffer of framed backend messages and return the value of the
+    /// `server_version` ParameterStatus the agent would see (None if absent).
+    /// DB-free decode helper for the version-pass-through test below.
+    async fn server_version_param(buf: &[u8]) -> Option<String> {
+        let mut cur = std::io::Cursor::new(buf);
+        while let Some(frame) = read_tagged_frame(&mut cur).await.unwrap() {
+            if let BackendMessage::ParameterStatus { name, value } =
+                BackendMessage::decode(frame.tag, frame.body).unwrap()
+                && name == "server_version"
+            {
+                return Some(value);
+            }
+        }
+        None
+    }
+
+    /// C1 #102 (spec v0.8.1 §0.5 — the wire proxy is version-agnostic across PG
+    /// 14-18): the proxy must PASS THROUGH the backend's real `server_version` to
+    /// the agent, NOT advertise a hardcoded `18.0`. RED before the fix:
+    /// `finish_agent_startup` emitted a constant `"18.0 (pg_bumpers proxy)"`, so a
+    /// 14-17 backend was misreported as 18. GREEN: the value the proxy captured
+    /// from the backend's ParameterStatus is forwarded verbatim (tagged so a
+    /// reader can see it traversed pg_bumpers). DB-free — runs in the fast gate.
+    #[tokio::test]
+    async fn server_version_is_passed_through_not_hardcoded_18() {
+        // A non-18 backend (PG14) must be advertised as 14.x, never 18.
+        let mut buf = Vec::new();
+        finish_agent_startup(&mut buf, "14.23 (Homebrew)")
+            .await
+            .unwrap();
+        let sv = server_version_param(&buf)
+            .await
+            .expect("agent must receive a server_version ParameterStatus");
+        assert!(
+            sv.starts_with("14.23"),
+            "the proxy must forward the backend's real server_version (got {sv:?})"
+        );
+        assert!(
+            !sv.contains("18"),
+            "the proxy must NOT advertise a hardcoded 18.0 to a non-18 backend (got {sv:?})"
+        );
+        assert!(
+            sv.contains("pg_bumpers proxy"),
+            "the forwarded version stays tagged as having traversed the proxy (got {sv:?})"
+        );
+
+        // A PG17 backend passes through as 17.x.
+        let mut buf17 = Vec::new();
+        finish_agent_startup(&mut buf17, "17.4").await.unwrap();
+        let sv17 = server_version_param(&buf17).await.unwrap();
+        assert!(
+            sv17.starts_with("17.4") && !sv17.contains("18"),
+            "a 17.x backend must be advertised as 17.x (got {sv17:?})"
+        );
+
+        // Fail-safe: an empty backend version (never happens in practice) must
+        // NOT silently become 18.0 — it degrades to a neutral "unknown" tag.
+        let mut buf_empty = Vec::new();
+        finish_agent_startup(&mut buf_empty, "").await.unwrap();
+        let sv_empty = server_version_param(&buf_empty).await.unwrap();
+        assert!(
+            sv_empty.starts_with("unknown") && !sv_empty.contains("18"),
+            "a missing backend version must fail safe to 'unknown', never invent 18.0 (got {sv_empty:?})"
+        );
+    }
+
+    /// A throwaway [`BackendTarget`] for the capture-path tests below (never used
+    /// to open a real connection — `wait_for_ready` is driven over an in-memory
+    /// duplex, so host/port are inert).
+    fn dummy_backend_target() -> BackendTarget {
+        BackendTarget {
+            host: "127.0.0.1".into(),
+            port: 1, // inert: the capture test never dials this
+            database: "postgres".into(),
+            role: "pgb_agent".into(),
+            password: "x".into(),
+        }
+    }
+
+    /// Synthesize a backend startup byte-stream — the exact frame sequence
+    /// `wait_for_ready` consumes up to `ReadyForQuery` — then drive `wait_for_ready`
+    /// over an in-memory duplex (no live PG) and return the captured
+    /// `server_version`. When `server_version` is `None`, the `ParameterStatus`
+    /// for it is omitted entirely (the absent-version case).
+    async fn capture_server_version(server_version: Option<&str>) -> String {
+        let mut frames = Vec::new();
+        // The minimal post-startup tail a real backend emits before ReadyForQuery:
+        // AuthenticationOk, a few ParameterStatus, BackendKeyData, ReadyForQuery.
+        frames.extend_from_slice(&BackendMessage::AuthenticationOk.encode());
+        frames.extend_from_slice(
+            &BackendMessage::ParameterStatus {
+                name: "application_name".into(),
+                value: "pgb_proxy".into(),
+            }
+            .encode(),
+        );
+        if let Some(v) = server_version {
+            frames.extend_from_slice(
+                &BackendMessage::ParameterStatus {
+                    name: "server_version".into(),
+                    value: v.into(),
+                }
+                .encode(),
+            );
+        }
+        frames.extend_from_slice(
+            &BackendMessage::ParameterStatus {
+                name: "client_encoding".into(),
+                value: "UTF8".into(),
+            }
+            .encode(),
+        );
+        frames.extend_from_slice(
+            &BackendMessage::BackendKeyData {
+                process_id: 42,
+                secret_key: 7,
+            }
+            .encode(),
+        );
+        frames.extend_from_slice(
+            &BackendMessage::ReadyForQuery {
+                status: TransactionStatus::Idle,
+            }
+            .encode(),
+        );
+
+        // In-memory backend: write the synthesized frames into one half, drive
+        // wait_for_ready over the other. Any reply wait_for_ready writes (none on
+        // this trust-style stream) just lands in `pgb_end`'s read buffer, ignored.
+        let (mut pgb_end, mut backend_end) = tokio::io::duplex(64 * 1024);
+        backend_end.write_all(&frames).await.unwrap();
+        backend_end.flush().await.unwrap();
+        drop(backend_end); // EOF after ReadyForQuery so any over-read terminates cleanly
+
+        let target = dummy_backend_target();
+        wait_for_ready(&mut pgb_end, &target)
+            .await
+            .expect("wait_for_ready must reach ReadyForQuery over the synthesized stream")
+    }
+
+    /// C1 #102 — the CAPTURE half of the version pass-through, with NO live PG.
+    /// `wait_for_ready` parsing the backend's `ParameterStatus(server_version=…)`
+    /// is the SOLE source of the agent-visible version, yet had no test (the
+    /// forwarding test above feeds a literal). Here we synthesize the backend's
+    /// startup byte-stream and assert the captured value equals the synthesized
+    /// one. RED-if-broken: if the `server_version` capture arm were dropped (or
+    /// hardcoded), `wait_for_ready` would return `""`, the call site would fail
+    /// safe to "unknown", and every `assert_eq!` below would fail — so this test
+    /// has teeth against a regression of the capture path.
+    #[tokio::test]
+    async fn wait_for_ready_captures_backend_server_version() {
+        // A realistic PG15 ParameterStatus value is captured verbatim.
+        let captured = capture_server_version(Some("15.6 (Debian 15.6-1.pgdg120+1)")).await;
+        assert_eq!(
+            captured, "15.6 (Debian 15.6-1.pgdg120+1)",
+            "the captured server_version must equal the backend's synthesized value verbatim"
+        );
+
+        // A bare PG14 version string round-trips exactly too.
+        let captured14 = capture_server_version(Some("14.23")).await;
+        assert_eq!(captured14, "14.23");
+
+        // ABSENT server_version → empty capture, which the call site turns into the
+        // fail-safe "unknown" (NEVER an invented "18.0"). Prove both: the raw empty
+        // capture AND that finish_agent_startup degrades it to "unknown".
+        let captured_none = capture_server_version(None).await;
+        assert_eq!(
+            captured_none, "",
+            "an absent server_version must capture as empty, not a fabricated default"
+        );
+        let mut tail = Vec::new();
+        finish_agent_startup(&mut tail, &captured_none)
+            .await
+            .unwrap();
+        let advertised = server_version_param(&tail).await.unwrap();
+        assert!(
+            advertised.starts_with("unknown") && !advertised.contains("18"),
+            "an absent backend version must fail safe to 'unknown', never 18.0 (got {advertised:?})"
+        );
     }
 
     /// Drive `relay_until_ready` against a simulated backend that produces a

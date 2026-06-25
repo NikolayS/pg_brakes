@@ -4,9 +4,13 @@
 # §12 (graceful degradation — replica/DBLab/PITR all OPTIONAL), §10.8 (degraded mode,
 # no replica), §4 (append-only audit in the `_meta` DB).
 #
+# Supported PostgreSQL: 14, 15, 16, 17, 18 (spec v0.8.1 §0.5 — do NOT pin to 18).
+# The image major is parameterized via ${PG_MAJOR} (default 16); set e.g.
+# `PG_MAJOR=18 docker compose -f deploy/docker-compose.yml up -d` to pick a major.
+#
 # Topology
-#   primary  (always on)  — Postgres 18, wal_level=replica, replication-ready, PITR-ready.
-#   meta     (always on)  — separate Postgres 18 instance hosting the append-only `_meta`
+#   primary  (always on)  — Postgres ${PG_MAJOR}, wal_level=replica, replication-ready, PITR-ready.
+#   meta     (always on)  — separate Postgres ${PG_MAJOR} instance hosting the append-only `_meta`
 #                            audit DB (§4). Kept on its own instance so the audited
 #                            principal can be REVOKEd from writing audit (§10.9).
 #   replica  (profile: replica) — streaming standby of `primary`. OFF by default so the
@@ -26,7 +30,7 @@
 # fault; see docs/spec/SPEC.amendments.md "S0 integration substrate"). This compose is
 # statically validated here (`docker compose config -q`); it must be re-validated with a
 # live `up` on a docker-healthy machine. The live S0 substrate in this env is
-# deploy/local-stack.sh (local Postgres 18 via initdb/pg_basebackup).
+# deploy/local-stack.sh (local Postgres via initdb/pg_basebackup, any supported major).
 #
 # ⚠️  HOST-PORT CONFLICT: by default `primary` publishes host port 5432. The founder
 # runs Postgres on 5432, so `docker compose up` here WOULD collide. The host ports are
@@ -40,7 +44,9 @@ name: pg_bumpers
 # ---------------------------------------------------------------------------
 # Shared knobs reused by primary + replica via YAML anchors.
 # ---------------------------------------------------------------------------
-x-pg-image: &pg-image postgres:18
+# Parameterized PG major (C1 #102, spec v0.8.1 §0.5 — supported range 14-18, not
+# pinned to 18). Override with `PG_MAJOR=<14..18>`; defaults to 16.
+x-pg-image: &pg-image postgres:${PG_MAJOR:-16}
 
 x-pg-healthcheck: &pg-healthcheck
   # pg_isready against the in-container superuser/db; -q keeps logs quiet.

@@ -45,9 +45,11 @@ IFS=$'\n\t'
 # --------------------------------------------------------------------------------------
 # Config
 # --------------------------------------------------------------------------------------
-# PG18 bin dir. Precedence (unified — issue #44): PG_BUMPERS_PG18_BIN → PGBIN
-# (legacy) → the Homebrew keg path (macOS dev fallback).
-PGBIN="${PG_BUMPERS_PG18_BIN:-${PGBIN:-/opt/homebrew/opt/postgresql@18/bin}}"
+# PG bin dir. Precedence (unified — issues #44, #102): PG_BUMPERS_PG_BIN → PGBIN
+# (legacy) → the version-neutral Homebrew keg path (macOS dev fallback).
+# Version-agnostic across the supported PG 14-18 range (the WALL matrix is the
+# very assertion that the hardened-role SQL applies on every supported major).
+PGBIN="${PG_BUMPERS_PG_BIN:-${PGBIN:-/opt/homebrew/opt/postgresql/bin}}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEPLOY_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 SQL_FILE="$DEPLOY_DIR/sql/10_hardened_role.sql"
@@ -73,7 +75,7 @@ if [ "${PG_BUMPERS_IT:-0}" != "1" ]; then
   exit 0
 fi
 for b in initdb pg_ctl psql pg_isready; do
-  [ -x "$PGBIN/$b" ] || { echo "[wall] FAIL: missing $PGBIN/$b — set PGBIN to your postgresql@18 bin dir" >&2; exit 1; }
+  [ -x "$PGBIN/$b" ] || { echo "[wall] FAIL: missing $PGBIN/$b — set PGBIN to a PostgreSQL 14-18 bin dir" >&2; exit 1; }
 done
 [ -f "$SQL_FILE" ]   || { echo "[wall] FAIL: missing $SQL_FILE" >&2; exit 1; }
 [ -f "$HBA_RENDER" ] || { echo "[wall] FAIL: missing $HBA_RENDER" >&2; exit 1; }
@@ -123,7 +125,7 @@ log "mode=$MODE — initdb dedicated cluster on :$TEST_PORT under $DATADIR"
 # initdb with trust for the bootstrap superuser (local setup); the rendered pg_hba below
 # overwrites the rules so the AGENT role authenticates with scram from the proxy host and
 # is rejected from non-proxy origins. password_encryption=scram so the agent's password
-# verifier is scram (set explicitly; PG18 default is scram already).
+# verifier is scram (set explicitly; the PostgreSQL 14-18 default is scram already).
 "$PGBIN/initdb" -D "$DATADIR/data" -U postgres -A trust --no-sync >/dev/null
 
 cat >> "$DATADIR/data/postgresql.conf" <<EOF
@@ -131,7 +133,7 @@ cat >> "$DATADIR/data/postgresql.conf" <<EOF
 # pg_bumpers wall-matrix test cluster
 listen_addresses = '$NONPROXY_HOST,$PROXY_HOST'
 port = $TEST_PORT
-# Pin the socket dir to our (short, writable) scratch dir. PGDG PG18 on
+# Pin the socket dir to our (short, writable) scratch dir. PGDG PostgreSQL on
 # Debian/Ubuntu defaults unix_socket_directories to /var/run/postgresql, which a
 # CI runner user cannot write to — so pg_ctl start would fail. All queries here
 # go over TCP anyway; the socket is only for the postmaster's own bind.
@@ -265,12 +267,32 @@ assert_denied "REVOKE pg_read_all_data (SELECT non-whitelisted public.secret_dat
   "SELECT secret FROM public.secret_data LIMIT 1"
 # pg_read_all_settings → can read restricted GUCs. (Functional proof is covered by member-
 # of-nothing + the catalog check above; here we assert the membership is gone.)
+#
+# VERSION-AGNOSTIC (C1 #102, spec v0.8.1 §0.5 — supported PG 14-18): some of these
+# predefined roles were introduced in a specific major and DO NOT EXIST on older ones —
+# pg_checkpoint (15+), pg_create_subscription (16+), pg_use_reserved_connections (16+),
+# pg_maintain (17+). `pg_has_role(role, 'pg_maintain', 'MEMBER')` raises a hard ERROR on a
+# major where the role is absent. So the assertion is guarded by `to_regrole(PR) IS NULL`:
+# when the role does not exist on this major, the agent VACUOUSLY cannot be a member of it
+# (the capability simply isn't present), so the row PASSES as N/A — never a false RED.
 for PR in pg_read_all_data pg_write_all_data pg_read_all_settings pg_read_all_stats \
           pg_monitor pg_execute_server_program pg_read_server_files pg_write_server_files \
           pg_maintain pg_checkpoint pg_signal_backend pg_create_subscription \
           pg_stat_scan_tables pg_use_reserved_connections; do
-  IS_MEMBER="$(SU "SELECT pg_has_role('$AGENT_ROLE','$PR','MEMBER')")"
-  [ "$IS_MEMBER" = "f" ] && okrow "not a member of $PR" || badrow "agent IS a member of $PR (expected revoked)"
+  # Returns 'absent' when the role does not exist on this major (vacuously not a
+  # member), else 't'/'f' from pg_has_role. NB: avoid `boolean::text` (it renders
+  # 'true'/'false'); map to the single-char token psql shows for a bare boolean so
+  # the existing 'f' == not-a-member check holds.
+  IS_MEMBER="$(SU "SELECT CASE
+                     WHEN to_regrole('$PR') IS NULL THEN 'absent'
+                     WHEN pg_has_role('$AGENT_ROLE','$PR','MEMBER') THEN 't'
+                     ELSE 'f'
+                   END")"
+  case "$IS_MEMBER" in
+    f)      okrow "not a member of $PR" ;;
+    absent) okrow "not a member of $PR (N/A — role absent on this PG major)" ;;
+    *)      badrow "agent IS a member of $PR (expected revoked)" ;;
+  esac
 done
 
 # --------------------------------------------------------------------------------------

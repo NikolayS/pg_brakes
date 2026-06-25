@@ -146,26 +146,54 @@ END
 $$;
 
 -- [REVOKE] Belt-and-suspenders: explicitly REVOKE the headline predefined roles from the
--- applier (same list + same NOTICE-silencing as pgb_agent above). The destructive-vector
--- ones for a WRITE-capable role are pg_execute_server_program (COPY … PROGRAM),
--- pg_read_server_files / pg_write_server_files (server-file I/O), and pg_write_all_data;
--- the applier's IT asserts a TRUNCATE and a COPY … PROGRAM as pgb_applier are denied.
-SET LOCAL client_min_messages = error;
-REVOKE pg_read_all_data            FROM pgb_applier;
-REVOKE pg_write_all_data           FROM pgb_applier;   -- no write outside the DML grants
-REVOKE pg_read_all_settings        FROM pgb_applier;
-REVOKE pg_read_all_stats           FROM pgb_applier;
-REVOKE pg_stat_scan_tables         FROM pgb_applier;
-REVOKE pg_monitor                  FROM pgb_applier;
-REVOKE pg_execute_server_program   FROM pgb_applier;   -- the COPY … PROGRAM gate
-REVOKE pg_read_server_files        FROM pgb_applier;   -- pg_read_file / server-file read
-REVOKE pg_write_server_files       FROM pgb_applier;   -- server-file write
-REVOKE pg_maintain                 FROM pgb_applier;
-REVOKE pg_checkpoint               FROM pgb_applier;
-REVOKE pg_signal_backend           FROM pgb_applier;
-REVOKE pg_create_subscription      FROM pgb_applier;
-REVOKE pg_use_reserved_connections FROM pgb_applier;
-RESET client_min_messages;
+-- applier (same list as pgb_agent below). The destructive-vector ones for a WRITE-capable
+-- role are pg_execute_server_program (COPY … PROGRAM), pg_read_server_files /
+-- pg_write_server_files (server-file I/O), and pg_write_all_data; the applier's IT asserts
+-- a TRUNCATE and a COPY … PROGRAM as pgb_applier are denied.
+--
+-- VERSION-AGNOSTIC (C1 #102, spec v0.8.1 §0.5 — supported PG 14-18): several of these
+-- predefined roles were INTRODUCED in a specific major and DO NOT EXIST on older ones —
+-- pg_checkpoint (15+), pg_create_subscription (16+), pg_use_reserved_connections (16+),
+-- pg_maintain (17+). A raw `REVOKE pg_maintain …` against PG 14-16 raises a real ERROR
+-- (`role "pg_maintain" does not exist`) which aborts the whole migration under
+-- ON_ERROR_STOP. So we LOOP over the role-name list and GUARD each REVOKE with
+-- `to_regrole(name) IS NOT NULL` — it no-ops (auditably) where the role is absent and
+-- runs where it exists. pg_read_all_data / pg_write_all_data are 14+ (present on every
+-- supported major) but go through the same guard for uniformity. This is the
+-- deterministic floor staying version-agnostic: a write-capable role can never silently
+-- retain a destructive predefined role just because the migration aborted mid-apply.
+-- (`client_min_messages = error` is set inside the block to silence the harmless
+-- "is not a member" WARNING a REVOKE of a non-member emits — the existence guard prevents
+-- the hard ERROR on absent roles, this just keeps a clean re-apply quiet; the txn-local
+-- set_config(…, is_local => true) is reverted at COMMIT.)
+DO $$
+DECLARE
+  role_name text;
+BEGIN
+  PERFORM set_config('client_min_messages', 'error', true);
+  FOREACH role_name IN ARRAY ARRAY[
+    'pg_read_all_data',            -- 14+
+    'pg_write_all_data',           -- 14+  (no write outside the DML grants)
+    'pg_read_all_settings',
+    'pg_read_all_stats',
+    'pg_stat_scan_tables',
+    'pg_monitor',
+    'pg_execute_server_program',   -- the COPY … PROGRAM gate
+    'pg_read_server_files',        -- pg_read_file / server-file read
+    'pg_write_server_files',       -- server-file write
+    'pg_signal_backend',
+    'pg_checkpoint',               -- 15+
+    'pg_create_subscription',      -- 16+
+    'pg_use_reserved_connections', -- 16+
+    'pg_maintain'                  -- 17+
+  ]
+  LOOP
+    IF to_regrole(role_name) IS NOT NULL THEN
+      EXECUTE format('REVOKE %I FROM pgb_applier', role_name);
+    END IF;
+  END LOOP;
+END
+$$;
 
 -- -------------------------------------------------------------------------------------
 -- 1. [REVOKE] Member-of-nothing — strip EVERY predefined pg_* role + any other.
@@ -193,24 +221,42 @@ $$;
 -- [REVOKE] Belt-and-suspenders: explicitly REVOKE the headline predefined roles even if
 -- the loop above already covered them (REVOKE of a non-member is a harmless no-op). This
 -- makes the intent auditable line-by-line and documents the matrix.
--- REVOKE of a non-member emits a NOTICE/WARNING per role; silence just these so a clean
--- re-apply isn't drowned in noise. ON_ERROR_STOP still aborts on any real ERROR.
-SET LOCAL client_min_messages = error;
-REVOKE pg_read_all_data            FROM pgb_agent;
-REVOKE pg_write_all_data           FROM pgb_agent;
-REVOKE pg_read_all_settings        FROM pgb_agent;
-REVOKE pg_read_all_stats           FROM pgb_agent;
-REVOKE pg_stat_scan_tables         FROM pgb_agent;
-REVOKE pg_monitor                  FROM pgb_agent;
-REVOKE pg_execute_server_program   FROM pgb_agent;   -- the COPY … PROGRAM gate
-REVOKE pg_read_server_files        FROM pgb_agent;   -- pg_read_file / server-file read
-REVOKE pg_write_server_files       FROM pgb_agent;
-REVOKE pg_maintain                 FROM pgb_agent;
-REVOKE pg_checkpoint               FROM pgb_agent;
-REVOKE pg_signal_backend           FROM pgb_agent;
-REVOKE pg_create_subscription      FROM pgb_agent;
-REVOKE pg_use_reserved_connections FROM pgb_agent;
-RESET client_min_messages;
+--
+-- VERSION-AGNOSTIC (C1 #102, spec v0.8.1 §0.5 — supported PG 14-18): same per-role
+-- `to_regrole(name) IS NOT NULL` guard as the applier block above. pg_checkpoint (15+),
+-- pg_create_subscription (16+), pg_use_reserved_connections (16+) and pg_maintain (17+)
+-- DO NOT EXIST on older majors, so a raw REVOKE would raise `role "…" does not exist`
+-- and abort the migration under ON_ERROR_STOP. The existence guard skips an absent role,
+-- and `client_min_messages = error` (txn-local) silences the harmless "is not a member"
+-- WARNING a REVOKE of a non-member emits. ON_ERROR_STOP still aborts on any REAL error.
+DO $$
+DECLARE
+  role_name text;
+BEGIN
+  PERFORM set_config('client_min_messages', 'error', true);
+  FOREACH role_name IN ARRAY ARRAY[
+    'pg_read_all_data',            -- 14+
+    'pg_write_all_data',           -- 14+
+    'pg_read_all_settings',
+    'pg_read_all_stats',
+    'pg_stat_scan_tables',
+    'pg_monitor',
+    'pg_execute_server_program',   -- the COPY … PROGRAM gate
+    'pg_read_server_files',        -- pg_read_file / server-file read
+    'pg_write_server_files',
+    'pg_signal_backend',
+    'pg_checkpoint',               -- 15+
+    'pg_create_subscription',      -- 16+
+    'pg_use_reserved_connections', -- 16+
+    'pg_maintain'                  -- 17+
+  ]
+  LOOP
+    IF to_regrole(role_name) IS NOT NULL THEN
+      EXECUTE format('REVOKE %I FROM pgb_agent', role_name);
+    END IF;
+  END LOOP;
+END
+$$;
 
 -- [NO-GRANT] REPLICATION is a role ATTRIBUTE, cleared via NOREPLICATION above (§0).
 -- There is no GRANT REPLICATION; the attribute is the control. Asserted in the matrix.

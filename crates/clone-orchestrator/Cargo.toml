@@ -13,7 +13,7 @@ publish = false
 name = "pgb_clone_orchestrator"
 
 [features]
-# The real-PG18 connection seams (`conn` module): PgRehearsal — the §12 in-txn
+# The real-Postgres connection seams (`conn` module): PgRehearsal — the §12 in-txn
 # baseline rehearsal — and PgApplyConn/PgRevertConn — the focused single-int-PK
 # UPDATE/DELETE apply + revert conns. Behind a feature so the DB-free build/test
 # path needs no Postgres client. The integration tests and `pgb-applyd` enable
@@ -45,7 +45,7 @@ thiserror = "2"
 # crypto impl. Default features off (we only touch the key type), so this adds no
 # RNG/serde surface.
 ed25519-dalek = { version = "2", default-features = false }
-# Synchronous Postgres client for the real-PG18 `conn` seams (the lifted
+# Synchronous Postgres client for the real-Postgres `conn` seams (the lifted
 # PgRehearsal / PgApplyConn / PgRevertConn). OPTIONAL — only pulled in under the
 # `pg` feature, so the default DB-free build never links it. MIT/Apache (keeps
 # cargo-deny green); the sync client keeps these conns linear and readable,
@@ -58,7 +58,7 @@ postgres = { version = "0.19", optional = true }
 # (a dev-dep on the crate itself). This is what makes the tests reuse the ONE
 # library impl rather than a second copy.
 pgb-clone-orchestrator = { path = ".", features = ["pg"] }
-# Synchronous Postgres client for the env-gated (PG_BUMPERS_IT=1) real-PG18
+# Synchronous Postgres client for the env-gated (PG_BUMPERS_IT=1) real-Postgres
 # integration tests (DB setup/teardown helpers in tests/common). MIT/Apache
 # (keeps cargo-deny green); the sync client keeps the harness linear, matching
 # the S0 fidelity spike.
@@ -72,7 +72,7 @@ rand_core = { version = "0.6", features = ["getrandom"] }
 # `SigningKey::generate(&mut OsRng)` compiles (cargo unions features across the
 # normal + dev dep). The library dep stays default-features = false.
 ed25519-dalek = { version = "2", features = ["rand_core"] }
-# The ONE shared PG18 bin-dir resolver every env-gated IT calls (issue #44), so
-# the `PG_BUMPERS_PG18_BIN → PG_BUMPERS_PGBIN → Homebrew` precedence lives + is
+# The ONE shared PG bin-dir resolver every env-gated IT calls (issue #44), so
+# the `PG_BUMPERS_PG_BIN → PG_BUMPERS_PGBIN → Homebrew` precedence lives + is
 # unit-tested in exactly one place (no per-resolver drift).
 pgb-test-support = { path = "../test-support" }
