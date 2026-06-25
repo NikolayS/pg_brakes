@@ -435,10 +435,15 @@ async fn connect_backend(
 /// to the agent (a transparent version pass-through across PG 14-18, never a
 /// hardcoded 18.0). The empty string if the backend never reports one (it always
 /// does in practice; the call site applies a fail-safe fallback).
-async fn wait_for_ready(
-    stream: &mut TcpStream,
-    target: &BackendTarget,
-) -> Result<String, SessionError> {
+///
+/// Generic over the stream type so the capture path can be exercised DB-free
+/// against a synthesized backend startup byte-stream (production drives it on a
+/// `TcpStream`). Requires `AsyncWrite` because a cleartext-password backend prompt
+/// must be answered mid-startup.
+async fn wait_for_ready<S>(stream: &mut S, target: &BackendTarget) -> Result<String, SessionError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     let mut server_version = String::new();
     loop {
         let frame = read_tagged_frame(stream)
@@ -1211,6 +1216,121 @@ mod tests {
         assert!(
             sv_empty.starts_with("unknown") && !sv_empty.contains("18"),
             "a missing backend version must fail safe to 'unknown', never invent 18.0 (got {sv_empty:?})"
+        );
+    }
+
+    /// A throwaway [`BackendTarget`] for the capture-path tests below (never used
+    /// to open a real connection — `wait_for_ready` is driven over an in-memory
+    /// duplex, so host/port are inert).
+    fn dummy_backend_target() -> BackendTarget {
+        BackendTarget {
+            host: "127.0.0.1".into(),
+            port: 1, // inert: the capture test never dials this
+            database: "postgres".into(),
+            role: "pgb_agent".into(),
+            password: "x".into(),
+        }
+    }
+
+    /// Synthesize a backend startup byte-stream — the exact frame sequence
+    /// `wait_for_ready` consumes up to `ReadyForQuery` — then drive `wait_for_ready`
+    /// over an in-memory duplex (no live PG) and return the captured
+    /// `server_version`. When `server_version` is `None`, the `ParameterStatus`
+    /// for it is omitted entirely (the absent-version case).
+    async fn capture_server_version(server_version: Option<&str>) -> String {
+        let mut frames = Vec::new();
+        // The minimal post-startup tail a real backend emits before ReadyForQuery:
+        // AuthenticationOk, a few ParameterStatus, BackendKeyData, ReadyForQuery.
+        frames.extend_from_slice(&BackendMessage::AuthenticationOk.encode());
+        frames.extend_from_slice(
+            &BackendMessage::ParameterStatus {
+                name: "application_name".into(),
+                value: "pgb_proxy".into(),
+            }
+            .encode(),
+        );
+        if let Some(v) = server_version {
+            frames.extend_from_slice(
+                &BackendMessage::ParameterStatus {
+                    name: "server_version".into(),
+                    value: v.into(),
+                }
+                .encode(),
+            );
+        }
+        frames.extend_from_slice(
+            &BackendMessage::ParameterStatus {
+                name: "client_encoding".into(),
+                value: "UTF8".into(),
+            }
+            .encode(),
+        );
+        frames.extend_from_slice(
+            &BackendMessage::BackendKeyData {
+                process_id: 42,
+                secret_key: 7,
+            }
+            .encode(),
+        );
+        frames.extend_from_slice(
+            &BackendMessage::ReadyForQuery {
+                status: TransactionStatus::Idle,
+            }
+            .encode(),
+        );
+
+        // In-memory backend: write the synthesized frames into one half, drive
+        // wait_for_ready over the other. Any reply wait_for_ready writes (none on
+        // this trust-style stream) just lands in `pgb_end`'s read buffer, ignored.
+        let (mut pgb_end, mut backend_end) = tokio::io::duplex(64 * 1024);
+        backend_end.write_all(&frames).await.unwrap();
+        backend_end.flush().await.unwrap();
+        drop(backend_end); // EOF after ReadyForQuery so any over-read terminates cleanly
+
+        let target = dummy_backend_target();
+        wait_for_ready(&mut pgb_end, &target)
+            .await
+            .expect("wait_for_ready must reach ReadyForQuery over the synthesized stream")
+    }
+
+    /// C1 #102 — the CAPTURE half of the version pass-through, with NO live PG.
+    /// `wait_for_ready` parsing the backend's `ParameterStatus(server_version=…)`
+    /// is the SOLE source of the agent-visible version, yet had no test (the
+    /// forwarding test above feeds a literal). Here we synthesize the backend's
+    /// startup byte-stream and assert the captured value equals the synthesized
+    /// one. RED-if-broken: if the `server_version` capture arm were dropped (or
+    /// hardcoded), `wait_for_ready` would return `""`, the call site would fail
+    /// safe to "unknown", and every `assert_eq!` below would fail — so this test
+    /// has teeth against a regression of the capture path.
+    #[tokio::test]
+    async fn wait_for_ready_captures_backend_server_version() {
+        // A realistic PG15 ParameterStatus value is captured verbatim.
+        let captured = capture_server_version(Some("15.6 (Debian 15.6-1.pgdg120+1)")).await;
+        assert_eq!(
+            captured, "15.6 (Debian 15.6-1.pgdg120+1)",
+            "the captured server_version must equal the backend's synthesized value verbatim"
+        );
+
+        // A bare PG14 version string round-trips exactly too.
+        let captured14 = capture_server_version(Some("14.23")).await;
+        assert_eq!(captured14, "14.23");
+
+        // ABSENT server_version → empty capture, which the call site turns into the
+        // fail-safe "unknown" (NEVER an invented "18.0"). Prove both: the raw empty
+        // capture AND that finish_agent_startup degrades it to "unknown".
+        let captured_none = capture_server_version(None).await;
+        assert_eq!(
+            captured_none, "",
+            "an absent server_version must capture as empty, not a fabricated default"
+        );
+        let mut tail = Vec::new();
+        finish_agent_startup(&mut tail, &captured_none)
+            .await
+            .unwrap();
+        let advertised = server_version_param(&tail).await.unwrap();
+        assert!(
+            advertised.starts_with("unknown") && !advertised.contains("18"),
+            "an absent backend version must fail safe to 'unknown', never 18.0 (got {advertised:?})"
         );
     }
 

@@ -1,5 +1,6 @@
-//! Real-PG18 integration tests for `pgb-applyd` (issue #67, S5). Env-gated behind
-//! `PG_BUMPERS_IT=1`; runs against a throwaway PG18 on a dedicated high port
+//! Real-Postgres integration tests for `pgb-applyd` (issue #67, S5). Env-gated behind
+//! `PG_BUMPERS_IT=1`; runs against a throwaway Postgres (any supported major, 14-18)
+//! on a dedicated high port
 //! (⚠️ NEVER 5432). Run:
 //!
 //! ```sh
@@ -8,7 +9,7 @@
 //!
 //! Two layers are exercised:
 //!
-//! 1. **the Service over a real `postgres::Client` + seeded PG18** — the
+//! 1. **the Service over a real `postgres::Client` + seeded Postgres** — the
 //!    `propose → dry_run → (operator) approve → apply` lifecycle runs
 //!    `guarded_apply_with_grant`, COMMITS a bounded UPDATE, and a REVERT via the
 //!    captured typed-inverse **restores the pre-state byte-for-byte** (we assert
@@ -22,7 +23,7 @@
 //!    which drives the same binary end-to-end).
 //!
 //! The §4 guards + the grant crypto are REUSED; this asserts the daemon's wiring
-//! + the bounded/reversible/fail-closed guarantees end-to-end on real PG18.
+//! + the bounded/reversible/fail-closed guarantees end-to-end on the live backend.
 
 use std::collections::BTreeMap;
 
@@ -238,7 +239,7 @@ fn service(vk: VerifyingKey) -> Svc {
     Service::new(flow, sink, InMemoryNonceStore::new(), vk, policy())
 }
 
-/// Run propose → dry_run → request_elevation → approve over real PG18, returning
+/// Run propose → dry_run → request_elevation → approve over the live backend, returning
 /// `(proposal_id, total_rows, confirm_token)`.
 fn approve_through(
     svc: &mut Svc,
@@ -308,7 +309,7 @@ fn lifecycle_apply_commits_bounded_update_and_revert_restores_prestate() {
             &NoopBarrier::new(),
             &clock,
         )
-        .expect("the grant-gated apply must commit on real PG18")
+        .expect("the grant-gated apply must commit on the live backend")
     };
     assert!(res.applied);
     assert_eq!(res.rows_written, 4);

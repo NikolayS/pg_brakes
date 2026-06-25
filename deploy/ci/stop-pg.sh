@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# pg_bumpers — CI helper: stop + remove a throwaway PG18 admin cluster started by
+# pg_bumpers — CI helper: stop + remove a throwaway Postgres admin cluster started by
 # deploy/ci/start-pg.sh (issue #44). NEVER touches :5432. Best-effort: a missing
 # cluster is not an error (teardown must be idempotent).
 #

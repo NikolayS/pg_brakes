@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # pg_bumpers — local dev/test substrate (live S0 substrate for THIS environment)
 #
-# Brings up isolated, throwaway Postgres 18 clusters under ./.localstack/ using the
-# Homebrew keg-only postgresql@18 binaries (initdb / pg_basebackup / pg_ctl). No Docker.
+# Brings up isolated, throwaway Postgres clusters under ./.localstack/ using a
+# Homebrew keg-only PostgreSQL 14-18 binary set (initdb / pg_basebackup / pg_ctl). No Docker.
 #
 # Why local PG instead of docker-compose here: `docker pull` is non-functional in the
 # pg_bumpers build environment (host-level daemon networking fault). docker-compose.yml
@@ -56,7 +56,7 @@ ROOT_KEY="$(printf '%s' "$ROOT" | cksum | tr -d ' ' | cut -c1-12)"
 PID_DIR="$PID_BASE/$ROOT_KEY"
 
 # Unix-socket dir for OUR clusters. We pin it explicitly (rather than relying on
-# the build's compiled default) because PGDG PG18 on Debian/Ubuntu defaults to
+# the build's compiled default) because PGDG PostgreSQL on Debian/Ubuntu defaults to
 # /var/run/postgresql — NOT writable by a CI runner user, so `pg_ctl start`
 # would fail there. A SHORT path under the PID base keeps us well under the
 # ~103-byte socket-path cap, and is keyed by $ROOT so distinct stacks never
@@ -95,7 +95,7 @@ die()  { printf '[local-stack] ERROR: %s\n' "$*" >&2; exit 1; }
 
 require_bins() {
   for b in initdb pg_ctl pg_basebackup psql pg_isready; do
-    [ -x "$PGBIN/$b" ] || die "missing $PGBIN/$b — set PGBIN to your postgresql@18 bin dir"
+    [ -x "$PGBIN/$b" ] || die "missing $PGBIN/$b — set PGBIN to a PostgreSQL 14-18 bin dir"
   done
 }
 

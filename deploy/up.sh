@@ -7,7 +7,7 @@
 #   read/write → watch a DROP TABLE get REFUSED and a no-WHERE UPDATE get bounded.
 #
 # What it ACTUALLY launches (live, honest — see the per-line health checks):
-#   1. a hardened throwaway PG18 via deploy/local-stack.sh up (primary 54321 +
+#   1. a hardened throwaway Postgres via deploy/local-stack.sh up (primary 54321 +
 #      meta 54323 + replica 54322; NEVER 5432). The native-role WALL `pgb_agent`
 #      is applied to the primary by local-stack (deploy/sql/10_hardened_role.sql).
 #   2. a demo DB on the primary carrying the canonical `_meta` audit chain
@@ -17,7 +17,7 @@
 #      bounded-reversible-write shape), with SELECT on the read surface GRANTed to
 #      the WALL role `pgb_agent`.
 #   3. pgb-proxy — the inline agent endpoint IN FRONT of the primary. The MCP read
-#      path connects HERE (agent SCRAM endpoint), NOT raw PG18. Dev-mode TLS is OFF
+#      path connects HERE (agent SCRAM endpoint), NOT raw Postgres. Dev-mode TLS is OFF
 #      (PGB_PROXY_REQUIRE_TLS=false) — stated explicitly; the proxy still does
 #      SCRAM-SHA-256 of the agent and originates the backend session as the WALL
 #      role. The proxy is the audit-chain anchor OWNER.
@@ -37,7 +37,7 @@
 #   deploy/up.sh                 # build (unless --no-build) + launch + print connect line
 #   deploy/up.sh --no-build      # skip the cargo build (use prebuilt artifacts)
 #
-# Requirements: the Homebrew keg-only postgresql@18 binaries (PGBIN) and a Rust
+# Requirements: a Homebrew keg-only PostgreSQL 14-18 binary set (PGBIN) and a Rust
 # toolchain. The throwaway Ed25519 approver keypair is minted by the Rust-native
 # `pgb-cli keygen` (no extra runtime). Clean-room; Apache/MIT/BSD/ISC deps only.
 
@@ -103,7 +103,7 @@ port_listeners() { lsof -tiTCP:"$1" -sTCP:LISTEN 2>/dev/null | sort -u | tr '\n'
 PRE_5432="$(port_listeners 5432)"
 log "pre-flight :5432 listener(s): ${PRE_5432:-<none>} (we NEVER touch these)"
 
-[ -x "$PGBIN/initdb" ] || die "PG18 initdb not found at $PGBIN; set PGBIN to your postgresql@18 bin dir"
+[ -x "$PGBIN/initdb" ] || die "initdb not found at $PGBIN; set PGBIN to a PostgreSQL 14-18 bin dir"
 command -v cargo >/dev/null || die "cargo not found"
 
 psql_primary() {
@@ -131,9 +131,9 @@ for b in "$PROXY_BIN" "$APPLYD_BIN" "$WARDEN_BIN" "$CLI_BIN" "$MCP_BIN"; do
 done
 
 # ----------------------------------------------------------------------------
-# 2. Bring up the hardened throwaway PG18 (primary + meta + replica) via local-stack.
+# 2. Bring up the hardened throwaway Postgres (primary + meta + replica) via local-stack.
 # ----------------------------------------------------------------------------
-log "bringing up the throwaway PG18 (deploy/local-stack.sh up; primary $PRIMARY_PORT, meta $META_PORT)…"
+log "bringing up the throwaway Postgres (deploy/local-stack.sh up; primary $PRIMARY_PORT, meta $META_PORT)…"
 PGBIN="$PGBIN" "$SCRIPT_DIR/local-stack.sh" up
 
 # Fresh state dir (keys, socket dir, anchor) for this run.
@@ -264,7 +264,7 @@ if ! wait_tcp "$HOST" "$PROXY_PORT" proxy 100; then
   die "pgb-proxy failed to start"
 fi
 kill -0 "$PROXY_PID" 2>/dev/null || { tail -30 "$PROXY_LOG" >&2; die "pgb-proxy exited early"; }
-log "pgb-proxy up (pid $PROXY_PID; reads route through here, NOT raw PG18)."
+log "pgb-proxy up (pid $PROXY_PID; reads route through here, NOT raw Postgres)."
 
 # ----------------------------------------------------------------------------
 # 5. Generate the throwaway Ed25519 approver keypair (the apply-time trust root).
@@ -371,13 +371,13 @@ POST_5432="$(port_listeners 5432)"
 cat >&2 <<BANNER
 
 ================================================================================
- pg_bumpers stack is UP. Reads route through pgb-proxy (NOT raw PG18). :5432 untouched.
+ pg_bumpers stack is UP. Reads route through pgb-proxy (NOT raw Postgres). :5432 untouched.
 ================================================================================
 
   pgb-proxy  : $HOST:$PROXY_PORT   (agent SCRAM endpoint, TLS OFF dev-mode, WALL role pgb_agent)
   pgb-applyd : $SOCKET_PATH        (write-path Unix socket)
   pgb-warden : live (pid $WARDEN_PID)
-  PG18       : primary $PRIMARY_PORT, meta $META_PORT  (throwaway; NEVER 5432)
+  Postgres   : primary $PRIMARY_PORT, meta $META_PORT  (throwaway; NEVER 5432)
   demo DB    : $DEMO_DB  (accounts read surface + the _meta audit chain)
 
   Connect a REAL Claude Code to this stack — paste this single line:

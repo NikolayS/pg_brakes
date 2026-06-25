@@ -7,7 +7,7 @@
 //! ```
 //!
 //! This proves the corpus's **direct-to-DB-bypass** scenario against a REAL,
-//! hardened PG18 `pgb_agent` role: the agent connects WITHOUT the proxy and the
+//! hardened `pgb_agent` role on the live backend: the agent connects WITHOUT the proxy and the
 //! WALL (layer 0/1) must deny every destructive/exfil action — DROP, write to a
 //! non-whitelisted table, `COPY … PROGRAM` (RCE), reading non-whitelisted data,
 //! and `pg_read_file` (server-file read). Each denial is the floor's BLOCK
@@ -57,7 +57,7 @@ fn hardened_role_sql_path() -> PathBuf {
         .join("deploy/sql/10_hardened_role.sql")
 }
 
-/// A throwaway PG18 primary on a dedicated port; `Drop` tears it down.
+/// A throwaway Postgres primary on a dedicated port; `Drop` tears it down.
 struct Cluster {
     datadir: PathBuf,
     sockdir: PathBuf,

@@ -38,7 +38,7 @@ This is an MVP under active construction. Honest status as of this writing:
 | Tool | Version | Notes |
 |------|---------|-------|
 | Rust | **1.90.0** | Pinned by [`rust-toolchain.toml`](../rust-toolchain.toml) (rustfmt + clippy). `rustup` auto-selects it. |
-| PostgreSQL | **18** | Client + server binaries (`initdb`, `pg_ctl`, `pg_basebackup`, `psql`, `pg_isready`). |
+| PostgreSQL | **14–18** | Client + server binaries (`initdb`, `pg_ctl`, `pg_basebackup`, `psql`, `pg_isready`). |
 | `cargo-deny` | latest | License/advisory gate: `cargo install cargo-deny`. |
 
 ### Install PostgreSQL 14–18 (macOS, Homebrew)
@@ -181,7 +181,7 @@ bash deploy/smoke.sh
 ### 4b. The WALL matrix — `deploy/test/wall_matrix.sh`
 
 The role-hardening test matrix (SPEC §3 layers 0–1). It spins its **own** dedicated
-throwaway PG 18 cluster on **54331** (you do *not* need `local-stack` up for this one),
+throwaway PG cluster (any supported major, 14-18) on **54331** (you do *not* need `local-stack` up for this one),
 applies the hardened-role SQL + the Layer 0 boundary `pg_hba`, then asserts one row per
 matrix item by **attempting each denied action as the `pgb_agent` role and proving it
 fails with a permission error** (plus: whitelisted SELECT succeeds, member-of-nothing,

@@ -75,7 +75,7 @@ if [ "${PG_BUMPERS_IT:-0}" != "1" ]; then
   exit 0
 fi
 for b in initdb pg_ctl psql pg_isready; do
-  [ -x "$PGBIN/$b" ] || { echo "[wall] FAIL: missing $PGBIN/$b — set PGBIN to your postgresql@18 bin dir" >&2; exit 1; }
+  [ -x "$PGBIN/$b" ] || { echo "[wall] FAIL: missing $PGBIN/$b — set PGBIN to a PostgreSQL 14-18 bin dir" >&2; exit 1; }
 done
 [ -f "$SQL_FILE" ]   || { echo "[wall] FAIL: missing $SQL_FILE" >&2; exit 1; }
 [ -f "$HBA_RENDER" ] || { echo "[wall] FAIL: missing $HBA_RENDER" >&2; exit 1; }
@@ -125,7 +125,7 @@ log "mode=$MODE — initdb dedicated cluster on :$TEST_PORT under $DATADIR"
 # initdb with trust for the bootstrap superuser (local setup); the rendered pg_hba below
 # overwrites the rules so the AGENT role authenticates with scram from the proxy host and
 # is rejected from non-proxy origins. password_encryption=scram so the agent's password
-# verifier is scram (set explicitly; PG18 default is scram already).
+# verifier is scram (set explicitly; the PostgreSQL 14-18 default is scram already).
 "$PGBIN/initdb" -D "$DATADIR/data" -U postgres -A trust --no-sync >/dev/null
 
 cat >> "$DATADIR/data/postgresql.conf" <<EOF
@@ -133,7 +133,7 @@ cat >> "$DATADIR/data/postgresql.conf" <<EOF
 # pg_bumpers wall-matrix test cluster
 listen_addresses = '$NONPROXY_HOST,$PROXY_HOST'
 port = $TEST_PORT
-# Pin the socket dir to our (short, writable) scratch dir. PGDG PG18 on
+# Pin the socket dir to our (short, writable) scratch dir. PGDG PostgreSQL on
 # Debian/Ubuntu defaults unix_socket_directories to /var/run/postgresql, which a
 # CI runner user cannot write to — so pg_ctl start would fail. All queries here
 # go over TCP anyway; the socket is only for the postmaster's own bind.

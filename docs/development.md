@@ -23,12 +23,12 @@ So you document and test against what actually exists:
 
 | Sprint | Scope | Status |
 |---|---|---|
-| **S0** | skeleton · the Wall (hardened role) · `core` · contracts/seams · CI gate | **merged, green on PG18** |
-| **S1** | pgwire termination · audit hash-chain · enforcing proxy | **merged, green on PG18** |
-| **S2** | clone dry-run (blast radius) · clone governance | **merged, green on PG18** |
-| **S3** | guarded apply · typed-inverse capture | **merged, green on PG18** |
-| **S4** | warden loop · MCP tools · policy wiring · audit anchoring · read-gates · CLI approval | **merged, green on PG18** |
-| **S5** | `pgb-applyd` write daemon · runnable MCP stdio shell · `deploy/up.sh` end-to-end · marquee MCP-bypass repro | **merged, green on PG18** |
+| **S0** | skeleton · the Wall (hardened role) · `core` · contracts/seams · CI gate | **merged, green across the 14-18 CI matrix** |
+| **S1** | pgwire termination · audit hash-chain · enforcing proxy | **merged, green across the 14-18 CI matrix** |
+| **S2** | clone dry-run (blast radius) · clone governance | **merged, green across the 14-18 CI matrix** |
+| **S3** | guarded apply · typed-inverse capture | **merged, green across the 14-18 CI matrix** |
+| **S4** | warden loop · MCP tools · policy wiring · audit anchoring · read-gates · CLI approval | **merged, green across the 14-18 CI matrix** |
+| **S5** | `pgb-applyd` write daemon · runnable MCP stdio shell · `deploy/up.sh` end-to-end · marquee MCP-bypass repro | **merged, green across the 14-18 CI matrix** |
 | — | LLM gating risk-engine (write + read) · Rust `pgb-mcp` port ([#83](https://github.com/NikolayS/pg_bumpers/issues/83)) | fast-follow |
 
 What this means in the tree today:
@@ -133,7 +133,7 @@ there is **no** dedicated MCP CI job.
 It is a **runnable stdio shell** with the nine §11 tools, a live read path through
 `pgb-proxy`, and a write path through the `pgb-applyd` socket. The env-gated Rust
 e2e tests `crates/mcp/tests/{write_path_e2e,read_path_e2e}.rs` drive the shipped
-`PgBumpersMcp` handler end-to-end against a throwaway PG18 (`PG_BUMPERS_IT=1`); the
+`PgBumpersMcp` handler end-to-end against a throwaway Postgres (`PG_BUMPERS_IT=1`); the
 catalog test pins the fail-closed surface (exactly nine tools, no `approve`).
 
 ### Run all gates locally before pushing
@@ -168,10 +168,11 @@ Two test tiers, by design:
   This is what CI runs, so CI stays fast and DB-free. Integration test files still
   **build and link** under the fast job (the crate compiles); they just **skip**
   their assertions.
-- **Integration tier (gated, real).** Tests that need a live Postgres 18 are
-  gated behind the env var **`PG_BUMPERS_IT=1`**. When the gate is unset, they
-  print a `[skip]` line and exit success; when it's set, they run for **real**
-  against live PG18 and produce evidence.
+- **Integration tier (gated, real).** Tests that need a live Postgres (any
+  supported major, 14-18) are gated behind the env var **`PG_BUMPERS_IT=1`**. When
+  the gate is unset, they print a `[skip]` line and exit success; when it's set,
+  they run for **real** against the live backend (now exercised across the 14-18
+  CI matrix) and produce evidence.
 
 The contract used everywhere (see `crates/proxy/tests/proxy_it.rs`,
 `crates/clone-orchestrator/tests/common/mod.rs`,
@@ -196,7 +197,7 @@ evidence prints, then tear down:
 deploy/local-stack.sh up      # initdb + start primary(54321) + meta(54323),
                               # base-backup + stream replica(54322)
 
-# proxy end-to-end against live PG18 (read-only gate, byte/row cutoff,
+# proxy end-to-end against the live backend (read-only gate, byte/row cutoff,
 # statement_timeout, the marquee COMMIT; DROP SCHEMA block, audit chain):
 PG_BUMPERS_IT=1 cargo test -p pgb-proxy --test proxy_it -- --nocapture
 

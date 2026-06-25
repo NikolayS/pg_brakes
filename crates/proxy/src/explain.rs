@@ -253,7 +253,8 @@ mod tests {
 
     #[test]
     fn parses_total_cost_and_rows_off_a_real_plan_line() {
-        // The exact shape PG18 text EXPLAIN emits for the top node.
+        // The exact shape Postgres text EXPLAIN emits for the top node (stable
+        // across the supported PG 14-18 range).
         let line = "Seq Scan on rca_read  (cost=0.00..22.70 rows=1270 width=36)";
         let est = parse_plan_estimate(line).expect("must parse");
         assert_eq!(est.total_cost, 22.70);

@@ -1,4 +1,4 @@
-//! Self-contained throwaway PG18 **primary** cluster for the clone-governance
+//! Self-contained throwaway Postgres **primary** cluster for the clone-governance
 //! integration tests (env-gated `PG_BUMPERS_IT=1`).
 //!
 //! Unlike `common::create_seeded_db` (which assumes a server is already up on a

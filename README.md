@@ -106,18 +106,18 @@ cargo build --locked -p pgb-proxy -p pgb-applyd -p pgb-warden -p pgb-cli -p pgb-
 bash deploy/up.sh          # add --no-build if you built in step 2
 ```
 
-It brings up a hardened throwaway PG18, launches the proxy + write-path daemon +
+It brings up a hardened throwaway Postgres, launches the proxy + write-path daemon +
 warden, and prints a ready-to-paste connect line. Real output:
 
 ```text
 ================================================================================
- pg_bumpers stack is UP. Reads route through pgb-proxy (NOT raw PG18). :5432 untouched.
+ pg_bumpers stack is UP. Reads route through pgb-proxy (NOT raw Postgres). :5432 untouched.
 ================================================================================
 
   pgb-proxy  : 127.0.0.1:6432   (agent SCRAM endpoint, TLS OFF dev-mode, WALL role pgb_agent)
   pgb-applyd : /tmp/pg_bumpers-up/applyd.sock        (write-path Unix socket)
   pgb-warden : live
-  PG18       : primary 54321, meta 54323  (throwaway; NEVER 5432)
+  Postgres   : primary 54321, meta 54323  (throwaway; NEVER 5432)
   demo DB    : pgb_demo  (accounts read surface + the _meta audit chain)
 
   Connect a REAL Claude Code to this stack — paste this single line:
@@ -246,7 +246,7 @@ Stops the three daemons, drops the throwaway clusters, frees the high ports, and
 verifies `:5432` was never touched.
 
 > The same end-to-end flow runs as env-gated Rust integration tests against a
-> throwaway PG18:
+> throwaway Postgres:
 > `PG_BUMPERS_IT=1 cargo test -p pgb-mcp --test write_path_e2e --test read_path_e2e`
 > drives the shipped `pgb-mcp` handler through the write path (via `pgb-applyd`)
 > and the read path (via `pgb-proxy`) — see

@@ -2,7 +2,7 @@
 # pg_bumpers — deploy/down.sh: clean teardown of the deploy/up.sh stack.
 #
 # Stops the three daemons by tracked PID (pgb-warden, pgb-applyd, pgb-proxy),
-# tears down the throwaway PG18 via deploy/local-stack.sh down, removes the temp
+# tears down the throwaway Postgres via deploy/local-stack.sh down, removes the temp
 # state dir, and verifies the dedicated ports are freed and :5432 is untouched.
 #
 # Usage: deploy/down.sh
@@ -53,9 +53,9 @@ stop_tracked applyd
 stop_tracked proxy
 
 # ----------------------------------------------------------------------------
-# Tear down the throwaway PG18 clusters (primary/meta/replica) + remove state.
+# Tear down the throwaway Postgres clusters (primary/meta/replica) + remove state.
 # ----------------------------------------------------------------------------
-log "tearing down the throwaway PG18 (deploy/local-stack.sh down)…"
+log "tearing down the throwaway Postgres (deploy/local-stack.sh down)…"
 PGBIN="$PGBIN" "$SCRIPT_DIR/local-stack.sh" down || log "local-stack down reported an issue (continuing)"
 
 if [ -d "$STATE_DIR" ]; then

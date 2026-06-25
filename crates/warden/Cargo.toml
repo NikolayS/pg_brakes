@@ -18,7 +18,7 @@ name = "pgb-warden"
 path = "src/main.rs"
 
 [features]
-# The live PG18 seams (`PgActivitySource` / `PgKiller`) + the Postgres `_meta`
+# The live-backend seams (`PgActivitySource` / `PgKiller`) + the Postgres `_meta`
 # audit sink are behind a default-on `pg` feature, so the pure gating logic +
 # audit-record construction build/test without a `postgres` client when desired
 # (`--no-default-features`). The shipped binary + the env-gated integration test
@@ -44,7 +44,7 @@ thiserror = "2"
 postgres = { version = "0.19", optional = true }
 
 [dev-dependencies]
-# The ONE shared PG18 bin-dir resolver every env-gated IT calls (issue #44), so
+# The ONE shared PG bin-dir resolver every env-gated IT calls (issue #44), so
 # the `PG_BUMPERS_PG_BIN → PG_BUMPERS_PGBIN → Homebrew` precedence lives + is
 # unit-tested in exactly one place (no per-resolver drift). Used by the env-gated
 # `warden_it` integration test (`PG_BUMPERS_IT=1`).

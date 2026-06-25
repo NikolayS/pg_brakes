@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# pg_bumpers — CI helper: start a THROWAWAY plain PG18 admin cluster on a
+# pg_bumpers — CI helper: start a THROWAWAY plain Postgres admin cluster on a
 # dedicated high port (issue #44 — the CI integration job).
 #
 # Several env-gated Rust ITs do NOT self-provision; they connect to an
@@ -75,6 +75,6 @@ for _ in $(seq 1 60); do
   sleep 0.5
 done
 
-echo "[start-pg] PG18 did not become ready on :$PORT — log tail:" >&2
+echo "[start-pg] Postgres did not become ready on :$PORT — log tail:" >&2
 tail -n 40 "$LOGFILE" >&2 || true
 exit 1

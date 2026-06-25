@@ -57,7 +57,7 @@ jobs:
 
       # local-stack.sh PATH/PID guard unit tests (issue #16). Pure path/PID logic —
       # NO PostgreSQL required and nothing real is ever started or killed — so it runs in
-      # this FAST gate (not the PG18 integration job). bash -n first as a syntax gate.
+      # this FAST gate (not the integration matrix job). bash -n first as a syntax gate.
       # No untrusted GitHub-event input is used; both commands are static.
       - name: deploy guard tests — local-stack.sh validate_root / pid_is_ours
         run: |
@@ -203,7 +203,7 @@ jobs:
       - name: IT — clone-orchestrator governance (dry_run clone + guarded apply + SIGKILL teardown)
         run: cargo test -p pgb-clone-orchestrator --test clone_governance_it --locked -- --nocapture --test-threads=1
 
-      - name: IT — MCP write-path e2e (mcp -> applyd socket -> guarded_apply -> PG18)
+      - name: IT — MCP write-path e2e (mcp -> applyd socket -> guarded_apply -> the live backend)
         run: cargo test -p pgb-mcp --test write_path_e2e --locked -- --nocapture --test-threads=1
 
       # ---- STACK-BACKED ITs (connect to a pre-provisioned admin server) ----

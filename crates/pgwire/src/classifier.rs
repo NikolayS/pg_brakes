@@ -136,9 +136,10 @@ fn is_read_statement(stmt: &Statement) -> bool {
         //       `EXPLAIN SELECT 1; DROP …` are NOT reads).
         // This lets the agent read path serve `explain_plan` THROUGH the proxy
         // without ever planning *or executing* a write — the explain-hole stays
-        // closed by construction. Live-verified on PostgreSQL 18.4 that
-        // `EXPLAIN (ANALYSE) …` executes (it mutates/deletes/side-effects) while
-        // every allowlisted option below only plans.
+        // closed by construction. Live-verified that `EXPLAIN (ANALYSE) …`
+        // executes (it mutates/deletes/side-effects) while every allowlisted
+        // option below only plans — behaviour shared across the supported PG
+        // 14-18 range (now exercised across the 14-18 CI matrix).
         Statement::Explain {
             analyze,
             statement,
@@ -166,15 +167,17 @@ fn is_read_statement(stmt: &Statement) -> bool {
     }
 }
 
-/// The `EXPLAIN (…)` options that we have **proven** (live, on PostgreSQL 18.4)
-/// only PLAN the statement — they never execute it, so they have no side effects
-/// and are safe on the read path. The list is intentionally an **allowlist**, not
-/// a denylist: anything not on it is fail-closed to not-read.
+/// The `EXPLAIN (…)` options that we have **proven** (live) only PLAN the
+/// statement — they never execute it, so they have no side effects and are safe
+/// on the read path. The list is intentionally an **allowlist**, not a denylist:
+/// anything not on it is fail-closed to not-read.
 ///
-/// Proven plan-only on PG18.4 (verified against a side-effecting `SELECT bump()`
-/// that mutates a sentinel — the sentinel stayed `0`, i.e. no execution):
+/// Proven plan-only (verified against a side-effecting `SELECT bump()` that
+/// mutates a sentinel — the sentinel stayed `0`, i.e. no execution):
 /// `FORMAT`, `VERBOSE`, `COSTS`, `SETTINGS`, `GENERIC_PLAN`, `SUMMARY`, `MEMORY`,
-/// and standalone `BUFFERS` (PG18 reports planning buffers without running).
+/// and standalone `BUFFERS` (Postgres reports planning buffers without running);
+/// the option semantics are stable across the supported PG 14-18 range and are
+/// now exercised across the 14-18 CI matrix.
 ///
 /// **Deliberately excluded** (each EXECUTES the statement — proven live, or by PG
 /// rule cannot stand alone without `ANALYZE`, which executes):

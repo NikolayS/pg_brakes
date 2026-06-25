@@ -1,9 +1,9 @@
-//! Env-gated **real PG18** integration test for the warden (SPEC §3 layer 2,
+//! Env-gated **real Postgres** integration test for the warden (SPEC §3 layer 2,
 //! §4, §10.9; issues #52, #65). Runs only when `PG_BUMPERS_IT=1`, so CI's fast
 //! `cargo test` skips it (the crate still builds/links).
 //!
 //! ```sh
-//! # stand up a dedicated throwaway PG18 cluster on a high port (NEVER 5432):
+//! # stand up a dedicated throwaway Postgres cluster on a high port (NEVER 5432):
 //! PG_BUMPERS_IT=1 cargo test -p pgb-warden --test warden_it -- --nocapture
 //! ```
 //!
@@ -83,7 +83,7 @@ struct ThrowawayCluster {
 }
 
 impl ThrowawayCluster {
-    /// Stand up (or attach to an override) a throwaway PG18 cluster.
+    /// Stand up (or attach to an override) a throwaway Postgres cluster.
     fn up() -> (Self, String) {
         if let Ok(dsn) = std::env::var("PG_BUMPERS_WARDEN_PGURL") {
             // Attach mode: an external local-stack primary. We don't own it.
@@ -281,7 +281,7 @@ fn backend_present(admin: &mut Client, pid: i32) -> bool {
 #[test]
 fn warden_terminates_spares_alarms_and_audits_each_action_to_meta() {
     if !it_enabled() {
-        eprintln!("[skip] warden_it: set PG_BUMPERS_IT=1 to run against live PG18");
+        eprintln!("[skip] warden_it: set PG_BUMPERS_IT=1 to run against the live backend");
         return;
     }
 

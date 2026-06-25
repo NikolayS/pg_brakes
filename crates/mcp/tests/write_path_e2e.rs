@@ -1,13 +1,13 @@
-//! Env-gated **real PG18** end-to-end test for the EPIC #83 PR3 WRITE PATH: a REAL
+//! Env-gated **real Postgres** end-to-end test for the EPIC #83 PR3 WRITE PATH: a REAL
 //! MCP client drives `PgBumpersMcp` whose write tools execute THROUGH the live
-//! `pgb-applyd` Unix-socket daemon (the grant-gated §4 floor) in front of PG18 —
-//! NOT a fake, NOT raw PG. This is the honesty bar the founder set: a write must
-//! genuinely traverse `pgb-mcp → applyd-socket → guarded_apply_with_grant → PG18`,
+//! `pgb-applyd` Unix-socket daemon (the grant-gated §4 floor) in front of the live
+//! backend — NOT a fake, NOT raw PG. This is the honesty bar the founder set: a write must
+//! genuinely traverse `pgb-mcp → applyd-socket → guarded_apply_with_grant → the backend`,
 //! proven by reading the actual committed rows back.
 //!
 //! Runs only when `PG_BUMPERS_IT=1`, so CI's fast `cargo test` skips it (the crate
-//! still builds/links). ⚠️ NEVER touches :5432 — it stands up a THROWAWAY PG18 on
-//! a dedicated high port (default 54360), with a clean teardown.
+//! still builds/links). ⚠️ NEVER touches :5432 — it stands up a THROWAWAY Postgres
+//! (any supported major, 14-18) on a dedicated high port (default 54360), with a clean teardown.
 //!
 //! ```sh
 //! PG_BUMPERS_IT=1 cargo test -p pgb-mcp --test write_path_e2e -- --nocapture --test-threads=1
@@ -24,7 +24,7 @@
 //!     `apply_write` WITHOUT a grant → `APPROVAL_REQUIRED`; the operator `approve`
 //!     (OUT-of-band over the socket, carrying the signing key) → `apply_write`
 //!     **commits a bounded write** (the even rows change, the odd rows do not),
-//!     reported reversible — the rows are read back from PG18 to prove it;
+//!     reported reversible — the rows are read back from the backend to prove it;
 //!   * an **over-cap** write (magnitude drift past the approved cap) → `BLAST_DRIFT`
 //!     abort, **no mutation** (the row count is unchanged);
 //!   * `apply_write` without a matching `confirm_rows` → blocked
@@ -59,7 +59,7 @@ fn it_enabled() -> bool {
 }
 
 // =============================================================================
-//  Throwaway PG18 cluster (⚠️ NEVER 5432) — initdb + pg_ctl on a dedicated high
+//  Throwaway Postgres cluster (⚠️ NEVER 5432) — initdb + pg_ctl on a dedicated high
 //  port, with a clean teardown. Mirrors the deploy convention (high port, local).
 // =============================================================================
 
@@ -161,7 +161,7 @@ impl Pg {
             }
             std::thread::sleep(Duration::from_millis(100));
         }
-        panic!("throwaway PG18 never accepted connections on port {port}");
+        panic!("throwaway Postgres never accepted connections on port {port}");
     }
 
     fn admin_dsn(&self) -> String {
@@ -441,12 +441,12 @@ async fn call_tool(
 async fn mcp_writes_traverse_the_live_applyd_floor_refuse_bound_approve_commit_overcap_abort() {
     if !it_enabled() {
         eprintln!(
-            "[skip] set PG_BUMPERS_IT=1 (PG18 in PATH) for the MCP write-path e2e through applyd"
+            "[skip] set PG_BUMPERS_IT=1 (PostgreSQL 14-18 in PATH) for the MCP write-path e2e through applyd"
         );
         return;
     }
 
-    // ---- stand up a THROWAWAY PG18 (NEVER 5432) + seed + the _meta chain ----
+    // ---- stand up a THROWAWAY Postgres (NEVER 5432) + seed + the _meta chain ----
     let pg = tokio::task::spawn_blocking(Pg::start)
         .await
         .expect("pg start thread");
@@ -730,8 +730,8 @@ async fn mcp_writes_traverse_the_live_applyd_floor_refuse_bound_approve_commit_o
         serde_json::json!(true),
         "the committed write is reversible: {applied}"
     );
-    // Read the ACTUAL committed rows back from PG18 — the proof the write went
-    // through applyd→guarded_apply→PG18, not a fake.
+    // Read the ACTUAL committed rows back from the backend — the proof the write went
+    // through applyd→guarded_apply→the backend, not a fake.
     let after = tokio::task::spawn_blocking({
         let dsn = dsn.clone();
         move || read_accounts(&dsn)
@@ -746,7 +746,7 @@ async fn mcp_writes_traverse_the_live_applyd_floor_refuse_bound_approve_commit_o
         assert_eq!(after[&id], before[&id], "odd {id} unchanged");
     }
     eprintln!(
-        "[ok] apply_write (granted) → COMMITTED: even rows zeroed, odd rows untouched (read back from PG18)"
+        "[ok] apply_write (granted) → COMMITTED: even rows zeroed, odd rows untouched (read back from the backend)"
     );
 
     // ---- 8. an OVER-CAP write → BLAST_DRIFT abort, no mutation ----

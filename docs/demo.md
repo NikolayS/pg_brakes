@@ -11,9 +11,9 @@ against the **real code in this tree**. It is honest about status:
 
 | Sprint | What | Status |
 |---|---|---|
-| **S0** | skeleton · WALL · core · contracts · fidelity gate | **merged, green on PG18** |
-| **S1** | pgwire · audit hash-chain · enforcing proxy | **merged, green on PG18** |
-| **S2** | clone dry-run (blast radius) · clone governance + orphan-reaper | **merged, green on PG18** |
+| **S0** | skeleton · WALL · core · contracts · fidelity gate | **merged, green across the 14-18 CI matrix** |
+| **S1** | pgwire · audit hash-chain · enforcing proxy | **merged, green across the 14-18 CI matrix** |
+| **S2** | clone dry-run (blast radius) · clone governance + orphan-reaper | **merged, green across the 14-18 CI matrix** |
 | **S3** | guarded apply · typed-inverse capture · auto-revert | **in progress / in review** |
 | **S4** | warden · MCP wiring · policy wiring · audit→`_meta` · read-gate roll-up · CLI approval | upcoming / fast-follow |
 | **S5** | deterministic benchmark · marquee MCP-bypass repro | upcoming / fast-follow |
@@ -75,12 +75,12 @@ The measurement backend is the `Rehearsal` trait — the clone-provider seam
   *persistence* impact, but it does touch the primary (SPEC §12 tradeoff).
 - **The moat (`local` provider, the DBLab stand-in)** — `LocalCloneProvider`
   ([`provider/local.rs`](../crates/clone-orchestrator/src/provider/local.rs)):
-  take a `pg_basebackup` of the primary into an **isolated PG18 cluster on a
+  take a `pg_basebackup` of the primary into an **isolated Postgres cluster on a
   dedicated port**, rehearse *there*, then tear it down. **Zero write/lock impact
   on the primary** — the clone inherits prod's catalog, RLS policies, and column
   grants byte-for-byte (parity is *inherent*).
 
-Both are proven against live PG18 (env-gated `PG_BUMPERS_IT=1`). The clone path's
+Both are proven against the live backend (env-gated `PG_BUMPERS_IT=1`; now exercised across the 14-18 CI matrix). The clone path's
 zero-prod-impact is asserted in
 [`tests/clone_governance_it.rs::marquee_rehearses_on_clone_with_zero_primary_impact`](../crates/clone-orchestrator/tests/clone_governance_it.rs)
 — the primary's balances are **byte-identical** before/after and the *same*
@@ -89,7 +89,7 @@ primary backend PID served both reads (the rehearsal never opened a txn on prod)
 #### Run it
 
 ```sh
-# Baseline (in-txn) dry-run against a throwaway PG18 cluster:
+# Baseline (in-txn) dry-run against a throwaway Postgres cluster:
 PG_BUMPERS_IT=1 cargo test -p pgb-clone-orchestrator --test dry_run_it -- --nocapture
 
 # The clone-provider path (real pg_basebackup → isolated clone → zero prod impact):
@@ -136,7 +136,7 @@ The numbers (`8` rows, the trigger firing 8 times, `RowExclusiveLock`,
 `reversible: true`, `inverse_kind: PREIMAGE_UPSERT`, `predicate_volatile: false`)
 are exactly what
 [`marquee_no_where_update_previews_and_leaves_primary_unchanged`](../crates/clone-orchestrator/tests/dry_run_it.rs)
-asserts against live PG18. The record round-trips through serde (the §10.1 wire
+asserts against the live backend. The record round-trips through serde (the §10.1 wire
 contract is pinned by a test). `clone_lsn` / `pk_set_checksum` digest values are
 illustrative; the row counts, trigger, lock mode, and flags are real.
 
@@ -153,7 +153,7 @@ deletes 4 parent accounts and reports `cascade_by_table: {"public.entries": 8}`
 
 #### Refusals you can watch fail-closed (all MERGED)
 
-Every one of these is exercised against real PG18 in `dry_run_it.rs`, and the DB
+Every one of these is exercised against the live backend in `dry_run_it.rs`, and the DB
 is asserted **byte-for-byte untouched** afterward:
 
 | Proposed statement | Outcome | Why |
@@ -254,7 +254,7 @@ GateDecision::Reject {
 }
 ```
 
-Proven end-to-end against live PG18 in
+Proven end-to-end against the live backend in
 [`tests/proxy_it.rs::proxy_enforcement_end_to_end_against_pg18`](../crates/proxy/tests/proxy_it.rs):
 `batch_execute("COMMIT; DROP SCHEMA public CASCADE")` (a simple `Query` frame) is
 **blocked**, and the test then proves the `public` schema **still exists** — the
@@ -269,7 +269,7 @@ extended-protocol `Parse` body, the read-only classifier blocks it
 ### The read-only gate
 
 A `Parse`'s SQL is classified (`pgb_pgwire::classify`); anything not provably a
-**single read** is blocked. From `proxy_it.rs`, all proven against live PG18:
+**single read** is blocked. From `proxy_it.rs`, all proven against the live backend:
 
 - `UPDATE` / `DELETE` / `CREATE TABLE` / `DROP TABLE` → **blocked**
   (`write_on_readonly`) — and the WALL role is the un-foolable backstop even if
@@ -355,7 +355,7 @@ simple-query `REJECT` — with the marquee `COMMIT; DROP SCHEMA` captured verbat
 
 ## What this demo proves — and what it doesn't
 
-**Proven, merged, green on PG18:**
+**Proven, merged, green across the 14-18 CI matrix:**
 
 - A no-`WHERE` `UPDATE` is **measured** (rows, cascades, triggers, locks, WAL,
   affected-PK set, reversibility) **without touching prod** — in a rolled-back
@@ -396,8 +396,8 @@ simple-query `REJECT` — with the marquee `COMMIT; DROP SCHEMA` captured verbat
 | Proxy gate (extended-only + read-only) | [`crates/proxy/src/enforce.rs`](../crates/proxy/src/enforce.rs) |
 | Byte/row budget cutoff | [`crates/proxy/src/budget.rs`](../crates/proxy/src/budget.rs) |
 | FE/BE session loop (TLS, SCRAM, timeout, COPY metering) | [`crates/proxy/src/session.rs`](../crates/proxy/src/session.rs) |
-| Dry-run IT (live PG18) | [`crates/clone-orchestrator/tests/dry_run_it.rs`](../crates/clone-orchestrator/tests/dry_run_it.rs) |
+| Dry-run IT (live backend) | [`crates/clone-orchestrator/tests/dry_run_it.rs`](../crates/clone-orchestrator/tests/dry_run_it.rs) |
 | Clone-governance IT (zero-impact clone, orphan-reaper) | [`crates/clone-orchestrator/tests/clone_governance_it.rs`](../crates/clone-orchestrator/tests/clone_governance_it.rs) |
-| Proxy IT (live PG18) | [`crates/proxy/tests/proxy_it.rs`](../crates/proxy/tests/proxy_it.rs) |
-| Local PG18 stack | [`deploy/local-stack.sh`](../deploy/local-stack.sh), [`deploy/smoke.sh`](../deploy/smoke.sh) |
-| Spec amendments (docker→local-PG18, S1 proxy) | [`docs/spec/SPEC.amendments.md`](spec/SPEC.amendments.md) |
+| Proxy IT (live backend) | [`crates/proxy/tests/proxy_it.rs`](../crates/proxy/tests/proxy_it.rs) |
+| Local Postgres stack | [`deploy/local-stack.sh`](../deploy/local-stack.sh), [`deploy/smoke.sh`](../deploy/smoke.sh) |
+| Spec amendments (docker→local Postgres, S1 proxy) | [`docs/spec/SPEC.amendments.md`](spec/SPEC.amendments.md) |
