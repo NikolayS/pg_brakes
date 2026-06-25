@@ -3,8 +3,8 @@
 
 ## 9. Version header
 - **Project:** `pg_bumpers` (working title; brand TBD — see name-brainstorm memo)
-- **Spec version:** v0.8 (LLM-posture decision §15.4 CONFIRMED → BUILD-FROZEN for MVP; converged across
-  4 review rounds — security/ops · QA/testability · buildability)
+- **Spec version:** v0.8.1 (BUILD-FROZEN MVP + founder build-corrections: BYO Postgres FUX, PG 14–18,
+  Rust-only/no-Node — §0.5; converged across 4 review rounds)
 - **Date:** 2026-06-20
 - **License:** Apache-2.0 · **Repo home:** PostgresAI org, standalone-branded
 - **Status:** **CONVERGED — BUILD-FROZEN for the MVP.** Last open decision (LLM posture sequencing,
@@ -47,6 +47,19 @@ both as cheap "nine lives." Sequences, trigger side-effects, and NOTIFY are NOT 
 
 **Non-goals (v0):** multi-tenant SaaS, non-Postgres engines, cloud/hosted plane, DDL full-auto,
 multi-statement interactive txns, masking beyond RLS, polished web console.
+
+## 0.5 Supported environment & first-user experience (BYO Postgres)
+- **The user brings their own production Postgres.** The first-run path is "**point pg_bumpers at your
+  existing database**" (DSNs in `policy.yaml`: target primary, optional read replica, audit/`_meta`
+  location). We **never require** the user to spin up a database. Quickstart/README leads with BYO.
+- **The docker-compose demo cluster is CI/dev/test ONLY** (a deterministic fixture for our own tests and
+  the benchmark) — it is **not** the onboarding flow. Clearly labeled as such; no "throwaway PG instance"
+  in the user quickstart.
+- **Supported PostgreSQL: 14, 15, 16, 17, 18** (target the user's existing version; **do NOT pin to 18**;
+  most prod is 14–16). Version-specific features must degrade/gate gracefully; the wire proxy + role wall
+  are version-agnostic. CI matrix tests against this range.
+- **Implementation is Rust-only — NO Node/TypeScript.** The MCP server is a Rust crate (`rmcp`). No
+  pnpm/node in the toolchain or CI.
 
 ## 2. User stories (the 10 main)
 1. **Bound every write (DBA / buyer):** As a DBA, I want every agent write bounded and reversible, so a
@@ -145,9 +158,11 @@ multi-statement interactive txns, masking beyond RLS, polished web console.
 <!-- architecture:end -->
 ```
 
-**Repo (Cargo workspace + pnpm):** `crates/{proxy,warden,core,policy,clone-orchestrator,pgwire,audit,
-cli}`, `mcp/server` (TS) `+ mcp/approval-ui (fast-follow; CLI approval in MVP — §15.5)`,
-`deploy/docker-compose.yml`, `proto/`. Separate: `dbsafe-bench`.
+**Repo (single Cargo workspace — Rust-only, NO Node/TS):** `crates/{proxy,warden,core,policy,
+clone-orchestrator,pgwire,audit,mcp,cli}` — the **MCP server is a Rust crate** using the official Rust
+MCP SDK (`rmcp`, Apache-2.0/MIT). `deploy/` holds the docker-compose stack which is **CI/dev/test ONLY**
+(not the first-user experience — see §0.5). Separate: `dbsafe-bench`. (Approval UI deferred; CLI approval
+in MVP — §15.5.)
 
 ## 4. Implementation details
 - **Network/roles (do FIRST):** role-hardening matrix as code + tests — enumerate every revoke/deny
@@ -160,7 +175,7 @@ cli}`, `mcp/server` (TS) `+ mcp/approval-ui (fast-follow; CLI approval in MVP �
   functions that can write server-side: flagged/denied for the agent role.
 - **Warden (Rust, oob):** poll 1–5s (**interval mockable for tests**); cancel/terminate only
   agent-tagged sessions; monitor replication slots + retained WAL; breaker state authenticated.
-- **MCP (TS):** `whoami`, `discover_schema`, `query`, `explain_plan`, `propose_write`, `dry_run`,
+- **MCP (Rust, `rmcp`):** `whoami`, `discover_schema`, `query`, `explain_plan`, `propose_write`, `dry_run`,
   `apply_write`, `request_elevation`, `get_audit`. Block contract `{status,code,reason,remedy,
   retryable}`. `confirm_rows` forcing function. Stateless; proposal/ticket state in core (TTL).
   Result data can NEVER widen capability (prompt-injection-via-data defense).
@@ -182,7 +197,7 @@ cli}`, `mcp/server` (TS) `+ mcp/approval-ui (fast-follow; CLI approval in MVP �
   rejects.
 - **Secrets:** proxy/warden/core DSNs + audit signing key in a secret store; rotation documented; proxy
   memory-handling noted.
-- **License hygiene:** `cargo-deny` + TS `license-checker` → Apache/MIT/BSD/ISC only (ban GPL/AGPL).
+- **License hygiene:** `cargo-deny` → Apache/MIT/BSD/ISC only (ban GPL/AGPL). (Rust-only; no JS deps.)
 - **Benchmark (`dbsafe-bench`, FOCUSED first):** deterministic seeded OLTP Postgres (FKs/triggers/
   partitions/PII), **scripted frozen YAML payloads** (~30–40 high-signal attacks across exfil/DoS/
   data-loss incl. statement-stacking + **direct-to-DB bypass attempts**), **adversarially-curated**
@@ -266,6 +281,11 @@ buildability + product (Reviewer C)**.
 - **Parallel S0–S2:** design-partner concierge pilot (manual cost-gating during real incidents).
 
 ## 8. Embedded changelog
+- **v0.8.1 (2026-06-21):** Founder corrections from early-build feedback. (1) **BYO Postgres** is the
+  first-user experience — point at the user's existing DB; the docker-compose cluster is **CI/dev/test
+  only**, never onboarding (§0.5, §3). (2) **Supported PostgreSQL 14–18** (do NOT pin to 18; prod is
+  often 14–16). (3) **Rust-only — Node/TypeScript removed**; MCP server is a Rust crate using `rmcp`;
+  no pnpm/node in toolchain, CI, or repo (§3, §4).
 - **v0.8 (2026-06-20):** Founder **CONFIRMED** the LLM posture sequencing (§15.4: floor-only → advisory
   → gating; end state gating). Last open decision resolved → spec **BUILD-FROZEN for the MVP** (awaiting
   founder's final read before code).
