@@ -106,8 +106,9 @@ fn main() -> ExitCode {
 /// 32 bytes `to_bytes()` returns — so keys minted either way are interchangeable.
 fn run_keygen() {
     let signing_key = SigningKey::generate(&mut OsRng);
-    // Line 1: the 32-byte seed (the private signing material applyd re-derives the
-    // grant verifier's *counterpart* from at approve time, via from_bytes).
+    // Line 1: the 32-byte seed — the private signing material the approve path parses
+    // via `SigningKey::from_bytes` to SIGN the grant; applyd verifies at apply time
+    // with the line-2 public key.
     println!("{}", hex::encode(signing_key.to_bytes()));
     // Line 2: the 32-byte public verifying key (applyd's PGB_APPROVER_PUBKEY).
     println!("{}", hex::encode(signing_key.verifying_key().to_bytes()));

@@ -44,6 +44,52 @@ fn decode32(hex_str: &str) -> [u8; 32] {
         .expect("32 bytes (64 hex chars)")
 }
 
+/// **Known-answer (byte-compat) test** — pins the seed → pubkey derivation to a
+/// FIXED recorded vector so any future *encoding* regression is caught.
+///
+/// The vector is the EXACT one derived by the now-deleted `node -e` generator
+/// `deploy/up.sh` used to shell out to (recorded in the PR #104 body): the node
+/// code took the last 32 bytes of the PKCS8 DER as the seed and the last 32 bytes
+/// of the SPKI DER as the pubkey. Feeding that seed through Rust's
+/// `SigningKey::from_bytes(...).verifying_key().to_bytes()` MUST re-derive the
+/// exact pubkey node produced — so this test pins **interop with the old node
+/// generator** (keys minted either way interoperate) and, by construction, pins the
+/// raw 32-byte little-endian Ed25519 encoding `keygen` emits.
+///
+/// If a future refactor swaps the encoding — DER/PKCS8 wrapping, base64, byte-order
+/// reversal, or a wrong length — this assertion FAILS (the derived pubkey hex would
+/// differ from the recorded constant), catching the regression at the byte level.
+#[test]
+fn keygen_seed_to_pubkey_matches_node_byte_compat_vector() {
+    // Recorded node-derived vector (PR #104): seed (last 32 bytes of the PKCS8 DER)
+    // and the pubkey (last 32 bytes of the SPKI DER) node produced for it.
+    const NODE_SEED_HEX: &str = "15d78e86c5008183d1db972a3453102659295b0eb93210ad3cf0a74980f2a58f";
+    const NODE_PUBKEY_HEX: &str =
+        "036a63feffd5b2d0c498f7d583f3e43508fd74c69ff27043e17c4f0e2c1c7e3b";
+
+    // The exact derivation `keygen` performs (and applyd consumes): raw 32-byte seed
+    // → SigningKey::from_bytes → verifying_key().to_bytes() → hex.
+    let signing_key = SigningKey::from_bytes(&decode32(NODE_SEED_HEX));
+    let derived_pubkey_hex = hex::encode(signing_key.verifying_key().to_bytes());
+
+    assert_eq!(
+        derived_pubkey_hex, NODE_PUBKEY_HEX,
+        "seed → pubkey must equal the recorded node-derived vector (byte-compat with the \
+         deleted node generator); a mismatch means the seed/pubkey *encoding* regressed \
+         (DER/base64/byte-order/length)"
+    );
+
+    // And the pubkey is a valid Ed25519 verifying key on applyd's exact parse path,
+    // so a key minted by the old node generator still verifies under applyd.
+    let vk = VerifyingKey::from_bytes(&decode32(NODE_PUBKEY_HEX))
+        .expect("recorded node pubkey is a valid Ed25519 verifying key (applyd parse path)");
+    assert_eq!(
+        vk.to_bytes(),
+        signing_key.verifying_key().to_bytes(),
+        "the recorded node pubkey must be the public half of the recorded node seed"
+    );
+}
+
 /// The two lines are 64-hex-char (32-byte) tokens, and the pubkey is the
 /// Ed25519 verifying key derived from the seed.
 #[test]
