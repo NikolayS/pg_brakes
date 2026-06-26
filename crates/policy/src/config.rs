@@ -745,7 +745,10 @@ audit:
         );
         // The credential-less DSN carries NO password keyword.
         let dsn = primary.to_credential_less_dsn();
-        assert!(!dsn.contains("password"), "no literal password in DSN: {dsn}");
+        assert!(
+            !dsn.contains("password"),
+            "no literal password in DSN: {dsn}"
+        );
         assert!(dsn.contains("user=pgb_agent"), "{dsn}");
 
         // replica — the typed BYO target alongside the legacy `dsn` string form.
@@ -754,7 +757,11 @@ audit:
         assert!(replica.secret_ref.is_none());
 
         // audit/_meta — the DSN location is distinct from the WORM anchor endpoint.
-        let meta = cfg.audit.target.as_ref().expect("audit/_meta target present");
+        let meta = cfg
+            .audit
+            .target
+            .as_ref()
+            .expect("audit/_meta target present");
         assert_eq!(meta.database, "app_meta");
         assert_eq!(meta.role, "pgb_audit_writer");
         assert_eq!(

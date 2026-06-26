@@ -390,7 +390,10 @@ primary:
         assert_eq!(target.port, 6543);
         assert_eq!(target.database, "appdb");
         assert_eq!(target.role, "pgb_agent");
-        assert_ne!(target.port, 54321, "must NOT fall back to the throwaway 54321");
+        assert_ne!(
+            target.port, 54321,
+            "must NOT fall back to the throwaway 54321"
+        );
     }
 
     /// The env override wins over the policy target (the existing ITs / up.sh path).
@@ -399,7 +402,10 @@ primary:
         let policy = byo_policy();
         let target = resolve_backend_target(
             &policy,
-            fake_env(&[("PGB_BACKEND_HOST", "127.0.0.1"), ("PGB_BACKEND_PORT", "54399")]),
+            fake_env(&[
+                ("PGB_BACKEND_HOST", "127.0.0.1"),
+                ("PGB_BACKEND_PORT", "54399"),
+            ]),
         )
         .unwrap();
         assert_eq!(target.host, "127.0.0.1");
