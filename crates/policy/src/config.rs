@@ -183,8 +183,11 @@ impl DsnTarget {
     /// the libpq keyword/value DSN, so a value carrying a space or `=` would inject
     /// extra keywords (e.g. `database: "app sslmode=disable"` would silently turn
     /// TLS off). [`DsnTarget::validate`] (run by [`PolicyConfig::validate`] on load)
-    /// rejects exactly those characters, so a target that reaches this method has
-    /// already been proven injection-safe — fail-closed at config load.
+    /// rejects exactly those characters for the **policy.yaml** path. The parallel
+    /// **env-override** path is checked separately by [`TargetResolver::resolve`]
+    /// (same [`reject_dsn_injection`] rule, on the env-merged values) before it
+    /// builds a [`ResolvedTarget`]. So **both** the policy.yaml and the env-override
+    /// values are proven injection-safe before any DSN is built — fail-closed.
     pub fn to_credential_less_dsn(&self) -> String {
         format!(
             "host={} port={} dbname={} user={}",
@@ -255,6 +258,12 @@ pub struct ResolvedTarget {
 
 impl ResolvedTarget {
     /// Build a credential-less keyword/value DSN (no `password=`).
+    ///
+    /// SAFETY: `host`/`database`/`role` are concatenated UNQUOTED, exactly like
+    /// [`DsnTarget::to_credential_less_dsn`]. The only constructor of a
+    /// `ResolvedTarget` is [`TargetResolver::resolve`], which runs
+    /// [`reject_dsn_injection`] on these env-merged values before returning, so a
+    /// target reaching this method is injection-safe — fail-closed at resolve time.
     pub fn to_credential_less_dsn(&self) -> String {
         format!(
             "host={} port={} dbname={} user={}",
@@ -263,23 +272,59 @@ impl ResolvedTarget {
     }
 }
 
-/// The error a fail-closed target resolution returns when **neither** the env
-/// override **nor** the `policy.yaml` BYO target supplies a required field. This is
-/// the §0.5 / §2 fail-closed posture: there is **no** silent throwaway-cluster
-/// default (no hardcoded `54321`) — a daemon with no target refuses to start.
+/// The error a fail-closed target resolution returns. Two fail-closed cases:
+///
+/// * [`Missing`](TargetResolutionError::Missing) — **neither** the env override
+///   **nor** the `policy.yaml` BYO target supplies a required field (§0.5 / §2: no
+///   silent throwaway-cluster default, no hardcoded `54321` — a daemon with no
+///   target refuses to start).
+/// * [`Injection`](TargetResolutionError::Injection) — a **resolved** host /
+///   database / role value (after env-override layering) carries a libpq DSN
+///   metacharacter (whitespace, `=`, quote, backslash, control char) that would
+///   inject an extra keyword into the credential-less DSN (e.g. a TLS-disabling
+///   `sslmode=disable`). The env-override path is checked with the **same**
+///   [`reject_dsn_injection`] rule as the `policy.yaml` path, so an operator
+///   setting `PGB_BACKEND_DB="app sslmode=disable"` gets a clear error rather than
+///   a silently-downgraded connection.
 #[derive(Debug, Error, PartialEq, Eq)]
-#[error(
-    "no connection target for `{field}`: set it via the env override `{env_key}`, or declare \
-     the BYO target in policy.yaml ({policy_hint}). There is NO throwaway-cluster default \
-     (fail-closed, SPEC §0.5)."
-)]
-pub struct TargetResolutionError {
-    /// Which logical field was unresolvable (`host` / `port`).
-    pub field: &'static str,
-    /// The env var the operator can set to override.
-    pub env_key: &'static str,
-    /// A hint pointing at the policy.yaml section that would supply it.
-    pub policy_hint: &'static str,
+pub enum TargetResolutionError {
+    /// Neither the env override nor the policy target supplied a required field.
+    #[error(
+        "no connection target for `{field}`: set it via the env override `{env_key}`, or declare \
+         the BYO target in policy.yaml ({policy_hint}). There is NO throwaway-cluster default \
+         (fail-closed, SPEC §0.5)."
+    )]
+    Missing {
+        /// Which logical field was unresolvable (`host` / `port`).
+        field: &'static str,
+        /// The env var the operator can set to override.
+        env_key: &'static str,
+        /// A hint pointing at the policy.yaml section that would supply it.
+        policy_hint: &'static str,
+    },
+    /// A resolved field value (env override or policy target) carries a DSN
+    /// metacharacter that would inject an extra libpq keyword (fail-closed).
+    #[error(
+        "resolved connection target field `{field}` is unsafe (would inject a libpq DSN \
+         keyword): {detail}"
+    )]
+    Injection {
+        /// Which logical field was unsafe (`host` / `database` / `role`).
+        field: &'static str,
+        /// The underlying [`reject_dsn_injection`] rejection detail.
+        detail: String,
+    },
+}
+
+impl TargetResolutionError {
+    /// The logical field this error is about (`host` / `port` / `database` /
+    /// `role`). Convenience accessor over both variants.
+    pub fn field(&self) -> &'static str {
+        match self {
+            TargetResolutionError::Missing { field, .. } => field,
+            TargetResolutionError::Injection { field, .. } => field,
+        }
+    }
 }
 
 /// Layered resolution of a connection target: **env override > policy.yaml BYO
@@ -321,27 +366,39 @@ pub struct TargetResolver<'a> {
 }
 
 impl<'a> TargetResolver<'a> {
-    /// Resolve the target, fail-closed on a missing host/port.
+    /// Resolve the target, fail-closed on a missing host/port **or** on a resolved
+    /// host/database/role that carries a libpq DSN metacharacter.
+    ///
+    /// The host/database/role of the *resolved* target (after env-override layering)
+    /// are concatenated UNQUOTED into the credential-less DSN by
+    /// [`ResolvedTarget::to_credential_less_dsn`], so we run the **same**
+    /// [`reject_dsn_injection`] guard the `policy.yaml` path uses
+    /// ([`DsnTarget::validate`]) on the *env-merged* values before building the
+    /// target — an env override like `PGB_BACKEND_DB="app sslmode=disable"` fails
+    /// closed here rather than silently injecting a TLS-disabling keyword. `port` is
+    /// typed (`u16`) and so cannot carry a metacharacter.
     pub fn resolve(&self) -> Result<ResolvedTarget, TargetResolutionError> {
         let host = self
             .host_override
             .clone()
             .or_else(|| self.policy_target.map(|t| t.host.clone()))
-            .ok_or(TargetResolutionError {
+            .ok_or(TargetResolutionError::Missing {
                 field: "host",
                 env_key: self.host_env_key,
                 policy_hint: self.policy_hint,
             })?;
         let port = match &self.port_override {
-            Some(p) => p.parse::<u16>().map_err(|_| TargetResolutionError {
-                field: "port",
-                env_key: self.port_env_key,
-                policy_hint: self.policy_hint,
-            })?,
+            Some(p) => p
+                .parse::<u16>()
+                .map_err(|_| TargetResolutionError::Missing {
+                    field: "port",
+                    env_key: self.port_env_key,
+                    policy_hint: self.policy_hint,
+                })?,
             None => self
                 .policy_target
                 .map(|t| t.port)
-                .ok_or(TargetResolutionError {
+                .ok_or(TargetResolutionError::Missing {
                     field: "port",
                     env_key: self.port_env_key,
                     policy_hint: self.policy_hint,
@@ -357,11 +414,34 @@ impl<'a> TargetResolver<'a> {
             .clone()
             .or_else(|| self.policy_target.map(|t| t.role.clone()))
             .unwrap_or_else(|| self.default_role.to_string());
+
+        // Fail-closed DSN-injection guard on the RESOLVED (env-merged) string
+        // fields, mirroring `DsnTarget::validate`. Covers every value that gets
+        // concatenated into `ResolvedTarget::to_credential_less_dsn` (port is typed).
+        Self::reject_resolved_injection("host", &host)?;
+        Self::reject_resolved_injection("database", &database)?;
+        Self::reject_resolved_injection("role", &role)?;
+
         Ok(ResolvedTarget {
             host,
             port,
             database,
             role,
+        })
+    }
+
+    /// Apply the shared [`reject_dsn_injection`] rule to a resolved field value,
+    /// mapping its rejection onto [`TargetResolutionError::Injection`] so the
+    /// resolver surfaces a fail-closed error to the daemon.
+    fn reject_resolved_injection(
+        field: &'static str,
+        value: &str,
+    ) -> Result<(), TargetResolutionError> {
+        reject_dsn_injection("resolved target", field, value).map_err(|e| {
+            TargetResolutionError::Injection {
+                field,
+                detail: e.to_string(),
+            }
         })
     }
 }
@@ -1077,7 +1157,7 @@ roles:
         // policy.yaml target, resolution FAILS CLOSED — it does NOT silently
         // default the host/port to the throwaway 54321 cluster.
         let err = resolver(None, None, None).resolve().unwrap_err();
-        assert_eq!(err.field, "host");
+        assert_eq!(err.field(), "host");
         let msg = err.to_string();
         assert!(msg.contains("NO throwaway-cluster default"), "{msg}");
         assert!(msg.contains("fail-closed"), "{msg}");
@@ -1086,7 +1166,7 @@ roles:
         // Host from env but port missing entirely ⇒ still fail-closed on the port
         // (no 54321 fallback for the port either).
         let err = resolver(None, Some("h"), None).resolve().unwrap_err();
-        assert_eq!(err.field, "port");
+        assert_eq!(err.field(), "port");
     }
 
     #[test]
@@ -1097,6 +1177,80 @@ roles:
         let r = resolver(None, Some("h"), Some("6000")).resolve().unwrap();
         assert_eq!(r.database, "postgres");
         assert_eq!(r.role, "pgb_agent");
+    }
+
+    #[test]
+    fn resolve_rejects_dsn_injection_in_env_overrides() {
+        // The §0.5 fail-closed assertion for the ENV-OVERRIDE path (the gap PR #106
+        // closes): an operator-set env value carrying a libpq metacharacter
+        // (whitespace / `=`) must be REJECTED by the resolver — NOT spliced into the
+        // credential-less DSN where `PGB_BACKEND_DB="app sslmode=disable"` would
+        // silently downgrade TLS. The resolved host/database/role get the SAME
+        // `reject_dsn_injection` guard as the policy.yaml path.
+        let base = || TargetResolver {
+            policy_target: None,
+            host_override: Some("h".into()),
+            port_override: Some("6000".into()),
+            db_override: None,
+            role_override: None,
+            default_database: "postgres",
+            default_role: "pgb_agent",
+            host_env_key: "PGB_BACKEND_HOST",
+            port_env_key: "PGB_BACKEND_PORT",
+            policy_hint: "policy.yaml `primary:`",
+        };
+
+        // database: the canonical TLS-downgrade injection.
+        let mut r = base();
+        r.db_override = Some("app sslmode=disable".into());
+        let err = r.resolve().unwrap_err();
+        assert!(
+            matches!(
+                err,
+                TargetResolutionError::Injection {
+                    field: "database",
+                    ..
+                }
+            ),
+            "{err:?}"
+        );
+        assert_eq!(err.field(), "database");
+        let msg = err.to_string();
+        assert!(msg.contains("inject"), "{msg}");
+        assert!(msg.contains("database"), "{msg}");
+
+        // host: a value with an `=` (e.g. a host=... redirect).
+        let mut r = base();
+        r.host_override = Some("evil=1".into());
+        let err = r.resolve().unwrap_err();
+        assert!(
+            matches!(err, TargetResolutionError::Injection { field: "host", .. }),
+            "{err:?}"
+        );
+
+        // role: a value with a space.
+        let mut r = base();
+        r.role_override = Some("pgb_agent options=-csearch_path=evil".into());
+        let err = r.resolve().unwrap_err();
+        assert!(
+            matches!(err, TargetResolutionError::Injection { field: "role", .. }),
+            "{err:?}"
+        );
+
+        // Legitimate env values still resolve cleanly (behavior-preserving).
+        let mut r = base();
+        r.db_override = Some("app".into());
+        r.role_override = Some("pgb_agent".into());
+        r.host_override = Some("db.internal".into());
+        let ok = r.resolve().unwrap();
+        assert_eq!(ok.host, "db.internal");
+        assert_eq!(ok.database, "app");
+        assert_eq!(ok.role, "pgb_agent");
+        // And the built DSN carries no injected keyword.
+        assert_eq!(
+            ok.to_credential_less_dsn(),
+            "host=db.internal port=6000 dbname=app user=pgb_agent"
+        );
     }
 
     #[test]

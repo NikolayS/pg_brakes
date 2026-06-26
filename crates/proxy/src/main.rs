@@ -428,7 +428,7 @@ roles:
 "#;
         let policy = PolicyConfig::load_from_yaml(yaml).unwrap();
         let err = resolve_backend_target(&policy, fake_env(&[])).unwrap_err();
-        assert_eq!(err.field, "host");
+        assert_eq!(err.field(), "host");
         assert!(!err.to_string().contains("54321"));
     }
 }
