@@ -40,4 +40,34 @@ for name in "${SYNCED_FILES[@]}"; do
   rm -f /tmp/pgb_init_sync_diff.$$
 done
 
+# -------------------------------------------------------------------------------------
+# SPLIT GUARD (issue #103, FIX 6): the role hardening and the demo seed must stay
+# SEPARATE. 10_hardened_role.sql is the canonical, BYO-applicable HARDENING ONLY — it
+# must NOT (re)create the demo seed (the allowed_read / secret_data demo tables), so a
+# future edit can't silently re-merge the fixture back into the file a real BYO user
+# applies. Conversely 20_demo_seed.sql MUST carry that seed. We grep for the load-bearing
+# marker `CREATE TABLE … (allowed_read|secret_data)` (the canonical file still NAMES those
+# tables in its prose, so we key on the CREATE TABLE statement, not the bare name).
+HARDEN="$DEPLOY_DIR/sql/10_hardened_role.sql"
+SEED="$DEPLOY_DIR/sql/20_demo_seed.sql"
+seed_re='CREATE TABLE.*(allowed_read|secret_data)'
+
+if grep -Eq "$seed_re" "$HARDEN"; then
+  echo "check-init-sync: SPLIT VIOLATION — deploy/sql/10_hardened_role.sql CREATEs a demo" >&2
+  echo "  seed table (allowed_read/secret_data). The canonical role hardening must be" >&2
+  echo "  hardening-ONLY (BYO-applicable); the demo seed belongs in 20_demo_seed.sql." >&2
+  grep -nE "$seed_re" "$HARDEN" >&2
+  drift=1
+else
+  echo "check-init-sync: SPLIT OK — 10_hardened_role.sql creates NO demo seed table (hardening-only)."
+fi
+
+if grep -Eq "$seed_re" "$SEED"; then
+  echo "check-init-sync: SPLIT OK — 20_demo_seed.sql DOES create the demo seed tables (fixture)."
+else
+  echo "check-init-sync: SPLIT VIOLATION — deploy/sql/20_demo_seed.sql is missing the demo" >&2
+  echo "  seed tables (allowed_read/secret_data) — the fixture must carry them." >&2
+  drift=1
+fi
+
 exit "$drift"

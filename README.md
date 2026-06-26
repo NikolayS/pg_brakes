@@ -38,11 +38,17 @@ We do **not** claim "impossible to break" or "tamper-proof." We claim three
 precise, testable things:
 
 - **Writes — 0 catastrophic data-loss false-negatives by construction.** Every
-  applied write is **bounded + reversible**: rehearsed first, guarded on the
-  affected **primary-key set** (catches row-identity drift, not just row count),
-  fenced by a restore point, and undoable via a captured typed-inverse.
-  Structural / irreversible operations (`DROP`, `TRUNCATE`, DDL) are **refused
-  outright** — they are not rehearsable, so they never run.
+  applied write is **bounded + reversible**: rehearsed first, then pinned by three
+  orthogonal guards — **bounded** by the human-approved absolute **`WriteCap`**
+  (`max_rows` + `max_wal_bytes`, enforced inside the apply txn from the
+  `pg_stat_xact_*` deltas + a WAL-byte measure) plus the `pg_stat_xact_*`
+  reconciliation and a `statement_timeout`; **reversible** via the apply-time
+  pre-image capture (`FOR UPDATE` + `RETURNING`) + row/column coverage guards (a
+  write that can't be certifiably undone aborts); and **row-identity** foreclosed by
+  the self-determined-predicate gate (the approved `WHERE` may reference only the
+  immutable primary key + literals, so the approved statement itself pins which rows
+  are touched). Structural / irreversible operations (`DROP`, `TRUNCATE`, DDL) are
+  **refused outright** — they are not rehearsable, so they never run.
 - **Reads — bounded disclosure, not zero.** Disclosure can't be un-happened, so
   the promise is a **per-role byte/row budget, then a hard cutoff/kill** — plus
   best-effort detection. Data you never granted the agent stays unreadable
@@ -71,11 +77,17 @@ verify with one command, and launch the daemons against your DSNs (SPEC §0.5).
 
 `policy.yaml` is **authoritative** for the connection *targets* — the host/port/
 database/role of (a) your primary, (b) an optional read replica, and (c) the audit
-`_meta` location. Credentials stay **out** of the file (resolved from your secret
-store / env); a target is *credential-less* (host/port/db/role + an optional
-`secret_ref`). The `PGB_BACKEND_*` / `PGB_PROXY_*` / `PGB_META_DSN` env vars are
-**overrides** layered on top (precedence: env override → `policy.yaml` target →
-**fail-closed**; there is **no** throwaway-cluster default). See
+`_meta` location. Credentials stay **out** of the file: in this version the password
+comes from the **conventional env var** (`PGB_BACKEND_PASSWORD` for the primary/applyd,
+`PGB_META_PASSWORD` for `_meta`, `PGB_DOCTOR_PASSWORD` for the doctor). A target is
+*credential-less* (host/port/db/role + an optional `secret_ref`); `secret_ref` is a
+**forward-compatibility placeholder** — this version does **not** resolve it from any
+secret store, so the password must still come from the env var above. The
+`PGB_BACKEND_*` / `PGB_PROXY_*` / `PGB_META_DSN` env vars are **overrides** layered on
+top (precedence: env override → `policy.yaml` target → **fail-closed**; there is **no**
+throwaway-cluster default). The target's host/db/role/`secret_ref` are validated
+fail-closed on load (no whitespace / `=` / quote / backslash / control char — they would
+inject extra libpq DSN keywords). See
 [`crates/policy/policy.example.yaml`](crates/policy/policy.example.yaml):
 
 ```yaml
@@ -85,7 +97,8 @@ primary:
   port: 5432                 # your real port — pg_bumpers never touches a throwaway cluster
   database: app
   role: pgb_agent            # the hardened WALL role (step 2)
-  secret_ref: "kms://pg-bumpers/primary-pw/v1"   # OPTIONAL; password resolves out-of-band
+  secret_ref: "kms://pg-bumpers/primary-pw/v1"   # OPTIONAL forward-compat placeholder; NOT
+                                                 # resolved yet — password comes from PGB_BACKEND_PASSWORD
 replica:                     # OPTIONAL read replica (reads route here under §12)
   target: { host: replica.internal, port: 5432, database: app, role: pgb_agent }
 audit:
@@ -127,13 +140,17 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON app.your_write_table TO pgb_applier;
 
 ### 3. Verify with `pgb-cli doctor` (fail-closed preflight)
 
-Before you point an agent at the database, run the **fail-closed preflight**. It
-verifies the primary (+ optional replica + `_meta`) are reachable, that `pgb_agent`
-is WALL-hardened, that `pgb_applier` is DML-only, the pg_hba origin boundary
-(best-effort), and that the `_meta` audit chain is installed and verifying:
+Before you point an agent at the database, run the **fail-closed preflight**. The doctor
+connects with a **catalog-readable role** — set `PGB_BACKEND_ROLE` to it (e.g. `postgres`
+or an admin/monitoring role; it must read `pg_roles` + the grant catalogs, which the
+member-of-nothing `pgb_agent` cannot) — and verifies the primary (+ optional replica +
+`_meta`) are reachable, that `pgb_agent` is WALL-hardened, that `pgb_applier` is DML-only,
+the pg_hba origin boundary (best-effort), and that the `_meta` audit chain is installed
+and verifying:
 
 ```sh
 PGB_POLICY_PATH=policy.yaml \
+PGB_BACKEND_ROLE=postgres   \
 PGB_DOCTOR_PASSWORD=…       \
   cargo run -p pgb-cli -- doctor
 ```
@@ -151,13 +168,16 @@ doctor: PREFLIGHT PASSED — the deterministic floor is in place; safe to point 
 
 It **exits non-zero on any failure** (a superuser agent, a missing role, a stray
 write grant, an unreachable target) — fail-closed: do not connect an agent until
-every check passes.
+every check passes. (`PGB_BACKEND_ROLE` overrides only the role the doctor *connects*
+as; it always CHECKS `pgb_agent` / `pgb_applier` by their conventional names.)
 
 ### 4. Launch the daemons against your DSNs
 
 Each daemon resolves its connection target from your `policy.yaml` (env override
-allowed); none of them defaults to a throwaway cluster. Point them at your database
-and your `_meta` location, sourcing the credentials from your secret store / env:
+allowed); none of them defaults to a throwaway cluster. **The password comes from the
+conventional env var, not `secret_ref`** (this version does not resolve `secret_ref` —
+the primary/applyd password from `PGB_BACKEND_PASSWORD`, the `_meta` password from
+`PGB_META_PASSWORD`), sourced from your secret store / env:
 
 ```sh
 # the inline read enforcement endpoint (the agent's ONLY network path):

@@ -171,7 +171,7 @@ fn doctor_fails_closed_then_passes_when_hardened() {
     assert!(out.contains("PREFLIGHT PASSED"), "stdout:\n{out}");
     assert!(out.contains("primary_reachable"), "stdout:\n{out}");
 
-    // RED: UN-harden the agent role (make it SUPERUSER). The doctor must now FAIL
+    // RED #1: UN-harden the agent role (make it SUPERUSER). The doctor must now FAIL
     // CLOSED (non-zero exit) — a superuser agent is exactly what the WALL forbids.
     admin
         .batch_execute("ALTER ROLE pgb_agent SUPERUSER;")
@@ -185,5 +185,60 @@ fn doctor_fails_closed_then_passes_when_hardened() {
     assert!(
         out.contains("pgb_agent_not_superuser") && out.contains("FAIL"),
         "the failing check must name the superuser violation. stdout:\n{out}"
+    );
+
+    // Re-harden the agent (clear the superuser bit) so the next RED leg isolates a
+    // DIFFERENT failure mode — a stray WRITE GRANT — not the lingering superuser one.
+    admin
+        .batch_execute("ALTER ROLE pgb_agent NOSUPERUSER;")
+        .expect("re-harden pgb_agent");
+    let (passed, _out) = run_doctor(_cluster.port);
+    assert!(
+        passed,
+        "sanity: with the superuser bit cleared the doctor passes again before the grant leg"
+    );
+
+    // RED #2 (a SECOND, orthogonal failure mode): the WALL's "no write grant
+    // anywhere" invariant. Create a demo table and GRANT INSERT on it to pgb_agent —
+    // the read WALL must hold ZERO write grant on any user table, so the doctor must
+    // FAIL CLOSED and the failing check must be `agent_no_write_grant` (NOT the
+    // superuser check, which now passes). This proves the doctor's write-grant check
+    // is load-bearing, not just the superuser one.
+    admin
+        .batch_execute(
+            "CREATE TABLE IF NOT EXISTS public.doctor_it_writable (id int PRIMARY KEY); \
+             GRANT INSERT ON public.doctor_it_writable TO pgb_agent;",
+        )
+        .expect("grant a write to pgb_agent");
+    let (passed, out) = run_doctor(_cluster.port);
+    assert!(
+        !passed,
+        "doctor must FAIL CLOSED (non-zero) when pgb_agent holds a write grant. stdout:\n{out}"
+    );
+    assert!(out.contains("PREFLIGHT FAILED"), "stdout:\n{out}");
+    assert!(
+        out.contains("agent_no_write_grant") && out.contains("FAIL"),
+        "the failing check must name the WRITE-GRANT violation (not the superuser one). \
+         stdout:\n{out}"
+    );
+    // The superuser check must be PASSing here — proving this RED leg isolates the
+    // write-grant failure and is not masked by the prior superuser failure.
+    assert!(
+        out.contains("pgb_agent_not_superuser: `pgb_agent` is NOSUPERUSER"),
+        "the superuser check must PASS in the write-grant leg (isolated failure). stdout:\n{out}"
+    );
+
+    // Reset the grant (and drop the demo table) so the cluster is left clean — the
+    // doctor passes once more after the write grant is revoked.
+    admin
+        .batch_execute(
+            "REVOKE INSERT ON public.doctor_it_writable FROM pgb_agent; \
+             DROP TABLE IF EXISTS public.doctor_it_writable;",
+        )
+        .expect("revoke the write grant");
+    let (passed, out) = run_doctor(_cluster.port);
+    assert!(
+        passed,
+        "doctor must PASS again once the write grant is revoked (reset). stdout:\n{out}"
     );
 }

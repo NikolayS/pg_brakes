@@ -78,10 +78,20 @@ roles:
 # policy.yaml target > FAIL-CLOSED — there is NO throwaway-cluster default).
 #
 # CREDENTIALS STAY OUT OF THIS FILE. A target is CREDENTIAL-LESS (host/port/db/role +
-# an optional `secret_ref` naming the secret-store key); the literal password resolves
-# from the secret store / env at connect time. This matches the existing "no literal
-# passwords in files" posture. Uncomment + edit the three targets below to point at your
-# database, then run `pgb-cli doctor` to verify the connection + WALL hardening.
+# an optional `secret_ref`). In THIS version the literal password resolves from the
+# CONVENTIONAL ENV VAR at connect time (PGB_BACKEND_PASSWORD for the primary/applyd,
+# PGB_META_PASSWORD for `_meta`, PGB_DOCTOR_PASSWORD for the doctor) — the daemons do
+# NOT resolve `secret_ref` from any secret store yet. `secret_ref` is a FORWARD-
+# COMPATIBILITY PLACEHOLDER (parsed + kept credential-less so a future release can wire a
+# resolver without a schema change); today it is documentation only and the env var is
+# REQUIRED. This matches the existing "no literal passwords in files" posture.
+#
+# VALIDATION (fail-closed, SPEC §0.5): each target's host/database/role/secret_ref is
+# rejected on load if it carries whitespace, `=`, a quote, a backslash, or a control char
+# (those would inject extra libpq DSN keywords — e.g. a TLS-disabling `sslmode=disable`).
+#
+# Uncomment + edit the three targets below to point at your database, then run
+# `pgb-cli doctor` to verify the connection + WALL hardening.
 #
 # primary — the WALL/agent + applier connection target (proxy + applyd connect here):
 # primary:
@@ -89,7 +99,8 @@ roles:
 #   port: 5432
 #   database: app
 #   role: pgb_agent            # the hardened WALL role (apply deploy/sql/10_hardened_role.sql)
-#   secret_ref: "kms://pg-bumpers/primary-pw/v1"   # OPTIONAL; password never literal here
+#   secret_ref: "kms://pg-bumpers/primary-pw/v1"   # OPTIONAL forward-compat placeholder; NOT
+#                                                  # resolved yet — password from PGB_BACKEND_PASSWORD
 
 # §12.2 — optional read replica (runtime-detected; never silently downgraded). Either the
 # legacy `dsn` string OR the typed BYO `target` (credential-less) may be set.
@@ -123,7 +134,8 @@ audit:
   #   port: 5432
   #   database: app_meta
   #   role: pgb_audit_writer
-  #   secret_ref: "kms://pg-bumpers/meta-pw/v1"
+  #   secret_ref: "kms://pg-bumpers/meta-pw/v1"   # forward-compat placeholder; NOT resolved yet —
+  #                                               # the `_meta` password comes from PGB_META_PASSWORD
   anchor_endpoint: "https://audit-anchor.internal/v1/append"
 
 # §4 "Warden", §10.10 — the live out-of-band watchdog's operational thresholds.

@@ -139,10 +139,12 @@ pub struct CloneConfig {
 
 /// A **credential-less** connection target (SPEC §0.5 BYO Postgres). The user
 /// declares *where* to connect — host/port/database/role — in `policy.yaml`, but
-/// **never** a literal password: that resolves out-of-band from the secret store /
-/// env (matching the existing "no literal passwords in files" posture). An
-/// optional [`secret_ref`](DsnTarget::secret_ref) names the secret-store key the
-/// daemon resolves the password under.
+/// **never** a literal password. In this version the password resolves from the
+/// **conventional env var** (`PGB_BACKEND_PASSWORD` / `PGB_META_PASSWORD` /
+/// `PGB_DOCTOR_PASSWORD`), matching the existing "no literal passwords in files"
+/// posture. The optional [`secret_ref`](DsnTarget::secret_ref) is a
+/// **forward-compatibility placeholder** — it is parsed but **not** resolved by any
+/// daemon today; the env var is required.
 ///
 /// This is the BYO surface: `policy.yaml` is **authoritative** for the targets;
 /// the `PGB_BACKEND_*` / `PGB_PROXY_*` / `PGB_META_DSN` env vars become
@@ -159,26 +161,80 @@ pub struct DsnTarget {
     pub database: String,
     /// The role to connect as (e.g. `pgb_agent` on the primary, `pgb_applier`
     /// for the applier, `pgb_audit_writer` for `_meta`). Credential-less: the
-    /// **password is not here** — it resolves from the secret store / env.
+    /// **password is not here** — it resolves from the conventional env var.
     pub role: String,
-    /// Optional reference into the secret store for this target's password (e.g.
-    /// `kms://pg-bumpers/primary-pw/v1`). Absent ⇒ the daemon resolves the
-    /// password from its conventional env var (the existing posture). The literal
-    /// secret is **never** stored in `policy.yaml`.
+    /// Optional **forward-compatibility placeholder** for a secret-store reference
+    /// (e.g. `kms://pg-bumpers/primary-pw/v1`). **This version does NOT resolve it**:
+    /// no daemon reads `secret_ref` — the password always comes from the conventional
+    /// env var (`PGB_BACKEND_PASSWORD` / `PGB_META_PASSWORD` / `PGB_DOCTOR_PASSWORD`).
+    /// It is parsed + kept credential-less so a future release can wire a resolver
+    /// without a schema change. The literal secret is **never** stored in
+    /// `policy.yaml`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub secret_ref: Option<String>,
 }
 
 impl DsnTarget {
     /// Build a **credential-less** keyword/value DSN string (host/port/db/user, no
-    /// `password=`). The daemon appends the resolved password from the secret
-    /// store / env before connecting; this never carries a literal secret.
+    /// `password=`). The daemon appends the password resolved from the conventional
+    /// env var before connecting; this never carries a literal secret.
+    ///
+    /// SAFETY: the `host`/`database`/`role` fields are concatenated UNQUOTED into
+    /// the libpq keyword/value DSN, so a value carrying a space or `=` would inject
+    /// extra keywords (e.g. `database: "app sslmode=disable"` would silently turn
+    /// TLS off). [`DsnTarget::validate`] (run by [`PolicyConfig::validate`] on load)
+    /// rejects exactly those characters, so a target that reaches this method has
+    /// already been proven injection-safe — fail-closed at config load.
     pub fn to_credential_less_dsn(&self) -> String {
         format!(
             "host={} port={} dbname={} user={}",
             self.host, self.port, self.database, self.role
         )
     }
+
+    /// Fail-closed validation of a BYO DSN target (SPEC §0.5, §2). Because
+    /// [`to_credential_less_dsn`](DsnTarget::to_credential_less_dsn) concatenates
+    /// these fields UNQUOTED into a libpq keyword/value DSN, any value carrying
+    /// whitespace, `=`, a quote, a backslash, or a control char could **inject an
+    /// extra DSN keyword** (e.g. a TLS-disabling `sslmode=disable`, an `options=…`,
+    /// or a host redirect). An operator's `policy.yaml` never legitimately needs
+    /// those in a host / database / role / secret_ref, so we **reject** them on load
+    /// rather than risk a silent downgrade. The env override path (`PGB_BACKEND_*`)
+    /// remains available for the rare edge case that needs an exotic value.
+    pub fn validate(&self, where_: &str) -> Result<(), PolicyError> {
+        reject_dsn_injection(where_, "host", &self.host)?;
+        reject_dsn_injection(where_, "database", &self.database)?;
+        reject_dsn_injection(where_, "role", &self.role)?;
+        if let Some(secret_ref) = &self.secret_ref {
+            reject_dsn_injection(where_, "secret_ref", secret_ref)?;
+        }
+        Ok(())
+    }
+}
+
+/// Reject a DSN-target field value that could inject an extra libpq keyword. The
+/// banned characters are whitespace (the keyword/value separator), `=` (the
+/// key/value separator), single/double quotes (libpq value quoting), a backslash
+/// (libpq value escaping), and any ASCII control char. Empty is also rejected — a
+/// blank host/db/role is meaningless and fail-closed.
+fn reject_dsn_injection(where_: &str, field: &str, value: &str) -> Result<(), PolicyError> {
+    if value.is_empty() {
+        return Err(PolicyError::Invalid(format!(
+            "{where_}: `{field}` must not be empty (fail-closed, SPEC §0.5)"
+        )));
+    }
+    if let Some(bad) = value
+        .chars()
+        .find(|c| c.is_whitespace() || c.is_control() || matches!(c, '=' | '\'' | '"' | '\\'))
+    {
+        return Err(PolicyError::Invalid(format!(
+            "{where_}: `{field}` contains the illegal character {bad:?} — a host/database/role/\
+             secret_ref must not carry whitespace, `=`, a quote, a backslash, or a control char \
+             (they would inject extra libpq DSN keywords, e.g. a TLS-disabling `sslmode=disable`; \
+             fail-closed, SPEC §0.5/§2). Value: {value:?}"
+        )));
+    }
+    Ok(())
 }
 
 /// A **resolved** connection target — the host/port/db/role a daemon will actually
@@ -451,6 +507,17 @@ impl PolicyConfig {
         }
         for (name, role) in &self.roles {
             role.validate(name)?;
+        }
+        // §0.5 fail-closed: every BYO DSN target must be injection-safe (its
+        // host/db/role/secret_ref are concatenated UNQUOTED into a libpq DSN).
+        if let Some(primary) = &self.primary {
+            primary.validate("policy.yaml `primary:` target")?;
+        }
+        if let Some(replica) = &self.replica.target {
+            replica.validate("policy.yaml `replica.target:`")?;
+        }
+        if let Some(audit) = &self.audit.target {
+            audit.validate("policy.yaml `audit.target:`")?;
         }
         Ok(())
     }
@@ -804,6 +871,128 @@ audit:
             !reemitted.to_lowercase().contains("password"),
             "policy.yaml must never carry a literal password: {reemitted}"
         );
+    }
+
+    /// RED (FIX 2, security/fail-closed): a BYO DSN target whose `database` value
+    /// carries an embedded space + `=` would, when concatenated UNQUOTED into the
+    /// libpq keyword/value DSN, inject an extra keyword (here a TLS-disabling
+    /// `sslmode=disable`). `PolicyConfig::validate()` (run on load) must REJECT it.
+    /// Before the per-field validation existed this loaded clean (the injection
+    /// rode silently into the DSN); now it is a load-time error.
+    #[test]
+    fn rejects_dsn_target_with_keyword_injection() {
+        let yaml = r#"
+version: 1
+roles:
+  app:
+    autonomy: L0
+    budget:
+      max_bytes: 100
+      max_rows: 100
+      per_window: { window_secs: 60, max_bytes: 1000, max_rows: 1000 }
+primary:
+  host: db.internal
+  port: 5432
+  database: "app sslmode=disable"
+  role: pgb_agent
+"#;
+        let err = PolicyConfig::load_from_yaml(yaml).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("database"), "names the offending field: {msg}");
+        assert!(msg.contains("primary"), "names the offending target: {msg}");
+        assert!(
+            msg.contains("illegal character") || msg.contains("inject"),
+            "explains the injection risk: {msg}"
+        );
+    }
+
+    /// Every illegal character class is rejected, on every field, on every BYO
+    /// target slot (primary / replica.target / audit.target) — fail-closed.
+    #[test]
+    fn rejects_dsn_target_illegal_chars_on_every_field() {
+        // A whitespace, an `=`, a quote, a backslash, and a control char.
+        let bad_values = [
+            "has space",
+            "has=eq",
+            "has'quote",
+            "has\"dquote",
+            "has\\backslash",
+            "has\tcontrol",
+        ];
+        // host / database / role each rejected.
+        for field in ["host", "database", "role"] {
+            for bad in bad_values {
+                let mut t = target("db.internal", 5432, "app", "pgb_agent");
+                match field {
+                    "host" => t.host = bad.to_string(),
+                    "database" => t.database = bad.to_string(),
+                    "role" => t.role = bad.to_string(),
+                    _ => unreachable!(),
+                }
+                let err = t.validate("primary").unwrap_err();
+                assert!(
+                    err.to_string().contains(field),
+                    "field {field} value {bad:?} must be rejected naming the field: {err}"
+                );
+            }
+        }
+        // secret_ref rejected too.
+        let mut t = target("db.internal", 5432, "app", "pgb_agent");
+        t.secret_ref = Some("kms ref with space".to_string());
+        let err = t.validate("primary").unwrap_err();
+        assert!(err.to_string().contains("secret_ref"), "{err}");
+
+        // Empty is also fail-closed.
+        let mut t = target("", 5432, "app", "pgb_agent");
+        t.host = String::new();
+        assert!(t.validate("primary").is_err());
+
+        // The replica.target and audit.target slots are validated too (not just primary).
+        let yaml = r#"
+version: 1
+roles:
+  app:
+    autonomy: L0
+    budget:
+      max_bytes: 100
+      max_rows: 100
+      per_window: { window_secs: 60, max_bytes: 1000, max_rows: 1000 }
+replica:
+  target: { host: "r host", port: 5432, database: app, role: pgb_agent }
+"#;
+        assert!(PolicyConfig::load_from_yaml(yaml).is_err());
+        let yaml = r#"
+version: 1
+roles:
+  app:
+    autonomy: L0
+    budget:
+      max_bytes: 100
+      max_rows: 100
+      per_window: { window_secs: 60, max_bytes: 1000, max_rows: 1000 }
+audit:
+  target: { host: db.internal, port: 5432, database: "meta=evil", role: pgb_audit_writer }
+"#;
+        assert!(PolicyConfig::load_from_yaml(yaml).is_err());
+    }
+
+    /// GREEN guard: the legitimately-shaped BYO targets (the ones the example +
+    /// the parse test use) still PASS validation — the injection guard does not
+    /// reject ordinary host/db/role identifiers (dots, underscores, hyphens).
+    #[test]
+    fn accepts_legitimate_dsn_targets() {
+        for t in [
+            target("db.internal", 5432, "app", "pgb_agent"),
+            target("replica.internal", 6543, "app_prod-1", "pgb_audit_writer"),
+            target("127.0.0.1", 54321, "postgres", "postgres"),
+        ] {
+            t.validate("primary").expect("legitimate target must pass");
+        }
+        // With an ordinary secret_ref (a URI with `:` and `/`, no banned chars).
+        let mut t = target("db.internal", 5432, "app", "pgb_agent");
+        t.secret_ref = Some("kms://pg-bumpers/primary-pw/v1".to_string());
+        t.validate("primary")
+            .expect("ordinary secret_ref must pass");
     }
 
     /// The BYO targets are all OPTIONAL — a policy with none still loads (the
