@@ -1,6 +1,6 @@
 //! Tiered intent capture, T0–T2 (SPEC §11.2, §15.3 one-way door).
 //!
-//! pg_bumpers sits at the SQL/libpq wire, so it **infers** intent rather than
+//! pg_brakes sits at the SQL/libpq wire, so it **infers** intent rather than
 //! demanding rich input. The tiers, weakest signal to richest, that the MVP
 //! captures:
 //!
@@ -71,7 +71,7 @@ pub struct TierT1 {
     /// The libpq `application_name`, if set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub application_name: Option<String>,
-    /// Selected session GUCs captured for context (e.g. a `pg_bumpers.trace_id`).
+    /// Selected session GUCs captured for context (e.g. a `pg_brakes.trace_id`).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub gucs: BTreeMap<String, String>,
     /// The parsed `/* intent: … */` annotation, if any was present.
@@ -343,7 +343,7 @@ mod tests {
         tiers
             .t1
             .gucs
-            .insert("pg_bumpers.trace_id".to_string(), "trace-123".to_string());
+            .insert("pg_brakes.trace_id".to_string(), "trace-123".to_string());
         tiers.t2 = TierT2 {
             query_sequence: vec![
                 ObservedStep {
@@ -366,7 +366,7 @@ mod tests {
         let back: IntentTiers = serde_json::from_str(&json).unwrap();
         assert_eq!(tiers, back, "intent tiers must round-trip exactly");
         // The trace_id GUC survived.
-        assert_eq!(back.t1.gucs["pg_bumpers.trace_id"], "trace-123");
+        assert_eq!(back.t1.gucs["pg_brakes.trace_id"], "trace-123");
         assert!(back.t2.reads_before_write);
     }
 

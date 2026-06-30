@@ -1,4 +1,4 @@
-# CLAUDE.md — engineering principles for pg_bumpers
+# CLAUDE.md — engineering principles for pg_brakes
 
 Concise operating rules for everyone (humans and agents) building this repo.
 The authoritative **product** spec is [`docs/spec/SPEC.md`](docs/spec/SPEC.md)
@@ -62,14 +62,14 @@ The **process** spec lives in GitHub issue #1.
    Security/Bugs/Tests/Guidelines/Docs rows are always `0`); (b) the **`/review-mr` Claude Code
    slash command** runs the **5–6 parallel LLM review agents**. `/review-mr` targets both GitLab
    MRs and GitHub PRs (its posting/report formatting is GitLab-leaning), and the agents
-   themselves are provider-agnostic — pg_bumpers is on **GitHub**, so the reviewer runs **the
+   themselves are provider-agnostic — pg_brakes is on **GitHub**, so the reviewer runs **the
    agents directly** against the GitHub PR diff, each loading its real definition from
    `~/github/samorev/agents/*.md`:
    **security-reviewer** (Opus, **blocking**) · **bug-hunter** (Opus, **blocking**) ·
    **test-analyzer** (Sonnet, non-blocking/configurable) · **guidelines-checker** (Sonnet,
    non-blocking) · **docs-reviewer** (Sonnet, non-blocking). (samorev's optional
-   **sqitch-migration-checker** is **N/A** — pg_bumpers is Rust with no Sqitch migrations.)
-   The **guidelines-checker** loads the project's repo-specific rules — for pg_bumpers that is
+   **sqitch-migration-checker** is **N/A** — pg_brakes is Rust with no Sqitch migrations.)
+   The **guidelines-checker** loads the project's repo-specific rules — for pg_brakes that is
    **this CLAUDE.md** (there is no separate rules dir to point at). Score each finding with
    samorev's **0–10 confidence** and its three tiers (blocking / non-blocking / potential); a
    finding **blocks merge** when its severity is **CRITICAL/HIGH/MEDIUM** and **confidence ≥ 8**

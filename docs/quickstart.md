@@ -1,9 +1,9 @@
-# pg_bumpers — Quickstart
+# pg_brakes — Quickstart
 
-**The first-run path is "point pg_bumpers at YOUR existing PostgreSQL."** You bring
+**The first-run path is "point pg_brakes at YOUR existing PostgreSQL."** You bring
 your own production database (any supported major, **14–18**; spec v0.8.1 §0.5);
-pg_bumpers never asks you to spin one up. This page LEADS with that BYO flow
-(§[Get started — BYO](#get-started--point-pg_bumpers-at-your-existing-postgresql-byo)),
+pg_brakes never asks you to spin one up. This page LEADS with that BYO flow
+(§[Get started — BYO](#get-started--point-pg_brakes-at-your-existing-postgresql-byo)),
 then — far below, and clearly labelled **CI/dev/test fixtures only** — covers the
 throwaway local stack / docker-compose / `up.sh` substrate the project uses for its
 own tests, the benchmark, and the env-gated integration suite.
@@ -50,7 +50,7 @@ This is an MVP under active construction. Honest status as of this writing:
 
 ---
 
-## Get started — point pg_bumpers at YOUR existing PostgreSQL (BYO)
+## Get started — point pg_brakes at YOUR existing PostgreSQL (BYO)
 
 This is the real onboarding flow. You declare where your database lives in
 `policy.yaml`, apply the canonical role hardening to it, verify with one command, then
@@ -68,8 +68,8 @@ cluster required. (This mirrors the README's headline quickstart.)
 Build the binaries once (the daemons + the CLI + the MCP server):
 
 ```sh
-git clone https://github.com/NikolayS/pg_bumpers.git
-cd pg_bumpers
+git clone https://github.com/NikolayS/pg_brakes.git
+cd pg_brakes
 cargo build --locked -p pgb-proxy -p pgb-applyd -p pgb-warden -p pgb-cli -p pgb-mcp
 ```
 
@@ -88,10 +88,10 @@ store / env); a target is *credential-less* (host/port/db/role + an optional
 # policy.yaml — point at YOUR database (no literal passwords in this file)
 primary:
   host: db.internal          # your existing primary
-  port: 5432                 # your real port — pg_bumpers never touches a throwaway cluster
+  port: 5432                 # your real port — pg_brakes never touches a throwaway cluster
   database: app
   role: pgb_agent            # the hardened WALL role (step 2)
-  secret_ref: "kms://pg-bumpers/primary-pw/v1"   # OPTIONAL forward-compat placeholder; see step 4
+  secret_ref: "kms://pg-brakes/primary-pw/v1"   # OPTIONAL forward-compat placeholder; see step 4
 replica:                     # OPTIONAL read replica (reads route here under §12)
   target: { host: replica.internal, port: 5432, database: app, role: pgb_agent }
 audit:
@@ -208,7 +208,7 @@ The agent-facing MCP server is the native Rust **`pgb-mcp`** (crate `crates/mcp`
 it at the **proxy** (not the raw database) and the `_meta` reader:
 
 ```sh
-claude mcp add pg-bumpers \
+claude mcp add pg-brakes \
   --env PGB_PROXY_HOST=127.0.0.1 \
   --env PGB_PROXY_PORT=6432 \
   --env PGB_PROXY_DB=app \
@@ -222,7 +222,7 @@ claude mcp add pg-bumpers \
   -- /path/to/target/release/pgb-mcp
 ```
 
-Claude Code now has the pg_bumpers tools, all flowing through the deterministic floor: a
+Claude Code now has the pg_brakes tools, all flowing through the deterministic floor: a
 `DROP TABLE` is **refused**, a no-`WHERE` `DELETE` is **bounded + held for approval**,
 runaway reads are **killed**, and every action lands on the tamper-evident `_meta` chain
 you can `pgb-cli verify`.
@@ -253,9 +253,9 @@ Any supported major (14, 15, 16, 17, 18) works — the proxy and the native-role
 version-agnostic (spec v0.8.1 §0.5). Homebrew kegs are **keg-only**, so their binaries
 are not symlinked onto `PATH`. The dev scripts default to the **version-neutral**
 `postgresql` keg at `/opt/homebrew/opt/postgresql/bin`; override with the unified
-`PG_BUMPERS_PG_BIN` (the one variable CI sets per-major in the matrix, honored by every
+`PG_BRAKES_PG_BIN` (the one variable CI sets per-major in the matrix, honored by every
 shell script *and* every Rust IT and taking precedence over the legacy `PGBIN=` /
-`PG_BUMPERS_PGBIN=`) to point at a specific major's keg.
+`PG_BRAKES_PGBIN=`) to point at a specific major's keg.
 
 ```sh
 brew install postgresql          # latest stable; or `postgresql@17`, `postgresql@16`, …
@@ -264,7 +264,7 @@ brew install postgresql          # latest stable; or `postgresql@17`, `postgresq
 /opt/homebrew/opt/postgresql/bin/pg_ctl --version        # -> pg_ctl (PostgreSQL) 1x.y
 
 # To pin a specific major for the scripts/ITs:
-#   export PG_BUMPERS_PG_BIN=/opt/homebrew/opt/postgresql@17/bin
+#   export PG_BRAKES_PG_BIN=/opt/homebrew/opt/postgresql@17/bin
 ```
 
 > You do **not** need to start a system Postgres service or add it to `PATH`. The dev
@@ -276,8 +276,8 @@ brew install postgresql          # latest stable; or `postgresql@17`, `postgresq
 ## Fixture: clone + the fast DB-free build/test loop
 
 ```sh
-git clone https://github.com/NikolayS/pg_bumpers.git
-cd pg_bumpers
+git clone https://github.com/NikolayS/pg_brakes.git
+cd pg_brakes
 
 # The fast, DB-free build/test loop — exactly what CI runs (.github/workflows/ci.yml).
 # Integration tests are env-gated OFF here, so this stays fast and needs no database.
@@ -321,10 +321,10 @@ against the primary on every run.
 | replica | **54322** | streaming standby (`pg_basebackup -R`), read-only |
 | meta    | **54323** | separate cluster hosting the append-only `_meta` audit DB (§4) |
 
-Override per-cluster with `PG_BUMPERS_PRIMARY_PORT` / `PG_BUMPERS_REPLICA_PORT` /
-`PG_BUMPERS_META_PORT`, the bin dir with the unified `PG_BUMPERS_PG_BIN` (the one
+Override per-cluster with `PG_BRAKES_PRIMARY_PORT` / `PG_BRAKES_REPLICA_PORT` /
+`PG_BRAKES_META_PORT`, the bin dir with the unified `PG_BRAKES_PG_BIN` (the one
 variable CI sets, taking precedence over the legacy `PGBIN`), and the data dir with
-`PG_BUMPERS_LOCALSTACK_DIR`.
+`PG_BRAKES_LOCALSTACK_DIR`.
 
 Connect (trust auth, loopback only — throwaway dev clusters; `-X` bypasses your `~/.psqlrc`):
 
@@ -345,11 +345,11 @@ $PGBIN/psql -X "host=localhost port=54323 user=postgres dbname=_meta"      # met
 
 ## Fixture: running the env-gated integration tests
 
-Integration tests are gated by **`PG_BUMPERS_IT`** so the default `cargo test` and CI
+Integration tests are gated by **`PG_BRAKES_IT`** so the default `cargo test` and CI
 stay fast and DB-free:
 
-- `PG_BUMPERS_IT` unset / `!= 1` → integration assertions **skip** (exit 0).
-- `PG_BUMPERS_IT=1` → they **run for real** against a live PG stack (any supported major, 14–18).
+- `PG_BRAKES_IT` unset / `!= 1` → integration assertions **skip** (exit 0).
+- `PG_BRAKES_IT=1` → they **run for real** against a live PG stack (any supported major, 14–18).
 
 > **DSN defaults differ by suite.** Some suites default to the local-stack primary
 > (`54321`); others default to a *dedicated* throwaway port (e.g. dry-run `54341`,
@@ -375,13 +375,13 @@ failure.
 ```sh
 # GREEN — stack up → smoke passes (exit 0):
 deploy/local-stack.sh up
-PG_BUMPERS_IT=1 bash deploy/smoke.sh
+PG_BRAKES_IT=1 bash deploy/smoke.sh
 
 # RED — with the stack DOWN, the assertions fail (exit 1):
 deploy/local-stack.sh down
-PG_BUMPERS_IT=1 bash deploy/smoke.sh
+PG_BRAKES_IT=1 bash deploy/smoke.sh
 
-# Gate proof — with PG_BUMPERS_IT unset it SKIPS (exit 0):
+# Gate proof — with PG_BRAKES_IT unset it SKIPS (exit 0):
 bash deploy/smoke.sh
 ```
 
@@ -396,12 +396,12 @@ boundary refused/allowed).
 
 ```sh
 # GREEN — every matrix row passes against the real PG (any supported major, exit 0):
-PG_BUMPERS_IT=1 deploy/test/wall_matrix.sh
+PG_BRAKES_IT=1 deploy/test/wall_matrix.sh
 
 # RED — an UN-hardened role CAN do denied things; assertions fail (exit non-0):
-PG_BUMPERS_IT=1 deploy/test/wall_matrix.sh --red
+PG_BRAKES_IT=1 deploy/test/wall_matrix.sh --red
 
-# Gate proof — with PG_BUMPERS_IT unset it SKIPS (exit 0):
+# Gate proof — with PG_BRAKES_IT unset it SKIPS (exit 0):
 deploy/test/wall_matrix.sh
 ```
 
@@ -410,23 +410,23 @@ deploy/test/wall_matrix.sh
 ```sh
 # Proxy end-to-end against the live PG (TLS + SCRAM, WALL role, byte/row cutoff,
 # statement-stacking block, read-only gate). Default admin DSN: 54321 (local-stack primary).
-PG_BUMPERS_IT=1 cargo test -p pgb-proxy --test proxy_it -- --nocapture
-#   override: PG_BUMPERS_PROXY_PGURL="host=127.0.0.1 port=54321 user=postgres dbname=postgres"
+PG_BRAKES_IT=1 cargo test -p pgb-proxy --test proxy_it -- --nocapture
+#   override: PG_BRAKES_PROXY_PGURL="host=127.0.0.1 port=54321 user=postgres dbname=postgres"
 
 # Clone dry-run (S2): no-WHERE UPDATE preview, PK-set measurement, volatile-predicate refusal.
 # Default admin DSN: 54341 (its OWN dedicated throwaway port; it CREATEs fresh DBs there).
 # Point it at the running local-stack primary with the override below if you prefer 54321.
-PG_BUMPERS_IT=1 cargo test -p pgb-clone-orchestrator --test dry_run_it -- --nocapture
-#   override: PG_BUMPERS_PGURL="host=127.0.0.1 port=54321 user=postgres dbname=postgres"
+PG_BRAKES_IT=1 cargo test -p pgb-clone-orchestrator --test dry_run_it -- --nocapture
+#   override: PG_BRAKES_PGURL="host=127.0.0.1 port=54321 user=postgres dbname=postgres"
 ```
 
 The **clone-governance** suite is self-contained — it spins its *own* throwaway PG
 clusters (primary on `54360 + offset`, clone on `54370 + offset`) via
-`PG_BUMPERS_PG_BIN` (or the legacy `PG_BUMPERS_PGBIN`; both default to the
+`PG_BRAKES_PG_BIN` (or the legacy `PG_BRAKES_PGBIN`; both default to the
 version-neutral keg path), so `local-stack` does not need to be up:
 
 ```sh
-PG_BUMPERS_IT=1 cargo test -p pgb-clone-orchestrator --test clone_governance_it -- --nocapture
+PG_BRAKES_IT=1 cargo test -p pgb-clone-orchestrator --test clone_governance_it -- --nocapture
 ```
 
 The **`_meta` audit sink** suite (`pgb-audit`, default feature `pg`) needs an
@@ -435,8 +435,8 @@ admin/superuser PG cluster (any supported major); it creates fresh databases via
 primary (or any supported PG):
 
 ```sh
-PG_BUMPERS_AUDIT_PGURL="host=127.0.0.1 port=54321 user=postgres dbname=postgres" \
-  PG_BUMPERS_IT=1 cargo test -p pgb-audit --test pg_meta_it -- --nocapture
+PG_BRAKES_AUDIT_PGURL="host=127.0.0.1 port=54321 user=postgres dbname=postgres" \
+  PG_BRAKES_IT=1 cargo test -p pgb-audit --test pg_meta_it -- --nocapture
 ```
 
 ### 4d. The fidelity gate — `spikes/fidelity` (issue #8)
@@ -451,12 +451,12 @@ databases on an admin cluster;
 its default DSN is `127.0.0.1:55431`, so override it onto the local-stack primary:
 
 ```sh
-PG_BUMPERS_PGURL="host=127.0.0.1 port=54321 user=postgres dbname=postgres" \
-  PG_BUMPERS_IT=1 cargo test -p fidelity-spike -- --nocapture
+PG_BRAKES_PGURL="host=127.0.0.1 port=54321 user=postgres dbname=postgres" \
+  PG_BRAKES_IT=1 cargo test -p fidelity-spike -- --nocapture
 ```
 
 > The whole env-gated suite can also be driven straight from the workspace
-> (`PG_BUMPERS_IT=1 cargo test --workspace --locked`) once the stack is up and the
+> (`PG_BRAKES_IT=1 cargo test --workspace --locked`) once the stack is up and the
 > override DSNs above are exported — each suite skips cleanly if it can't reach its DB.
 
 ---
@@ -464,7 +464,7 @@ PG_BUMPERS_PGURL="host=127.0.0.1 port=54321 user=postgres dbname=postgres" \
 ## The docker-compose fixture (CI/dev/test only — NOT how you onboard)
 
 > **This compose stack is a CI/dev/test fixture, not a shipped artifact for real users.**
-> A real user follows the **[BYO flow](#get-started--point-pg_bumpers-at-your-existing-postgresql-byo)**
+> A real user follows the **[BYO flow](#get-started--point-pg_brakes-at-your-existing-postgresql-byo)**
 > against their own database; this throwaway stack just gives contributors and CI a
 > self-contained substrate to watch the floor work end-to-end.
 

@@ -1,11 +1,11 @@
 //! Env-gated **real PG18** integration test for the S4 read gates (SPEC §3
 //! EXPLAIN-cost gate + cumulative per-window volume budget; §13.4 R4a; issue
-//! #53). Runs only when `PG_BUMPERS_IT=1`, so CI's fast `cargo test` skips it
+//! #53). Runs only when `PG_BRAKES_IT=1`, so CI's fast `cargo test` skips it
 //! (the crate still builds/links).
 //!
 //! ```sh
 //! deploy/local-stack.sh up
-//! PG_BUMPERS_IT=1 cargo test -p pgb-proxy --test readgates_it -- --nocapture
+//! PG_BRAKES_IT=1 cargo test -p pgb-proxy --test readgates_it -- --nocapture
 //! deploy/local-stack.sh down
 //! ```
 //!
@@ -43,7 +43,7 @@ const AGENT_USER: &str = "pgb_agent";
 const AGENT_PASSWORD: &str = "pgb_agent_dev_pw";
 
 fn it_enabled() -> bool {
-    std::env::var("PG_BUMPERS_IT")
+    std::env::var("PG_BRAKES_IT")
         .map(|v| v == "1")
         .unwrap_or(false)
 }
@@ -55,7 +55,7 @@ fn db_msg(e: &tokio_postgres::Error) -> String {
 }
 
 fn admin_dsn() -> String {
-    std::env::var("PG_BUMPERS_PROXY_PGURL")
+    std::env::var("PG_BRAKES_PROXY_PGURL")
         .unwrap_or_else(|_| "host=127.0.0.1 port=54321 user=postgres dbname=postgres".to_string())
 }
 
@@ -240,9 +240,7 @@ async fn connect_client(addr: std::net::SocketAddr, cert_der: &[u8]) -> tokio_po
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn explain_cost_gate_blocks_before_execution() {
     if !it_enabled() {
-        eprintln!(
-            "[skip] set PG_BUMPERS_IT=1 (+ deploy/local-stack.sh up) for the EXPLAIN-gate IT"
-        );
+        eprintln!("[skip] set PG_BRAKES_IT=1 (+ deploy/local-stack.sh up) for the EXPLAIN-gate IT");
         return;
     }
     tokio::task::spawn_blocking(setup_fixtures)
@@ -331,7 +329,7 @@ async fn explain_cost_gate_blocks_before_execution() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn slow_drip_cumulative_window_budget_trips_and_resets() {
     if !it_enabled() {
-        eprintln!("[skip] set PG_BUMPERS_IT=1 (+ deploy/local-stack.sh up) for the slow-drip IT");
+        eprintln!("[skip] set PG_BRAKES_IT=1 (+ deploy/local-stack.sh up) for the slow-drip IT");
         return;
     }
     tokio::task::spawn_blocking(setup_fixtures)

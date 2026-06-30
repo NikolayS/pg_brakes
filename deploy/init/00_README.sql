@@ -1,4 +1,4 @@
--- pg_bumpers — primary init hooks (docker-compose entrypoint)
+-- pg_brakes — primary init hooks (docker-compose entrypoint)
 --
 -- Files in this directory are executed once, in alphabetical order, by the
 -- official postgres image on FIRST boot of the `primary` service
@@ -36,7 +36,7 @@ CREATE TABLE IF NOT EXISTS public.pgb_devstack_marker (
 );
 
 INSERT INTO public.pgb_devstack_marker (id, note)
-VALUES (1, 'pg_bumpers devstack primary initialized')
+VALUES (1, 'pg_brakes devstack primary initialized')
 ON CONFLICT (id) DO NOTHING;
 
 -- Replication role for the streaming standby (docker path). The local-stack.sh

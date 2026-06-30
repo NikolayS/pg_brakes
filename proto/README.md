@@ -1,6 +1,6 @@
 # `proto/` — wire/IPC protocol definitions (placeholder)
 
-This directory will hold the protocol/IDL definitions for pg_bumpers once the
+This directory will hold the protocol/IDL definitions for pg_brakes once the
 internal protocols solidify, per `docs/spec/SPEC.md` §3.
 
 ## What lands here later

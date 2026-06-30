@@ -1,8 +1,8 @@
 //! Real-PG18 integration tests for the **production grant-gated apply path**
-//! (SPEC §14.3, §10.1, §12.2; #66, #45). Env-gated behind `PG_BUMPERS_IT=1`. Run:
+//! (SPEC §14.3, §10.1, §12.2; #66, #45). Env-gated behind `PG_BRAKES_IT=1`. Run:
 //!
 //! ```sh
-//! PG_BUMPERS_IT=1 cargo test -p pgb-clone-orchestrator --test apply_grant_it -- --nocapture
+//! PG_BRAKES_IT=1 cargo test -p pgb-clone-orchestrator --test apply_grant_it -- --nocapture
 //! ```
 //!
 //! These drive [`pgb_clone_orchestrator::guarded_apply_with_grant`] — the
@@ -57,7 +57,7 @@ use rand_core::OsRng;
 /// Skip-guard.
 fn setup(tag: &str) -> Option<(String, String, Client)> {
     if !it_enabled() {
-        eprintln!("[skip] {tag}: set PG_BUMPERS_IT=1 to run the DB-backed grant-apply test");
+        eprintln!("[skip] {tag}: set PG_BRAKES_IT=1 to run the DB-backed grant-apply test");
         return None;
     }
     Some(create_seeded_db(&base_pgurl(), tag))

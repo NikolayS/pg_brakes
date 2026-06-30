@@ -1,6 +1,6 @@
-# pg_bumpers — docs
+# pg_brakes — docs
 
-Project documentation for **pg_bumpers** — a self-hostable control plane that lets
+Project documentation for **pg_brakes** — a self-hostable control plane that lets
 AI agents read and write **production Postgres** safely. These docs describe the
 system **as it exists in the tree today** and flag clearly what is stubbed, in
 progress, or fast-follow.
@@ -25,8 +25,8 @@ progress, or fast-follow.
 | Doc | What's in it |
 |---|---|
 | [`architecture.md`](architecture.md) | The four layers + the mandatory network boundary, the crate map (as built), read/write data flow, the local-PG18 substrate, graceful degradation, and the floor-vs-RiskEngine-stub posture. |
-| [`quickstart.md`](quickstart.md) | Prerequisites (Rust 1.90, PG 18), build/test loop, the `deploy/local-stack.sh` dev substrate, and running the env-gated (`PG_BUMPERS_IT=1`) integration suites against real PG 18. |
-| [`development.md`](development.md) | The engineering process: red/green TDD, the CI gates, the `PG_BUMPERS_IT` integration convention, test-port discipline, license hygiene, the pgDog clean-room rule, and the PR lifecycle. |
+| [`quickstart.md`](quickstart.md) | Prerequisites (Rust 1.90, PG 18), build/test loop, the `deploy/local-stack.sh` dev substrate, and running the env-gated (`PG_BRAKES_IT=1`) integration suites against real PG 18. |
+| [`development.md`](development.md) | The engineering process: red/green TDD, the CI gates, the `PG_BRAKES_IT` integration convention, test-port discipline, license hygiene, the pgDog clean-room rule, and the PR lifecycle. |
 | [`components.md`](components.md) | A per-crate map of what exists today (`core`, `policy`, `pgwire`, `proxy`, `audit`, `clone-orchestrator`, the WALL SQL/hba, the MCP server, and the warden/cli stubs). |
 | [`demo.md`](demo.md) | The marquee walkthrough, grounded in real tests: the no-`WHERE` `UPDATE` blast-radius preview (write-safety) and the `COMMIT; DROP SCHEMA` statement-stacking block + bounded-disclosure cutoff (read-safety). |
 

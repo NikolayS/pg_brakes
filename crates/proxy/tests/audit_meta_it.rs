@@ -1,11 +1,11 @@
 //! Env-gated **real PG18** integration test for the S5 shared, persistent,
 //! anchored `_meta` audit chain wired into the proxy (issue #64, SPEC §3/§4/§10.9).
 //!
-//! Runs only when `PG_BUMPERS_IT=1` (CI's fast `cargo test` skips it; the crate
+//! Runs only when `PG_BRAKES_IT=1` (CI's fast `cargo test` skips it; the crate
 //! still builds/links). Run with:
 //!
 //! ```sh
-//! PG_BUMPERS_IT=1 cargo test -p pgb-proxy --test audit_meta_it -- --nocapture
+//! PG_BRAKES_IT=1 cargo test -p pgb-proxy --test audit_meta_it -- --nocapture
 //! ```
 //!
 //! It proves, against a live `_meta` table created from
@@ -26,7 +26,7 @@
 //!      verifies and proceeds;
 //!   5. the writer DSN is the audit-writer role (never the audited agent).
 //!
-//! Connection: `PG_BUMPERS_AUDIT_PGURL` (admin/superuser) or the default below —
+//! Connection: `PG_BRAKES_AUDIT_PGURL` (admin/superuser) or the default below —
 //! the dedicated PG18 audit cluster on **55432**. NEVER 5432.
 //!
 //! The proxy always compiles `pgb-audit` with its `pg` feature (the running
@@ -59,13 +59,13 @@ fn fresh_anchor_path(tag: &str) -> std::path::PathBuf {
 const DEFAULT_ADMIN_PGURL: &str = "host=127.0.0.1 port=55432 user=postgres dbname=postgres";
 
 fn it_enabled() -> bool {
-    std::env::var("PG_BUMPERS_IT")
+    std::env::var("PG_BRAKES_IT")
         .map(|v| v == "1")
         .unwrap_or(false)
 }
 
 fn admin_pgurl() -> String {
-    std::env::var("PG_BUMPERS_AUDIT_PGURL").unwrap_or_else(|_| DEFAULT_ADMIN_PGURL.to_string())
+    std::env::var("PG_BRAKES_AUDIT_PGURL").unwrap_or_else(|_| DEFAULT_ADMIN_PGURL.to_string())
 }
 
 fn connect(url: &str) -> Client {
@@ -144,7 +144,7 @@ fn store_with_key() -> LocalSecretStore {
 #[test]
 fn proxy_reject_persists_and_anchored_head_matches() {
     if !it_enabled() {
-        eprintln!("[skip] set PG_BUMPERS_IT=1 to run the proxy S5 _meta anchor test");
+        eprintln!("[skip] set PG_BRAKES_IT=1 to run the proxy S5 _meta anchor test");
         return;
     }
     let (writer_dsn, _admin) = setup_fresh_db("anchor");
@@ -276,7 +276,7 @@ fn forge_meta_rows_in_table(admin: &mut Client) -> Vec<pgb_audit::AuditRecord> {
 #[test]
 fn full_chain_rewrite_in_table_is_caught_at_startup() {
     if !it_enabled() {
-        eprintln!("[skip] set PG_BUMPERS_IT=1 to run the proxy S5 full-chain-rewrite test");
+        eprintln!("[skip] set PG_BRAKES_IT=1 to run the proxy S5 full-chain-rewrite test");
         return;
     }
     let (writer_dsn, mut admin) = setup_fresh_db("rewrite");
@@ -356,7 +356,7 @@ fn full_chain_rewrite_in_table_is_caught_at_startup() {
 #[test]
 fn untampered_restart_over_durable_anchor_starts() {
     if !it_enabled() {
-        eprintln!("[skip] set PG_BUMPERS_IT=1 to run the proxy S5 untampered-restart test");
+        eprintln!("[skip] set PG_BRAKES_IT=1 to run the proxy S5 untampered-restart test");
         return;
     }
     let (writer_dsn, _admin) = setup_fresh_db("clean_restart");

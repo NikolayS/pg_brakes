@@ -97,7 +97,7 @@ pub struct GrantBinding {
 /// `cap` instead of the dropped `blast_radius_checksum`. Bumping the domain means a
 /// v1 token (signed under `…v1` over the old field set) can never verify under v2 —
 /// old grants fail closed on the new floor, even if their other fields are re-used.
-pub const BINDING_DOMAIN: &[u8] = b"pg_bumpers.grant.binding.v2";
+pub const BINDING_DOMAIN: &[u8] = b"pg_brakes.grant.binding.v2";
 
 impl GrantBinding {
     /// Compute the canonical, stable, collision-resistant binding hash.
@@ -493,7 +493,7 @@ mod tests {
         // `blast_radius_checksum` in the cap's former position.
         let v1_hash: [u8; 32] = {
             let mut h = Sha256::new();
-            h.update(b"pg_bumpers.grant.binding.v1");
+            h.update(b"pg_brakes.grant.binding.v1");
             absorb_str(&mut h, &binding.statement_text);
             h.update((binding.normalized_params.len() as u64).to_be_bytes());
             for p in &binding.normalized_params {

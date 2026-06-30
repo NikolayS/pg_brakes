@@ -1,4 +1,4 @@
-# pg_bumpers — example policy.yaml  (SPEC §10.10, §12.2, §15.1)
+# pg_brakes — example policy.yaml  (SPEC §10.10, §12.2, §15.1)
 #
 # The single source of per-role policy: the SELECT whitelist, byte/row budgets
 # (single-shot + per-window cumulative), the advisory EXPLAIN-cost/row ceiling,
@@ -71,7 +71,7 @@ roles:
 # =====================================================================================
 # §0.5 — BRING-YOUR-OWN POSTGRES: the three DSN targets (the first-user experience).
 # =====================================================================================
-# pg_bumpers points at YOUR existing PostgreSQL 14-18. policy.yaml is AUTHORITATIVE for
+# pg_brakes points at YOUR existing PostgreSQL 14-18. policy.yaml is AUTHORITATIVE for
 # the connection TARGETS — host/port/database/role of (1) your primary, (2) an optional
 # read replica, and (3) the audit/`_meta` location. The `PGB_BACKEND_*` / `PGB_PROXY_*` /
 # `PGB_META_DSN` env vars are OVERRIDES layered on top (precedence: env override >
@@ -99,7 +99,7 @@ roles:
 #   port: 5432
 #   database: app
 #   role: pgb_agent            # the hardened WALL role (apply deploy/sql/10_hardened_role.sql)
-#   secret_ref: "kms://pg-bumpers/primary-pw/v1"   # OPTIONAL forward-compat placeholder; NOT
+#   secret_ref: "kms://pg-brakes/primary-pw/v1"   # OPTIONAL forward-compat placeholder; NOT
 #                                                  # resolved yet — password from PGB_BACKEND_PASSWORD
 
 # §12.2 — optional read replica (runtime-detected; never silently downgraded). Either the
@@ -121,7 +121,7 @@ pitr:
 # §14.3 — MVP approval mechanism: a CLI-held signing key. The public key is
 # resolved out-of-band (KMS / keyring, §10.9); this is just the reference id.
 approvers:
-  cli_signing_key_id: "kms://pg-bumpers/approval-key/v1"
+  cli_signing_key_id: "kms://pg-brakes/approval-key/v1"
 
 # §0.5 / §10.9 — the audit chain. Two DISTINCT things live here:
 #   * `target` — the credential-less `_meta` DSN LOCATION (where the hash-chained audit
@@ -134,7 +134,7 @@ audit:
   #   port: 5432
   #   database: app_meta
   #   role: pgb_audit_writer
-  #   secret_ref: "kms://pg-bumpers/meta-pw/v1"   # forward-compat placeholder; NOT resolved yet —
+  #   secret_ref: "kms://pg-brakes/meta-pw/v1"   # forward-compat placeholder; NOT resolved yet —
   #                                               # the `_meta` password comes from PGB_META_PASSWORD
   anchor_endpoint: "https://audit-anchor.internal/v1/append"
 

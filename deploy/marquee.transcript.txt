@@ -1,5 +1,5 @@
 ================================================================================
- pg_bumpers — S5 MARQUEE TRANSCRIPT (issue #68)  [recorded by deploy/marquee.sh]
+ pg_brakes — S5 MARQUEE TRANSCRIPT (issue #68)  [recorded by deploy/marquee.sh]
  server: Rust pgb-mcp (crates/mcp) — the single deployable MCP server (EPIC #83)
  generated: 2026-06-23T10:13:04Z  write-port: 54341  read-primary: 54321
  pg: initdb (PostgreSQL) 18.4 (Homebrew)

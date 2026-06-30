@@ -1,4 +1,4 @@
-# typos (crate-ci/typos) configuration for pg_bumpers.
+# typos (crate-ci/typos) configuration for pg_brakes.
 #
 # The docs typo check runs over README.md + docs/**. This allow-list whitelists
 # project vocabulary, Postgres/protocol jargon, and a few deliberate examples

@@ -1,4 +1,4 @@
-# pg_bumpers — dev/test stack (the SHIPPED artifact for real users)
+# pg_brakes — dev/test stack (the SHIPPED artifact for real users)
 #
 # Source of truth: docs/spec/SPEC.md (v0.8) §7 (S0: "compose primary+replica+dblab"),
 # §12 (graceful degradation — replica/DBLab/PITR all OPTIONAL), §10.8 (degraded mode,
@@ -25,7 +25,7 @@
 #   With dblab placeholder:           docker compose -f deploy/docker-compose.yml --profile dblab up -d
 #   Static validation (no pulls):     docker compose -f deploy/docker-compose.yml config -q
 #
-# NOTE (build-env caveat): live container runs are BLOCKED in the pg_bumpers build
+# NOTE (build-env caveat): live container runs are BLOCKED in the pg_brakes build
 # environment — `docker pull` hangs at zero blob bytes (host-level daemon networking
 # fault; see docs/spec/SPEC.amendments.md "S0 integration substrate"). This compose is
 # statically validated here (`docker compose config -q`); it must be re-validated with a
@@ -39,7 +39,7 @@
 # deploy/local-stack.sh) already uses dedicated high ports 54321/54322/54323 and never
 # touches 5432.
 
-name: pg_bumpers
+name: pg_brakes
 
 # ---------------------------------------------------------------------------
 # Shared knobs reused by primary + replica via YAML anchors.
@@ -182,7 +182,7 @@ services:
       - bash
       - -c
       - |
-        echo "pg_bumpers: dblab is a PLACEHOLDER (clone.provider=none by default)."
+        echo "pg_brakes: dblab is a PLACEHOLDER (clone.provider=none by default)."
         echo "A real Database Lab Engine is OPTIONAL (SPEC §12) and lands in S2."
         echo "Sleeping; this service exists only to reserve the topology slot."
         exec sleep infinity

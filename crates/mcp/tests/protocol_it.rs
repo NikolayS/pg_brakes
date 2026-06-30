@@ -20,7 +20,7 @@
 
 use std::collections::BTreeSet;
 
-use pgb_mcp::{PgBumpersMcp, SERVER_NAME, TOOL_NAMES};
+use pgb_mcp::{PgBrakesMcp, SERVER_NAME, TOOL_NAMES};
 use rmcp::ServiceExt;
 use rmcp::model::{CallToolRequestParams, ProtocolVersion};
 
@@ -35,7 +35,7 @@ async fn connect() -> rmcp::service::RunningService<rmcp::service::RoleClient, (
     let (c_read, c_write) = tokio::io::split(client_io);
 
     // Serve the server in the background; it performs the handshake then serves.
-    let server = PgBumpersMcp::new("pgb_agent", "sess-it");
+    let server = PgBrakesMcp::new("pgb_agent", "sess-it");
     tokio::spawn(async move {
         let running = server
             .serve((s_read, s_write))

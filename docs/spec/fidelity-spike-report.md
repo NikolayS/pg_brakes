@@ -27,7 +27,7 @@ required (ABORT / REFUSED), running **for real** against PostgreSQL.
   `InverseKind`/`InversePlan` (typed-inverse capture), `certify`/`RefusedOp`
   (default-deny certified action set).
 - **Run command:**
-  `PG_BUMPERS_IT=1 cargo test -p fidelity-spike -- --nocapture` (env-gated so the
+  `PG_BRAKES_IT=1 cargo test -p fidelity-spike -- --nocapture` (env-gated so the
   fast CI `cargo test` job skips the DB tests; the crate still compiles there).
 
 ## Seed (deterministic OLTP-ish schema → well-defined golden prod state)

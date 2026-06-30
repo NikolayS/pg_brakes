@@ -1,7 +1,7 @@
 # `deploy/` — CI/dev/test fixtures & the canonical deployment assets
 
 > **These are CI/dev/test FIXTURES, not the onboarding flow (SPEC §0.5).** The
-> first-run path for real users is **bring-your-own Postgres** — point pg_bumpers at
+> first-run path for real users is **bring-your-own Postgres** — point pg_brakes at
 > your existing database via `policy.yaml` DSN targets, apply
 > [`sql/10_hardened_role.sql`](sql/10_hardened_role.sql), verify with `pgb-cli
 > doctor`, and launch the daemons against your DSNs (see the **README's BYO
@@ -19,7 +19,7 @@
 > MCP read path genuinely traverses `pgb-proxy` (extended-protocol-only,
 > WALL-enforced) — not raw Postgres.
 
-The CI/dev/test substrate for pg_bumpers (SPEC §3, §7, §12) — **three fixture
+The CI/dev/test substrate for pg_brakes (SPEC §3, §7, §12) — **three fixture
 paths**, all throwaway, none of them the user onboarding flow (that is BYO, above):
 
 1. **`docker-compose.yml`** — the **CI/dev fixture** for a docker-healthy machine (a
@@ -93,7 +93,7 @@ docker compose -f deploy/docker-compose.yml --profile replica --profile dblab do
 > (The local substrate — **Path B** below — never has this problem: it uses dedicated
 > high ports 54321/54322/54323 and never touches 5432.)
 
-> **Live container runs are blocked in the pg_bumpers build environment** (`docker pull`
+> **Live container runs are blocked in the pg_brakes build environment** (`docker pull`
 > hangs at zero blob bytes — host-level daemon fault). Here, the compose is only
 > **statically validated** (`docker compose config -q`). It must be re-validated with a
 > live `up` on a docker-healthy machine. The live substrate in this env is **Path B**.
@@ -108,7 +108,7 @@ Init hooks live in `deploy/init/` and run once on first boot of `primary`
 
 Uses the keg-only Homebrew Postgres binaries (any supported major, 14–18; the
 version-neutral `/opt/homebrew/opt/postgresql/bin` by default — override with the
-unified `PG_BUMPERS_PG_BIN=` the variable CI sets per-major, or the legacy
+unified `PG_BRAKES_PG_BIN=` the variable CI sets per-major, or the legacy
 `PGBIN=`). Brings up isolated,
 throwaway clusters under a git-ignored `./.localstack/` dir, on **dedicated high
 ports** that never touch any cluster already running on 5432.
@@ -150,7 +150,7 @@ does **not** duplicate the role work.
 ports are actually free**, then fails loudly if any are still bound:
 
 - On `up`, each started postmaster's PID is recorded in an out-of-tree ledger
-  (`$TMPDIR/pg_bumpers-localstack/<root-digest>/<port>.pid`) that **survives**
+  (`$TMPDIR/pg_brakes-localstack/<root-digest>/<port>.pid`) that **survives**
   `rm -rf ./.localstack/`. So even if the data dir is deleted out-of-band (e.g.
   `git clean -fdx`, since the dir is gitignored), `down` can still stop the orphaned
   postmasters — matching on the **recorded PID** and, as a backstop, on any postmaster
@@ -163,7 +163,7 @@ ports are actually free**, then fails loudly if any are still bound:
   port can never read as "our freshly-started cluster." `up` also refuses to start onto a
   port held by a process it doesn't own.
 - A partial/failed `up` self-cleans via an `EXIT`/`ERR` trap (no leaked clusters).
-- `PG_BUMPERS_LOCALSTACK_DIR` is validated (non-empty, absolute, not `/` or `$HOME`,
+- `PG_BRAKES_LOCALSTACK_DIR` is validated (non-empty, absolute, not `/` or `$HOME`,
   confined under the repo or a `*localstack*` dir) before any `rm -rf`.
 
 ---
@@ -174,7 +174,7 @@ ports are actually free**, then fails loudly if any are still bound:
 > database (README quickstart); `up.sh` spins a *throwaway* cluster so you can watch
 > the floor work without a database of your own.
 
-`deploy/up.sh` is the launcher that makes pg_bumpers **actually connectable to a real
+`deploy/up.sh` is the launcher that makes pg_brakes **actually connectable to a real
 Claude Code** against a throwaway cluster. It:
 
 1. builds the binaries + the MCP shell (skip with `--no-build`);
@@ -214,7 +214,7 @@ deploy/down.sh               # stop the 3 daemons + local-stack; verify ports fr
 The printed connect line is of the form (values filled in by the launcher):
 
 ```sh
-claude mcp add pg-bumpers \
+claude mcp add pg-brakes \
   --env PGB_PROXY_HOST=127.0.0.1 --env PGB_PROXY_PORT=6432 \
   --env PGB_PROXY_DB=pgb_demo --env PGB_PROXY_USER=pgb_agent \
   --env PGB_PROXY_PASSWORD=pgb_agent_dev_pw --env PGB_PROXY_APP_NAME=pgb_proxy \
@@ -239,7 +239,7 @@ plain simple-query is rejected. Two proofs the e2e test asserts: the proxy stamp
 `pg_stat_activity`), and a read of the **non-granted** `secret_data` is `WALL_DENIED`
 (SQLSTATE 42501) — the WALL role denying default-deny, which a raw superuser path
 would not. Proven end-to-end by the env-gated Rust e2e `crates/mcp/tests/read_path_e2e.rs`
-(`PG_BUMPERS_IT=1`); the write path is proven by `crates/mcp/tests/write_path_e2e.rs`.
+(`PG_BRAKES_IT=1`); the write path is proven by `crates/mcp/tests/write_path_e2e.rs`.
 
 The operator **approve** hop (the signing key never enters the agent/MCP path) calls
 the applyd socket `approve` RPC out-of-band; see the e2e test for the exact shape, and
@@ -248,13 +248,13 @@ the launcher's `connect.env`) proves the unified chain.
 
 ---
 
-## Integration tests: the `PG_BUMPERS_IT` gate
+## Integration tests: the `PG_BRAKES_IT` gate
 
 Integration tests are **env-gated** so plain test runs and the cargo CI job stay fast
 and DB-independent. The convention for the whole project:
 
-- `PG_BUMPERS_IT` unset / `!= 1` → integration assertions are **skipped** (exit 0).
-- `PG_BUMPERS_IT=1` → they **run for real** against a live stack.
+- `PG_BRAKES_IT` unset / `!= 1` → integration assertions are **skipped** (exit 0).
+- `PG_BRAKES_IT=1` → they **run for real** against a live stack.
 
 ### Smoke harness — `deploy/smoke.sh`
 
@@ -265,19 +265,19 @@ reachable **and in recovery** (`pg_is_in_recovery() = t`), (4) primary reports a
 
 ```sh
 # RED — with the stack DOWN, the assertions fail (exit 1):
-PG_BUMPERS_IT=1 bash deploy/smoke.sh
+PG_BRAKES_IT=1 bash deploy/smoke.sh
 
 # GREEN — bring the stack up, then the smoke passes (exit 0):
 bash deploy/local-stack.sh up
-PG_BUMPERS_IT=1 bash deploy/smoke.sh
+PG_BRAKES_IT=1 bash deploy/smoke.sh
 
-# (Gate proof) — with PG_BUMPERS_IT unset, it SKIPS and exits 0:
+# (Gate proof) — with PG_BRAKES_IT unset, it SKIPS and exits 0:
 bash deploy/smoke.sh
 ```
 
 The smoke harness targets the **Path B** ports by default; override via
-`PG_BUMPERS_PRIMARY_PORT` / `PG_BUMPERS_REPLICA_PORT` / `PG_BUMPERS_META_PORT` (and the
-bin dir with the unified `PG_BUMPERS_PG_BIN` — the one variable CI sets, taking
+`PG_BRAKES_PRIMARY_PORT` / `PG_BRAKES_REPLICA_PORT` / `PG_BRAKES_META_PORT` (and the
+bin dir with the unified `PG_BRAKES_PG_BIN` — the one variable CI sets, taking
 precedence over the legacy `PGBIN`) to point it at any equivalent stack.
 
 ---
@@ -297,19 +297,19 @@ proxy** — and refuses any agent connection that doesn't originate from the pro
 | `hba/pg_hba.agent-boundary.conf.template` | **Layer 0** `pg_hba` rules: agent role permitted **only from the proxy host's CIDR**; every other origin `reject`ed. |
 | `hba/render-hba.sh` | Generator that substitutes the template's placeholders (`--proxy-cidr 10.0.0.5/32 …`). Append its output to `$PGDATA/pg_hba.conf` **above** any catch-all. |
 | `hba/NETWORK-POLICY.md` | The network-policy companion (firewall / security-group / k8s NetworkPolicy half of the boundary) + how the local test models "proxy host vs. elsewhere". |
-| `test/wall_matrix.sh` | The **role-hardening test matrix** (env-gated `PG_BUMPERS_IT=1`): spins a dedicated throwaway PG cluster (any supported major, 14-18) on **54331**, applies `10_hardened_role.sql` **+ the fixture `20_demo_seed.sql`** + the boundary `pg_hba`, then asserts **one row per matrix item** by *attempting* each denied action as the agent and proving it fails (+ whitelisted SELECT succeeds, member-of-nothing, boundary refused/allowed). |
+| `test/wall_matrix.sh` | The **role-hardening test matrix** (env-gated `PG_BRAKES_IT=1`): spins a dedicated throwaway PG cluster (any supported major, 14-18) on **54331**, applies `10_hardened_role.sql` **+ the fixture `20_demo_seed.sql`** + the boundary `pg_hba`, then asserts **one row per matrix item** by *attempting* each denied action as the agent and proving it fails (+ whitelisted SELECT succeeds, member-of-nothing, boundary refused/allowed). |
 
 Wired in: `local-stack.sh` applies `sql/10_hardened_role.sql` against the primary on every
 `up` (idempotent); the docker compose picks up `init/10_hardened_role.sql` on first boot.
 
 ```sh
 # GREEN — every matrix row passes against the live backend (exit 0):
-PG_BUMPERS_IT=1 deploy/test/wall_matrix.sh
+PG_BRAKES_IT=1 deploy/test/wall_matrix.sh
 
 # RED — a freshly-created, UN-hardened role CAN do denied things; assertions fail (exit 1):
-PG_BUMPERS_IT=1 deploy/test/wall_matrix.sh --red
+PG_BRAKES_IT=1 deploy/test/wall_matrix.sh --red
 
-# Gate proof — with PG_BUMPERS_IT unset it SKIPS (exit 0):
+# Gate proof — with PG_BRAKES_IT unset it SKIPS (exit 0):
 deploy/test/wall_matrix.sh
 
 # Render the Layer 0 boundary for a real deployment:
@@ -440,7 +440,7 @@ internally-consistent chain is caught by the anchored head; an honest chain veri
 signature is rejected), `anchoring_respects_the_injected_clock_interval` (clock-driven
 cadence, no wall clock), and `worm_file_anchor_persists_and_reloads` (independent retention
 across restart). All DB-free and deterministic; the `_meta` PgSink path stays env-gated
-(`PG_BUMPERS_IT=1`).
+(`PG_BRAKES_IT=1`).
 
 ---
 

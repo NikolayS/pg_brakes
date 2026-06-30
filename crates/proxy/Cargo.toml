@@ -1,6 +1,6 @@
 [package]
 name = "pgb-proxy"
-description = "pg_bumpers proxy binary: inline read-only enforcement (budgets, cutoff, timeouts, audit) — agent-only endpoint."
+description = "pg_brakes proxy binary: inline read-only enforcement (budgets, cutoff, timeouts, audit) — agent-only endpoint."
 version.workspace = true
 edition.workspace = true
 license.workspace = true

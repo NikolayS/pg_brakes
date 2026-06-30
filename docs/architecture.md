@@ -1,10 +1,10 @@
-# pg_bumpers — Architecture
+# pg_brakes — Architecture
 
 > Companion to the spec. Source of truth for *intent* is [`docs/spec/SPEC.md`](spec/SPEC.md) (v0.8, build-frozen); recorded deviations live in [`docs/spec/SPEC.amendments.md`](spec/SPEC.amendments.md). This document describes the system **as it exists in the tree today** and flags what is stubbed or fast-follow.
 
 ## What this is
 
-pg_bumpers lets AI agents read and write **production Postgres** safely. The honest guarantee is split by damage class (SPEC §1):
+pg_brakes lets AI agents read and write **production Postgres** safely. The honest guarantee is split by damage class (SPEC §1):
 
 - **Writes (reversible damage):** 0 catastrophic false-negatives **by construction** — every applied write is bounded + reversible (data-loss prevented or undoable).
 - **Reads (disclosure):** *not* zero, never "impossible." The structural guarantee is **bounded disclosure** (≤ a per-role byte/row budget, then cutoff/kill) + **best-effort detection**. The audit log is **tamper-evident**, not tamper-proof.
@@ -211,13 +211,13 @@ The SPEC's S0 plan called for a docker-compose stack as the test substrate. Dock
 - Isolated throwaway PG18 clusters under a git-ignored `./.localstack/` on dedicated high ports (primary `54321`, replica `54322`, meta `54323`) so they never touch a cluster on 5432.
 - Real streaming replication (`pg_basebackup -R` → `standby.signal` + `primary_conninfo`, verified via `pg_stat_replication` + a replicated row round-trip).
 - A separate `meta` cluster hosts the append-only `_meta` audit DB.
-- `deploy/smoke.sh` is env-gated on `PG_BUMPERS_IT=1`; the orchestrator/proxy/audit integration tests are likewise env-gated and skipped by a plain `cargo test`.
+- `deploy/smoke.sh` is env-gated on `PG_BRAKES_IT=1`; the orchestrator/proxy/audit integration tests are likewise env-gated and skipped by a plain `cargo test`.
 
 The deviation is **scoped to the test/dev substrate only** — it does not touch the deterministic floor (§11.1), the bounded + reversible guarantee (§12.1), or any product behavior. The graceful-degradation **bare-primary** baseline is still proven (default path runs no replica; replica added only when requested — exactly as `docker compose` vs `--profile replica` would behave). The shipped compose is statically validated with `docker compose config -q`; re-validating it live requires a Docker-healthy machine.
 
 ### Graceful degradation (SPEC §12)
 
-pg_bumpers works against a **bare primary** (no replica, no DBLab); each added component upgrades capability without becoming a gate. The bounded + reversible guarantee is **invariant** across every configuration — only the preview/isolation *experience* improves. Components are runtime-detected from `policy.yaml`; the system states the active mode plainly and **never silently downgrades**.
+pg_brakes works against a **bare primary** (no replica, no DBLab); each added component upgrades capability without becoming a gate. The bounded + reversible guarantee is **invariant** across every configuration — only the preview/isolation *experience* improves. Components are runtime-detected from `policy.yaml`; the system states the active mode plainly and **never silently downgrades**.
 
 | Component | Absent (baseline) | Present (upgrade) |
 |---|---|---|

@@ -1,4 +1,4 @@
-# pg_bumpers — Components
+# pg_brakes — Components
 
 A per-crate map of what exists in the tree today. Source of truth: [`docs/spec/SPEC.md`](spec/SPEC.md) (v0.8); the docker→local-PG18 pivot is in [`docs/spec/SPEC.amendments.md`](spec/SPEC.amendments.md).
 
@@ -64,7 +64,7 @@ The inline, agent-only enforcement point — the project's core IP (`crates/prox
 
 **The six enforcement hooks** (lib.rs module docs): (1) extended-protocol-only; (2) read-only classification; (3) byte/row mid-stream cutoff; (4) `statement_timeout` injection; (5) fail-closed on any parse/enforcement uncertainty; (6) audit of every statement incl. rejects. The classifier is **advisory and foolable** (e.g. `nextval`/`pg_sleep`); the un-foolable backstops the proxy relies on are the WALL role, `statement_timeout`, and the byte/row cutoff.
 
-**Testing.** Unit tests in `enforce`/`budget`/`config`/`auth`/`recorder` (incl. the metered-COPY-out cutoff against an in-memory backend). `tests/proxy_it.rs` (env-gated `PG_BUMPERS_IT=1`) drives the whole stack against PG18 — including the marquee `COMMIT; DROP SCHEMA public CASCADE` being blocked end-to-end.
+**Testing.** Unit tests in `enforce`/`budget`/`config`/`auth`/`recorder` (incl. the metered-COPY-out cutoff against an in-memory backend). `tests/proxy_it.rs` (env-gated `PG_BRAKES_IT=1`) drives the whole stack against PG18 — including the marquee `COMMIT; DROP SCHEMA public CASCADE` being blocked end-to-end.
 
 ---
 

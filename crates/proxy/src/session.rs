@@ -306,7 +306,7 @@ where
 /// `backend_server_version` is the REAL `server_version` captured from the
 /// backend's startup (C1 #102, spec v0.8.1 §0.5). The proxy is a transparent
 /// version pass-through across the supported PG 14-18 range — it forwards the
-/// backend's actual version (tagged so a reader can see it traversed pg_bumpers)
+/// backend's actual version (tagged so a reader can see it traversed pg_brakes)
 /// rather than a hardcoded `18.0`, which would mislead an agent connected through
 /// to a 14-17 backend. If the backend somehow reported no version (it always
 /// does), we fail safe to a neutral `"unknown"` tag rather than inventing 18.0.
@@ -323,7 +323,7 @@ where
     } else {
         backend_server_version
     };
-    let server_version = format!("{raw} (pg_bumpers proxy)");
+    let server_version = format!("{raw} (pg_brakes proxy)");
     for (name, value) in [
         ("server_version", server_version.as_str()),
         ("client_encoding", "UTF8"),
@@ -1172,10 +1172,10 @@ mod tests {
     /// C1 #102 (spec v0.8.1 §0.5 — the wire proxy is version-agnostic across PG
     /// 14-18): the proxy must PASS THROUGH the backend's real `server_version` to
     /// the agent, NOT advertise a hardcoded `18.0`. RED before the fix:
-    /// `finish_agent_startup` emitted a constant `"18.0 (pg_bumpers proxy)"`, so a
+    /// `finish_agent_startup` emitted a constant `"18.0 (pg_brakes proxy)"`, so a
     /// 14-17 backend was misreported as 18. GREEN: the value the proxy captured
     /// from the backend's ParameterStatus is forwarded verbatim (tagged so a
-    /// reader can see it traversed pg_bumpers). DB-free — runs in the fast gate.
+    /// reader can see it traversed pg_brakes). DB-free — runs in the fast gate.
     #[tokio::test]
     async fn server_version_is_passed_through_not_hardcoded_18() {
         // A non-18 backend (PG14) must be advertised as 14.x, never 18.
@@ -1195,7 +1195,7 @@ mod tests {
             "the proxy must NOT advertise a hardcoded 18.0 to a non-18 backend (got {sv:?})"
         );
         assert!(
-            sv.contains("pg_bumpers proxy"),
+            sv.contains("pg_brakes proxy"),
             "the forwarded version stays tagged as having traversed the proxy (got {sv:?})"
         );
 

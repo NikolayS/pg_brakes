@@ -1,5 +1,5 @@
 //! Self-contained throwaway Postgres **primary** cluster for the clone-governance
-//! integration tests (env-gated `PG_BUMPERS_IT=1`).
+//! integration tests (env-gated `PG_BRAKES_IT=1`).
 //!
 //! Unlike `common::create_seeded_db` (which assumes a server is already up on a
 //! port), the clone-governance tests must own a real *primary cluster* on disk so
@@ -17,12 +17,12 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// The PG bin dir, via the ONE shared resolver (issues #44, #102). Precedence
-/// (unified across every IT): `PG_BUMPERS_PG_BIN` (non-empty) → `PG_BUMPERS_PGBIN`
+/// (unified across every IT): `PG_BRAKES_PG_BIN` (non-empty) → `PG_BRAKES_PGBIN`
 /// (this crate's legacy var, non-empty) → the version-neutral Homebrew keg path.
 /// The precedence — including the set-but-empty fall-through — is unit-tested in
 /// `pgb-test-support`. Version-agnostic across the supported PG 14-18 range.
 pub fn pg_bin() -> PathBuf {
-    pgb_test_support::resolve_pg_bin("PG_BUMPERS_PGBIN")
+    pgb_test_support::resolve_pg_bin("PG_BRAKES_PGBIN")
 }
 
 fn tool(name: &str) -> PathBuf {

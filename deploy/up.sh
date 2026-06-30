@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# pg_bumpers — deploy/up.sh: THE one-command runnable stack (S5 demo).
+# pg_brakes — deploy/up.sh: THE one-command runnable stack (S5 demo).
 #
 # Brings up the FULL assembled stack and prints a ready-to-paste `claude mcp add`
 # line so a REAL Claude Code can connect and exercise the deterministic floor:
@@ -46,15 +46,15 @@ IFS=$'\n\t'
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-# PG bin dir. Precedence (unified — issues #44, #102): PG_BUMPERS_PG_BIN → PGBIN
+# PG bin dir. Precedence (unified — issues #44, #102): PG_BRAKES_PG_BIN → PGBIN
 # (legacy) → the version-neutral Homebrew keg path (macOS dev fallback).
 # Version-agnostic across the supported PG 14-18 range.
-PGBIN="${PG_BUMPERS_PG_BIN:-${PGBIN:-/opt/homebrew/opt/postgresql/bin}}"
+PGBIN="${PG_BRAKES_PG_BIN:-${PGBIN:-/opt/homebrew/opt/postgresql/bin}}"
 
 # Dedicated high ports (NEVER 5432). The primary/meta/replica come from
 # local-stack; the proxy's agent endpoint is its own high port.
-PRIMARY_PORT="${PG_BUMPERS_PRIMARY_PORT:-54321}"
-META_PORT="${PG_BUMPERS_META_PORT:-54323}"
+PRIMARY_PORT="${PG_BRAKES_PRIMARY_PORT:-54321}"
+META_PORT="${PG_BRAKES_META_PORT:-54323}"
 PROXY_PORT="${PGB_UP_PROXY_PORT:-6432}"
 HOST="127.0.0.1"
 
@@ -65,7 +65,7 @@ DEMO_DB="${PGB_UP_DEMO_DB:-pgb_demo}"
 
 # Out-of-tree state dir (PIDs, anchor file, socket, keys) so down.sh can stop the
 # daemons even if the repo tree is touched. Stable across runs.
-STATE_DIR="${PGB_UP_STATE_DIR:-${TMPDIR:-/tmp}/pg_bumpers-up}"
+STATE_DIR="${PGB_UP_STATE_DIR:-${TMPDIR:-/tmp}/pg_brakes-up}"
 SOCKET_PATH="$STATE_DIR/applyd.sock"
 ANCHOR_PATH="$STATE_DIR/audit.anchor.worm"
 
@@ -371,7 +371,7 @@ POST_5432="$(port_listeners 5432)"
 cat >&2 <<BANNER
 
 ================================================================================
- pg_bumpers stack is UP. Reads route through pgb-proxy (NOT raw Postgres). :5432 untouched.
+ pg_brakes stack is UP. Reads route through pgb-proxy (NOT raw Postgres). :5432 untouched.
 ================================================================================
 
   pgb-proxy  : $HOST:$PROXY_PORT   (agent SCRAM endpoint, TLS OFF dev-mode, WALL role pgb_agent)
@@ -382,7 +382,7 @@ cat >&2 <<BANNER
 
   Connect a REAL Claude Code to this stack — paste this single line:
 
-  claude mcp add pg-bumpers \\
+  claude mcp add pg-brakes \\
     --env PGB_PROXY_HOST=$HOST \\
     --env PGB_PROXY_PORT=$PROXY_PORT \\
     --env PGB_PROXY_DB=$DEMO_DB \\

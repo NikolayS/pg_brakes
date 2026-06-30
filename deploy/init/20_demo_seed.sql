@@ -1,4 +1,4 @@
--- pg_bumpers — FIXTURE-ONLY demo seed (NOT applied by a real BYO deployment).
+-- pg_brakes — FIXTURE-ONLY demo seed (NOT applied by a real BYO deployment).
 -- =====================================================================================
 -- Source of truth: docs/spec/SPEC.md (v0.8) §0.5 ("the docker-compose demo cluster is
 -- CI/dev/test ONLY"), §5 (role-hardening matrix). Split out of the canonical role

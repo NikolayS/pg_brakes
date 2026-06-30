@@ -1,8 +1,8 @@
 //! Env-gated PG18 IT for **cross-process audit-append serialization** (S5 #76,
-//! item 2). Runs only with `PG_BUMPERS_IT=1`. Run:
+//! item 2). Runs only with `PG_BRAKES_IT=1`. Run:
 //!
 //! ```sh
-//! PG_BUMPERS_IT=1 cargo test -p pgb-audit --test concurrent_append_it -- --test-threads=1
+//! PG_BRAKES_IT=1 cargo test -p pgb-audit --test concurrent_append_it -- --test-threads=1
 //! ```
 //!
 //! It proves that two **independent connections** (modelling two separate
@@ -32,13 +32,13 @@ use postgres::{Client, NoTls};
 const DEFAULT_ADMIN_PGURL: &str = "host=127.0.0.1 port=55432 user=postgres dbname=postgres";
 
 fn it_enabled() -> bool {
-    std::env::var("PG_BUMPERS_IT")
+    std::env::var("PG_BRAKES_IT")
         .map(|v| v == "1")
         .unwrap_or(false)
 }
 
 fn admin_pgurl() -> String {
-    std::env::var("PG_BUMPERS_AUDIT_PGURL").unwrap_or_else(|_| DEFAULT_ADMIN_PGURL.to_string())
+    std::env::var("PG_BRAKES_AUDIT_PGURL").unwrap_or_else(|_| DEFAULT_ADMIN_PGURL.to_string())
 }
 
 fn connect(url: &str) -> Client {
@@ -122,7 +122,7 @@ fn entry(role: &str, sql: &str, decision: Decision, code: &str) -> NewEntry {
 #[test]
 fn concurrent_appenders_from_two_connections_produce_a_contiguous_verifying_chain() {
     if !it_enabled() {
-        eprintln!("[skip] set PG_BUMPERS_IT=1 to run the concurrent-append serialization IT");
+        eprintln!("[skip] set PG_BRAKES_IT=1 to run the concurrent-append serialization IT");
         return;
     }
     let dbname = setup_fresh_db("serialize");

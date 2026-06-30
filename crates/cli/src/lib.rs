@@ -1,4 +1,4 @@
-//! pg_bumpers CLI approval flow (SPEC §14 MVP mechanism).
+//! pg_brakes CLI approval flow (SPEC §14 MVP mechanism).
 //!
 //! This is the **MVP authorization surface** (SPEC §14.3): a blocked write is
 //! routed to a human who approves it on the CLI, emitting a **signed, single-use,

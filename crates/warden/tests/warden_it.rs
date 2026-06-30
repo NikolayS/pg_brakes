@@ -1,15 +1,15 @@
 //! Env-gated **real Postgres** integration test for the warden (SPEC §3 layer 2,
-//! §4, §10.9; issues #52, #65). Runs only when `PG_BUMPERS_IT=1`, so CI's fast
+//! §4, §10.9; issues #52, #65). Runs only when `PG_BRAKES_IT=1`, so CI's fast
 //! `cargo test` skips it (the crate still builds/links).
 //!
 //! ```sh
 //! # stand up a dedicated throwaway Postgres cluster on a high port (NEVER 5432):
-//! PG_BUMPERS_IT=1 cargo test -p pgb-warden --test warden_it -- --nocapture
+//! PG_BRAKES_IT=1 cargo test -p pgb-warden --test warden_it -- --nocapture
 //! ```
 //!
 //! By default the test **stands up its own throwaway cluster** on port `54362`
 //! (initdb + start + teardown, all under a temp dir) so it is hermetic and
-//! never touches the developer's 5432. Override with `PG_BUMPERS_WARDEN_PGURL`
+//! never touches the developer's 5432. Override with `PG_BRAKES_WARDEN_PGURL`
 //! to point at an already-running local-stack primary.
 //!
 //! It proves, against a live server, that the **running, audited** watchdog
@@ -56,18 +56,18 @@ use pgb_warden::{
 const AGENT_APP_NAME: &str = "pgb_proxy"; // the warden tag (PROXY_APP_NAME)
 
 fn it_enabled() -> bool {
-    std::env::var("PG_BUMPERS_IT")
+    std::env::var("PG_BRAKES_IT")
         .map(|v| v == "1")
         .unwrap_or(false)
 }
 
 /// The PG bin dir, via the ONE shared resolver (issues #44, #102). Precedence
-/// (unified across every IT): `PG_BUMPERS_PG_BIN` (non-empty) → `PG_BUMPERS_PGBIN`
+/// (unified across every IT): `PG_BRAKES_PG_BIN` (non-empty) → `PG_BRAKES_PGBIN`
 /// (legacy, non-empty) → the version-neutral Homebrew keg path. The precedence —
 /// including the set-but-empty fall-through — is unit-tested in `pgb-test-support`.
 /// Version-agnostic across the supported PG 14-18 range.
 fn pgbin() -> String {
-    pgb_test_support::resolve_pg_bin("PG_BUMPERS_PGBIN")
+    pgb_test_support::resolve_pg_bin("PG_BRAKES_PGBIN")
         .to_string_lossy()
         .into_owned()
 }
@@ -85,7 +85,7 @@ struct ThrowawayCluster {
 impl ThrowawayCluster {
     /// Stand up (or attach to an override) a throwaway Postgres cluster.
     fn up() -> (Self, String) {
-        if let Ok(dsn) = std::env::var("PG_BUMPERS_WARDEN_PGURL") {
+        if let Ok(dsn) = std::env::var("PG_BRAKES_WARDEN_PGURL") {
             // Attach mode: an external local-stack primary. We don't own it.
             return (
                 ThrowawayCluster {
@@ -281,7 +281,7 @@ fn backend_present(admin: &mut Client, pid: i32) -> bool {
 #[test]
 fn warden_terminates_spares_alarms_and_audits_each_action_to_meta() {
     if !it_enabled() {
-        eprintln!("[skip] warden_it: set PG_BUMPERS_IT=1 to run against the live backend");
+        eprintln!("[skip] warden_it: set PG_BRAKES_IT=1 to run against the live backend");
         return;
     }
 

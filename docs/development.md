@@ -1,6 +1,6 @@
 # Development guide
 
-How we build pg_bumpers: the TDD discipline, the CI gates, the integration-test
+How we build pg_brakes: the TDD discipline, the CI gates, the integration-test
 convention, license hygiene, the clean-room rule, and the issue-to-merge
 lifecycle. This is the engineering process; the **product** spec is
 [`docs/spec/SPEC.md`](spec/SPEC.md) (v0.8, build-frozen) and the operating rules are
@@ -29,7 +29,7 @@ So you document and test against what actually exists:
 | **S3** | guarded apply · typed-inverse capture | **merged, green across the 14-18 CI matrix** |
 | **S4** | warden loop · MCP tools · policy wiring · audit anchoring · read-gates · CLI approval | **merged, green across the 14-18 CI matrix** |
 | **S5** | `pgb-applyd` write daemon · runnable MCP stdio shell · `deploy/up.sh` end-to-end · marquee MCP-bypass repro | **merged, green across the 14-18 CI matrix** |
-| — | LLM gating risk-engine (write + read) · Rust `pgb-mcp` port ([#83](https://github.com/NikolayS/pg_bumpers/issues/83)) | fast-follow |
+| — | LLM gating risk-engine (write + read) · Rust `pgb-mcp` port ([#83](https://github.com/NikolayS/pg_brakes/issues/83)) | fast-follow |
 
 What this means in the tree today:
 
@@ -124,7 +124,7 @@ build; if you changed deps, commit the updated `Cargo.lock`.
 
 The deployable MCP server is the native Rust **`pgb-mcp`** (crate `crates/mcp`,
 binary `pgb-mcp`) — the one and only MCP server after
-[EPIC #83](https://github.com/NikolayS/pg_bumpers/issues/83) (the original non-Rust
+[EPIC #83](https://github.com/NikolayS/pg_brakes/issues/83) (the original non-Rust
 MCP server and its separate-toolchain CI job are removed; the build is Rust-only).
 Because `crates/mcp` is a workspace member, the `rust` job above already builds + tests it
 (`cargo {build,test} --workspace`), and `cargo deny` license-checks its deps — so
@@ -133,7 +133,7 @@ there is **no** dedicated MCP CI job.
 It is a **runnable stdio shell** with the nine §11 tools, a live read path through
 `pgb-proxy`, and a write path through the `pgb-applyd` socket. The env-gated Rust
 e2e tests `crates/mcp/tests/{write_path_e2e,read_path_e2e}.rs` drive the shipped
-`PgBumpersMcp` handler end-to-end against a throwaway Postgres (`PG_BUMPERS_IT=1`); the
+`PgBrakesMcp` handler end-to-end against a throwaway Postgres (`PG_BRAKES_IT=1`); the
 catalog test pins the fail-closed surface (exactly nine tools, no `approve`).
 
 ### Run all gates locally before pushing
@@ -159,7 +159,7 @@ cargo deny  check
 
 ---
 
-## 3. The `PG_BUMPERS_IT` integration convention
+## 3. The `PG_BRAKES_IT` integration convention
 
 Two test tiers, by design:
 
@@ -169,7 +169,7 @@ Two test tiers, by design:
   **build and link** under the fast job (the crate compiles); they just **skip**
   their assertions.
 - **Integration tier (gated, real).** Tests that need a live Postgres (any
-  supported major, 14-18) are gated behind the env var **`PG_BUMPERS_IT=1`**. When
+  supported major, 14-18) are gated behind the env var **`PG_BRAKES_IT=1`**. When
   the gate is unset, they print a `[skip]` line and exit success; when it's set,
   they run for **real** against the live backend (now exercised across the 14-18
   CI matrix) and produce evidence.
@@ -180,11 +180,11 @@ The contract used everywhere (see `crates/proxy/tests/proxy_it.rs`,
 
 ```rust
 fn it_enabled() -> bool {
-    std::env::var("PG_BUMPERS_IT").map(|v| v == "1").unwrap_or(false)
+    std::env::var("PG_BRAKES_IT").map(|v| v == "1").unwrap_or(false)
 }
 ```
 
-`deploy/smoke.sh` follows the same rule at the shell level: with `PG_BUMPERS_IT`
+`deploy/smoke.sh` follows the same rule at the shell level: with `PG_BRAKES_IT`
 unset or `!= 1` it **skips (exit 0)**; with it set it asserts and exits non-zero
 on any failure.
 
@@ -199,29 +199,29 @@ deploy/local-stack.sh up      # initdb + start primary(54321) + meta(54323),
 
 # proxy end-to-end against the live backend (read-only gate, byte/row cutoff,
 # statement_timeout, the marquee COMMIT; DROP SCHEMA block, audit chain):
-PG_BUMPERS_IT=1 cargo test -p pgb-proxy --test proxy_it -- --nocapture
+PG_BRAKES_IT=1 cargo test -p pgb-proxy --test proxy_it -- --nocapture
 
 # clone dry-run (blast radius / affected-PK set):
-PG_BUMPERS_IT=1 cargo test -p pgb-clone-orchestrator --test dry_run_it -- --nocapture
+PG_BRAKES_IT=1 cargo test -p pgb-clone-orchestrator --test dry_run_it -- --nocapture
 
 # clone governance:
-PG_BUMPERS_IT=1 cargo test -p pgb-clone-orchestrator --test clone_governance_it -- --nocapture
+PG_BRAKES_IT=1 cargo test -p pgb-clone-orchestrator --test clone_governance_it -- --nocapture
 
 # S0 substrate smoke (replication round-trip, _meta reachable):
-PG_BUMPERS_IT=1 deploy/smoke.sh
+PG_BRAKES_IT=1 deploy/smoke.sh
 
 deploy/local-stack.sh down    # stop all clusters, remove ./.localstack/
 ```
 
 The PG bin dir defaults to the version-neutral keg `/opt/homebrew/opt/postgresql/bin`
-(any supported major, 14–18); override with the unified **`PG_BUMPERS_PG_BIN`**
+(any supported major, 14–18); override with the unified **`PG_BRAKES_PG_BIN`**
 (honored by every shell script *and* every Rust IT — the one variable CI sets
 per-major in the matrix), or the legacy per-context vars `PGBIN`
-(shell scripts) / `PG_BUMPERS_PGBIN` / `PG_BUMPERS_PG_BINDIR` (Rust ITs), which
+(shell scripts) / `PG_BRAKES_PGBIN` / `PG_BRAKES_PG_BINDIR` (Rust ITs), which
 still work for local dev. The dry-run IT defaults
 its admin DSN to a dedicated throwaway port (`54341`) and the audit/fidelity ITs
-to `55432`/`55431` — override each with `PG_BUMPERS_PGURL` /
-`PG_BUMPERS_AUDIT_PGURL` to point at the running local-stack primary (see
+to `55432`/`55431` — override each with `PG_BRAKES_PGURL` /
+`PG_BRAKES_AUDIT_PGURL` to point at the running local-stack primary (see
 [`docs/quickstart.md`](quickstart.md) §4). The clone-governance tests stand up
 their **own** primary cluster on disk (so the `local` provider can `pg_basebackup`
 it); see `crates/clone-orchestrator/tests/common/cluster.rs`.
@@ -246,11 +246,11 @@ PostgreSQL port `5432`, so they cannot collide with a developer's real cluster:
 | local-stack replica | `54322` | `deploy/local-stack.sh` |
 | local-stack meta (`_meta` audit DB) | `54323` | `deploy/local-stack.sh` |
 | WALL matrix cluster | `54331` | `deploy/test/wall_matrix.sh` |
-| dry-run IT default admin | `54341` | `tests/common/mod.rs` (override `PG_BUMPERS_PGURL`) |
+| dry-run IT default admin | `54341` | `tests/common/mod.rs` (override `PG_BRAKES_PGURL`) |
 | clone-governance primary | `54360 + offset` | `tests/common/cluster.rs` |
 | clone-governance clone | `54370 + offset` | `tests/common/cluster.rs` |
-| audit `_meta` IT default admin | `55432` | `tests/pg_meta_it.rs` (override `PG_BUMPERS_AUDIT_PGURL`) |
-| fidelity spike default admin | `55431` | `spikes/fidelity/src/lib.rs` (override `PG_BUMPERS_PGURL`) |
+| audit `_meta` IT default admin | `55432` | `tests/pg_meta_it.rs` (override `PG_BRAKES_AUDIT_PGURL`) |
+| fidelity spike default admin | `55431` | `spikes/fidelity/src/lib.rs` (override `PG_BRAKES_PGURL`) |
 | proxy IT agent endpoint | ephemeral (OS-assigned) | `tests/proxy_it.rs` |
 
 Everything is **throwaway** and **loopback-only**: the local stack lives under a
@@ -316,7 +316,7 @@ The flow, enforced in order (`CLAUDE.md` §§3–4). It loops until satisfied.
 3. **Build red/green.** TDD per §1 above; verify all CI gates locally (§2).
 4. **Draft PR.** Open a **draft** PR via the `gh` CLI and post evidence: the RED
    and GREEN test output, the local gate results, and (for DB-touching work) the
-   `PG_BUMPERS_IT=1` integration run output.
+   `PG_BRAKES_IT=1` integration run output.
 5. **CI green.** All jobs pass on the PR; paste the run link. **Never claim green
    if it isn't.**
 6. **Adversarial review by a non-author.** A **different** agent (never the PR
@@ -342,7 +342,7 @@ The flow, enforced in order (`CLAUDE.md` §§3–4). It loops until satisfied.
 - **Protocols (placeholder):** `proto/`.
 - **Spikes (throwaway, `publish = false`):** `spikes/fidelity` — kept in the
   workspace only so it compiles under the fast CI job; its DB tests are
-  `PG_BUMPERS_IT`-gated.
+  `PG_BRAKES_IT`-gated.
 - **Product spec:** `docs/spec/SPEC.md` (v0.8) — build exactly to it; **do not
   edit it in feature PRs**.
 - **Decisions / rationale:** `docs/spec/decisions.md`.

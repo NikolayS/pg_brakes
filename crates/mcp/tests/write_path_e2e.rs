@@ -1,19 +1,19 @@
 //! Env-gated **real Postgres** end-to-end test for the EPIC #83 PR3 WRITE PATH: a REAL
-//! MCP client drives `PgBumpersMcp` whose write tools execute THROUGH the live
+//! MCP client drives `PgBrakesMcp` whose write tools execute THROUGH the live
 //! `pgb-applyd` Unix-socket daemon (the grant-gated §4 floor) in front of the live
 //! backend — NOT a fake, NOT raw PG. This is the honesty bar the founder set: a write must
 //! genuinely traverse `pgb-mcp → applyd-socket → guarded_apply_with_grant → the backend`,
 //! proven by reading the actual committed rows back.
 //!
-//! Runs only when `PG_BUMPERS_IT=1`, so CI's fast `cargo test` skips it (the crate
+//! Runs only when `PG_BRAKES_IT=1`, so CI's fast `cargo test` skips it (the crate
 //! still builds/links). ⚠️ NEVER touches :5432 — it stands up a THROWAWAY Postgres
 //! (any supported major, 14-18) on a dedicated high port (default 54360), with a clean teardown.
 //!
 //! ```sh
-//! PG_BUMPERS_IT=1 cargo test -p pgb-mcp --test write_path_e2e -- --nocapture --test-threads=1
+//! PG_BRAKES_IT=1 cargo test -p pgb-mcp --test write_path_e2e -- --nocapture --test-threads=1
 //! ```
 //!
-//! What it proves end-to-end, driving the SHIPPED `PgBumpersMcp` handler over the
+//! What it proves end-to-end, driving the SHIPPED `PgBrakesMcp` handler over the
 //! SAME duplex transport the stdio binary uses, with a REAL `pgb-applyd`:
 //!   * the catalog stays **nine** tools (no `approve` tool — the signing-key hop
 //!     stays out of the agent stdio);
@@ -46,14 +46,14 @@ use postgres::{Client, NoTls};
 use rmcp::ServiceExt;
 use rmcp::model::CallToolRequestParams;
 
-use pgb_mcp::{ApplydClient, ApplydConfig, AuditConfig, AuditReader, PgBumpersMcp};
+use pgb_mcp::{ApplydClient, ApplydConfig, AuditConfig, AuditReader, PgBrakesMcp};
 
 const ROLE: &str = "app_writer";
 const SESSION: &str = "mcp-write-e2e";
 const AUDIT_SIGNING_KEY: &str = "mcp-write-e2e-signing-key-0001";
 
 fn it_enabled() -> bool {
-    std::env::var("PG_BUMPERS_IT")
+    std::env::var("PG_BRAKES_IT")
         .map(|v| v == "1")
         .unwrap_or(false)
 }
@@ -64,9 +64,9 @@ fn it_enabled() -> bool {
 // =============================================================================
 
 /// A throwaway PG instance: its own data dir + a dedicated high port, dropped on
-/// teardown. The bin dir comes from `PG_BUMPERS_PG_BIN` (then the legacy
-/// `PG_BUMPERS_PG_BINDIR`, then the version-neutral Homebrew keg path); the port
-/// from `PG_BUMPERS_PRIMARY_PORT` (54360). Version-agnostic across PG 14-18.
+/// teardown. The bin dir comes from `PG_BRAKES_PG_BIN` (then the legacy
+/// `PG_BRAKES_PG_BINDIR`, then the version-neutral Homebrew keg path); the port
+/// from `PG_BRAKES_PRIMARY_PORT` (54360). Version-agnostic across PG 14-18.
 struct Pg {
     datadir: PathBuf,
     port: u16,
@@ -75,16 +75,16 @@ struct Pg {
 
 impl Pg {
     /// The PG bin dir, via the ONE shared resolver (issues #44, #102). Precedence
-    /// (unified across every IT): `PG_BUMPERS_PG_BIN` (non-empty) →
-    /// `PG_BUMPERS_PG_BINDIR` (this crate's legacy var, non-empty) → the
+    /// (unified across every IT): `PG_BRAKES_PG_BIN` (non-empty) →
+    /// `PG_BRAKES_PG_BINDIR` (this crate's legacy var, non-empty) → the
     /// version-neutral Homebrew keg path. The precedence — including the
     /// set-but-empty fall-through — is unit-tested in `pgb-test-support`.
     fn bindir() -> PathBuf {
-        pgb_test_support::resolve_pg_bin("PG_BUMPERS_PG_BINDIR")
+        pgb_test_support::resolve_pg_bin("PG_BRAKES_PG_BINDIR")
     }
 
     fn port() -> u16 {
-        std::env::var("PG_BUMPERS_PRIMARY_PORT")
+        std::env::var("PG_BRAKES_PRIMARY_PORT")
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(54360)
@@ -385,9 +385,9 @@ fn approver_keypair() -> (String, String) {
 //  The MCP client harness.
 // =============================================================================
 
-/// Build the SHIPPED `PgBumpersMcp` handler with the applyd client (pointed at the
+/// Build the SHIPPED `PgBrakesMcp` handler with the applyd client (pointed at the
 /// real daemon socket) + the `_meta` audit reader (so `get_audit` reads the chain).
-fn build_server(socket_path: &str, meta_dsn: &str) -> PgBumpersMcp {
+fn build_server(socket_path: &str, meta_dsn: &str) -> PgBrakesMcp {
     let applyd = ApplydClient::new(ApplydConfig {
         socket_path: socket_path.to_string(),
         role: ROLE.to_string(),
@@ -397,13 +397,13 @@ fn build_server(socket_path: &str, meta_dsn: &str) -> PgBumpersMcp {
     let audit = AuditReader::new(AuditConfig {
         dsn: meta_dsn.to_string(),
     });
-    PgBumpersMcp::new(ROLE, SESSION)
+    PgBrakesMcp::new(ROLE, SESSION)
         .with_applyd(applyd)
         .with_audit(audit)
 }
 
 async fn connect_client(
-    server: PgBumpersMcp,
+    server: PgBrakesMcp,
 ) -> rmcp::service::RunningService<rmcp::service::RoleClient, ()> {
     let (client_io, server_io) = tokio::io::duplex(64 * 1024);
     let (s_read, s_write) = tokio::io::split(server_io);
@@ -441,7 +441,7 @@ async fn call_tool(
 async fn mcp_writes_traverse_the_live_applyd_floor_refuse_bound_approve_commit_overcap_abort() {
     if !it_enabled() {
         eprintln!(
-            "[skip] set PG_BUMPERS_IT=1 (PostgreSQL 14-18 in PATH) for the MCP write-path e2e through applyd"
+            "[skip] set PG_BRAKES_IT=1 (PostgreSQL 14-18 in PATH) for the MCP write-path e2e through applyd"
         );
         return;
     }

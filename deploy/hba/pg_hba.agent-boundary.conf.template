@@ -1,4 +1,4 @@
-# pg_bumpers — Layer 0 NETWORK BOUNDARY (pg_hba.conf rules), template.
+# pg_brakes — Layer 0 NETWORK BOUNDARY (pg_hba.conf rules), template.
 # =====================================================================================
 # Source of truth: docs/spec/SPEC.md (v0.8) §3 (layer 0, the mandatory network boundary),
 # §4 ("Network/roles — do FIRST"), §5 ("network-boundary: direct-to-DB by agent role is

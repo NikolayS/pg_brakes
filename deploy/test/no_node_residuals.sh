@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# pg_bumpers — Rust-only grep-acceptance gate (issue #101, spec v0.8.1 §0.5).
+# pg_brakes — Rust-only grep-acceptance gate (issue #101, spec v0.8.1 §0.5).
 # =====================================================================================
 # The implementation is **Rust-only**: NO Node.js / TypeScript / pnpm technology in
 # tracked source, docs, CI, or the toolchain. The deployable MCP server is the native

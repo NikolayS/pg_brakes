@@ -87,8 +87,8 @@ jobs:
   # the FULL supported range PG 14·15·16·17·18 (spec v0.8.1 §0.5: "Supported
   # PostgreSQL: 14, 15, 16, 17, 18 … do NOT pin to 18 … the wire proxy + role
   # wall are version-agnostic; CI matrix tests against this range"). These tests
-  # are env-gated behind PG_BUMPERS_IT=1 and need a live PG, so the fast `rust`
-  # job above (which NEVER sets PG_BUMPERS_IT) skips them. A regression that
+  # are env-gated behind PG_BRAKES_IT=1 and need a live PG, so the fast `rust`
+  # job above (which NEVER sets PG_BRAKES_IT) skips them. A regression that
   # breaks the moat — OR a version-pin that breaks an older major — would
   # otherwise leave CI green; this matrix is the backstop on EVERY supported PG.
   #
@@ -120,14 +120,14 @@ jobs:
     env:
       # The ONE cross-IT/CI PG bin-dir variable (issues #44, #102). PGDG installs
       # PostgreSQL ${{ matrix.pg }} here on Ubuntu; every IT resolver honors this
-      # first. Renamed from PG_BUMPERS_PG18_BIN (hard rename, no alias) now that
+      # first. Renamed from PG_BRAKES_PG18_BIN (hard rename, no alias) now that
       # the substrate is version-agnostic across the supported range.
-      PG_BUMPERS_PG_BIN: /usr/lib/postgresql/${{ matrix.pg }}/bin
+      PG_BRAKES_PG_BIN: /usr/lib/postgresql/${{ matrix.pg }}/bin
       # The major as an env var so run: steps never interpolate ${{ … }} into a
       # shell command (defense-in-depth against workflow injection, even though
       # matrix.pg is a trusted literal).
       PG_MAJOR: ${{ matrix.pg }}
-      PG_BUMPERS_IT: "1"
+      PG_BRAKES_IT: "1"
     steps:
       - name: Checkout
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
@@ -165,11 +165,11 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             "postgresql-${PG_MAJOR}" "postgresql-client-${PG_MAJOR}"
           # Verify the bin dir + the exact tools every IT needs are present.
-          ls -l "$PG_BUMPERS_PG_BIN"
+          ls -l "$PG_BRAKES_PG_BIN"
           for t in initdb pg_ctl pg_basebackup psql pg_isready; do
-            test -x "$PG_BUMPERS_PG_BIN/$t" || { echo "missing $t in $PG_BUMPERS_PG_BIN" >&2; exit 1; }
+            test -x "$PG_BRAKES_PG_BIN/$t" || { echo "missing $t in $PG_BRAKES_PG_BIN" >&2; exit 1; }
           done
-          "$PG_BUMPERS_PG_BIN/initdb" --version
+          "$PG_BRAKES_PG_BIN/initdb" --version
           # PGDG auto-starts a default cluster on :5432 owned by the `postgres`
           # OS user — stop it so nothing of ours can ever collide with it. (Our
           # ITs use high ports only; this is belt + suspenders.)
@@ -230,12 +230,12 @@ jobs:
           set -Eeuo pipefail
           deploy/ci/start-pg.sh 54355
           trap 'deploy/ci/stop-pg.sh 54355' EXIT
-          PG_BUMPERS_PGURL="host=127.0.0.1 port=54355 user=postgres dbname=postgres" \
+          PG_BRAKES_PGURL="host=127.0.0.1 port=54355 user=postgres dbname=postgres" \
             cargo test -p pgb-applyd --test applyd_it --locked -- --nocapture --test-threads=1
 
       - name: IT — audit _meta sink/tamper/chain + proxy audit-_meta + cli shared-_meta (:55432)
         env:
-          PG_BUMPERS_AUDIT_PGURL: host=127.0.0.1 port=55432 user=postgres dbname=postgres
+          PG_BRAKES_AUDIT_PGURL: host=127.0.0.1 port=55432 user=postgres dbname=postgres
         run: |
           set -Eeuo pipefail
           deploy/ci/start-pg.sh 55432
@@ -252,7 +252,7 @@ jobs:
           set -Eeuo pipefail
           deploy/ci/start-pg.sh 55431
           trap 'deploy/ci/stop-pg.sh 55431' EXIT
-          PG_BUMPERS_PGURL="host=127.0.0.1 port=55431 user=postgres dbname=postgres" \
+          PG_BRAKES_PGURL="host=127.0.0.1 port=55431 user=postgres dbname=postgres" \
             cargo test -p fidelity-spike --locked -- --nocapture --test-threads=1
 
       # ---- PROXY / READ-PATH ITs — need the native-role WALL (local-stack) ----

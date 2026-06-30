@@ -1,6 +1,6 @@
 [package]
 name = "pgb-clone-orchestrator"
-description = "pg_bumpers clone-orchestrator: dry-run rehearsal, blast-radius measurement, PK-set guard, typed-inverse."
+description = "pg_brakes clone-orchestrator: dry-run rehearsal, blast-radius measurement, PK-set guard, typed-inverse."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -58,7 +58,7 @@ postgres = { version = "0.19", optional = true }
 # (a dev-dep on the crate itself). This is what makes the tests reuse the ONE
 # library impl rather than a second copy.
 pgb-clone-orchestrator = { path = ".", features = ["pg"] }
-# Synchronous Postgres client for the env-gated (PG_BUMPERS_IT=1) real-Postgres
+# Synchronous Postgres client for the env-gated (PG_BRAKES_IT=1) real-Postgres
 # integration tests (DB setup/teardown helpers in tests/common). MIT/Apache
 # (keeps cargo-deny green); the sync client keeps the harness linear, matching
 # the S0 fidelity spike.
@@ -73,6 +73,6 @@ rand_core = { version = "0.6", features = ["getrandom"] }
 # normal + dev dep). The library dep stays default-features = false.
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 # The ONE shared PG bin-dir resolver every env-gated IT calls (issue #44), so
-# the `PG_BUMPERS_PG_BIN → PG_BUMPERS_PGBIN → Homebrew` precedence lives + is
+# the `PG_BRAKES_PG_BIN → PG_BRAKES_PGBIN → Homebrew` precedence lives + is
 # unit-tested in exactly one place (no per-resolver drift).
 pgb-test-support = { path = "../test-support" }

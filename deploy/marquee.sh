@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# pg_bumpers — THE S5 MARQUEE runner (issue #68).
+# pg_brakes — THE S5 MARQUEE runner (issue #68).
 #
 # "delete a DB through the official MCP", end-to-end, per DAMAGE CLASS, against the
 # REAL ASSEMBLED STACK (live proxy read path + live pgb-applyd + anchored _meta
@@ -7,10 +7,10 @@
 # NOT a fake, NOT raw PG.
 #
 # It builds the binaries and runs the env-gated Rust end-to-end tests in
-# `crates/mcp/tests` (PG_BUMPERS_IT=1):
+# `crates/mcp/tests` (PG_BRAKES_IT=1):
 #   • write_path_e2e — stands up its OWN throwaway Postgres (dedicated high port,
 #     default 54360; ⚠️ NEVER 5432) + a REAL pgb-applyd child, drives the SHIPPED
-#     PgBumpersMcp handler over the SAME duplex transport the stdio binary uses,
+#     PgBrakesMcp handler over the SAME duplex transport the stdio binary uses,
 #     and tears the cluster down cleanly.
 #   • read_path_e2e  — runs the read path THROUGH a live pgb-proxy (TLS+SCRAM) in
 #     front of a throwaway Postgres the marquee brings up via deploy/local-stack.sh
@@ -32,7 +32,7 @@
 #
 # Usage:
 #   deploy/marquee.sh            # build + run the marquee, record the transcript
-#   PG_BUMPERS_MARQUEE_PORT=54350 deploy/marquee.sh   # override the write-path high port
+#   PG_BRAKES_MARQUEE_PORT=54350 deploy/marquee.sh   # override the write-path high port
 #
 # Requirements: a Homebrew keg-only PostgreSQL 14-18 binary set (PGBIN) and a Rust
 # toolchain. Clean-room; Apache/MIT/BSD/ISC deps only.
@@ -42,14 +42,14 @@ IFS=$'\n\t'
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-# PG bin dir. Precedence (unified — issues #44, #102): PG_BUMPERS_PG_BIN → PGBIN
+# PG bin dir. Precedence (unified — issues #44, #102): PG_BRAKES_PG_BIN → PGBIN
 # (legacy) → the version-neutral Homebrew keg path (macOS dev fallback).
 # Version-agnostic across the supported PG 14-18 range.
-PGBIN="${PG_BUMPERS_PG_BIN:-${PGBIN:-/opt/homebrew/opt/postgresql/bin}}"
+PGBIN="${PG_BRAKES_PG_BIN:-${PGBIN:-/opt/homebrew/opt/postgresql/bin}}"
 # The write-path e2e stands up its OWN throwaway PG on this dedicated high port.
-PORT="${PG_BUMPERS_MARQUEE_PORT:-54341}"
+PORT="${PG_BRAKES_MARQUEE_PORT:-54341}"
 # The read-path e2e connects to the local-stack primary (a separate high port).
-PRIMARY_PORT="${PG_BUMPERS_PRIMARY_PORT:-54321}"
+PRIMARY_PORT="${PG_BRAKES_PRIMARY_PORT:-54321}"
 TRANSCRIPT="$SCRIPT_DIR/marquee.transcript.txt"
 
 log() { printf '[marquee.sh] %s\n' "$*" >&2; }
@@ -90,19 +90,19 @@ PGBIN="$PGBIN" "$SCRIPT_DIR/local-stack.sh" up
 # Run the marquee e2e tests. Capture stdout+stderr (--nocapture surfaces the
 # per-damage-class assertions). The write path needs --test-threads=1.
 # ----------------------------------------------------------------------------
-log "running the WRITE-path marquee e2e (PG_BUMPERS_IT=1; throwaway Postgres on :$PORT)…"
+log "running the WRITE-path marquee e2e (PG_BRAKES_IT=1; throwaway Postgres on :$PORT)…"
 set +e
 ( cd "$REPO_ROOT" \
-    && PG_BUMPERS_IT=1 \
-       PG_BUMPERS_PRIMARY_PORT="$PORT" \
-       PG_BUMPERS_PG_BINDIR="${PG_BUMPERS_PG_BINDIR:-$PGBIN}" \
+    && PG_BRAKES_IT=1 \
+       PG_BRAKES_PRIMARY_PORT="$PORT" \
+       PG_BRAKES_PG_BINDIR="${PG_BRAKES_PG_BINDIR:-$PGBIN}" \
        cargo test --locked -p pgb-mcp --test write_path_e2e -- --nocapture --test-threads=1 ) >"$RAW" 2>&1
 RC_WRITE=$?
 
-log "running the READ-path marquee e2e (PG_BUMPERS_IT=1; read THROUGH the proxy → primary :$PRIMARY_PORT)…"
+log "running the READ-path marquee e2e (PG_BRAKES_IT=1; read THROUGH the proxy → primary :$PRIMARY_PORT)…"
 ( cd "$REPO_ROOT" \
-    && PG_BUMPERS_IT=1 \
-       PG_BUMPERS_PROXY_PGURL="host=127.0.0.1 port=$PRIMARY_PORT user=postgres dbname=postgres" \
+    && PG_BRAKES_IT=1 \
+       PG_BRAKES_PROXY_PGURL="host=127.0.0.1 port=$PRIMARY_PORT user=postgres dbname=postgres" \
        cargo test --locked -p pgb-mcp --test read_path_e2e -- --nocapture --test-threads=1 ) >>"$RAW" 2>&1
 RC_READ=$?
 set -e
@@ -112,7 +112,7 @@ set -e
 # ----------------------------------------------------------------------------
 {
   echo "================================================================================"
-  echo " pg_bumpers — S5 MARQUEE TRANSCRIPT (issue #68)  [recorded by deploy/marquee.sh]"
+  echo " pg_brakes — S5 MARQUEE TRANSCRIPT (issue #68)  [recorded by deploy/marquee.sh]"
   echo " server: Rust pgb-mcp (crates/mcp) — the single deployable MCP server (EPIC #83)"
   echo " generated: $(date -u +%Y-%m-%dT%H:%M:%SZ)  write-port: $PORT  read-primary: $PRIMARY_PORT"
   echo " pg: $("$PGBIN/initdb" --version)"

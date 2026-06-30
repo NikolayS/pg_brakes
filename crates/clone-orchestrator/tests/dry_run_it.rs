@@ -1,9 +1,9 @@
 //! Real-PG18 integration tests for the dry-run blast-radius engine (SPEC §4,
-//! §10.1, §12). Env-gated behind `PG_BUMPERS_IT=1` so CI's fast `cargo test`
+//! §10.1, §12). Env-gated behind `PG_BRAKES_IT=1` so CI's fast `cargo test`
 //! skips them. Run with:
 //!
 //! ```sh
-//! PG_BUMPERS_IT=1 cargo test -p pgb-clone-orchestrator --test dry_run_it -- --nocapture
+//! PG_BRAKES_IT=1 cargo test -p pgb-clone-orchestrator --test dry_run_it -- --nocapture
 //! ```
 //!
 //! These drive the **same engine** the production path uses
@@ -38,7 +38,7 @@ use pgb_core::{BlastRadius, LockMode, SystemClock};
 /// fast CI job stays DB-free.
 fn setup(tag: &str) -> Option<(String, String, postgres::Client)> {
     if !it_enabled() {
-        eprintln!("[skip] {tag}: set PG_BUMPERS_IT=1 to run the DB-backed dry-run test");
+        eprintln!("[skip] {tag}: set PG_BRAKES_IT=1 to run the DB-backed dry-run test");
         return None;
     }
     Some(create_seeded_db(&base_pgurl(), tag))

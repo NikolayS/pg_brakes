@@ -73,7 +73,7 @@
 //! engine is DB-free and drives an [`ApplyConn`]: the engine owns the *ordering
 //! and the guard decisions*; the connection owns the SQL. Production grows a
 //! tokio-backed `ApplyConn`; the env-gated integration tests
-//! (`apply_it.rs`, `PG_BUMPERS_IT=1`) implement it against real PostgreSQL 18, and
+//! (`apply_it.rs`, `PG_BRAKES_IT=1`) implement it against real PostgreSQL 18, and
 //! the unit tests here implement an in-memory one that can inject every drift +
 //! the `statement_timeout` fire deterministically. The barrier seam
 //! ([`ApplyBarrier`]) is crossed at the §10.4 point in both.

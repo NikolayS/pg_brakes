@@ -1,4 +1,4 @@
--- pg_bumpers — the append-only, hash-chained AUDIT table in the `_meta` DB.
+-- pg_brakes — the append-only, hash-chained AUDIT table in the `_meta` DB.
 -- =====================================================================================
 -- Source of truth: docs/spec/SPEC.md (v0.8) §3 (architecture: "hash-chained AUDIT …
 -- audited cannot write audit"), §4 ("Audit (Rust): append-only hash-chained rows in

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# pg_bumpers — render the Layer 0 network-boundary pg_hba rules from the template.
+# pg_brakes — render the Layer 0 network-boundary pg_hba rules from the template.
 # =====================================================================================
 # Substitutes the @PLACEHOLDERS@ in pg_hba.agent-boundary.conf.template and prints the
 # rendered rules to stdout. The caller appends them to a cluster's pg_hba.conf (ABOVE any

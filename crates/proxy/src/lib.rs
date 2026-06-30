@@ -1,4 +1,4 @@
-//! pg_bumpers **proxy** — the inline, agent-only enforcement point (SPEC §3
+//! pg_brakes **proxy** — the inline, agent-only enforcement point (SPEC §3
 //! layer 2, §4, §7 S1). This is the project's core IP.
 //!
 //! The proxy terminates an agent's PostgreSQL connection (SCRAM-SHA-256 over

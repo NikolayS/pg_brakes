@@ -7,10 +7,10 @@
 //!   * RED — once the agent role is UN-hardened (made SUPERUSER) the same doctor
 //!     exits **non-zero** (fail-closed: do not point an agent at this DB).
 //!
-//! Runs only when `PG_BUMPERS_IT=1`. Run with:
+//! Runs only when `PG_BRAKES_IT=1`. Run with:
 //!
 //! ```sh
-//! PG_BUMPERS_IT=1 cargo test -p pgb-cli --test doctor_it -- --nocapture
+//! PG_BRAKES_IT=1 cargo test -p pgb-cli --test doctor_it -- --nocapture
 //! ```
 //!
 //! It stands up its OWN throwaway cluster (any supported major 14-18) on a
@@ -21,7 +21,7 @@ use std::process::Command;
 use postgres::{Client, NoTls};
 
 fn it_enabled() -> bool {
-    std::env::var("PG_BUMPERS_IT")
+    std::env::var("PG_BRAKES_IT")
         .map(|v| v == "1")
         .unwrap_or(false)
 }
@@ -29,7 +29,7 @@ fn it_enabled() -> bool {
 /// The PG bin dir via the ONE shared resolver (issues #44, #102) — version-agnostic
 /// across PG 14-18.
 fn pgbin() -> String {
-    pgb_test_support::resolve_pg_bin("PG_BUMPERS_PGBIN")
+    pgb_test_support::resolve_pg_bin("PG_BRAKES_PGBIN")
         .to_string_lossy()
         .into_owned()
 }
@@ -152,7 +152,7 @@ fn run_doctor(port: u16) -> (bool, String) {
 #[test]
 fn doctor_fails_closed_then_passes_when_hardened() {
     if !it_enabled() {
-        eprintln!("[skip] doctor_it: set PG_BUMPERS_IT=1 to run against a real cluster");
+        eprintln!("[skip] doctor_it: set PG_BRAKES_IT=1 to run against a real cluster");
         return;
     }
     let (_cluster, admin_dsn) = ThrowawayCluster::up();

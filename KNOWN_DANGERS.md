@@ -1,4 +1,4 @@
-# Known dangers — operational hazards in pg_bumpers' own setup. Honesty-first; see also [KNOWN_BYPASSES.md](KNOWN_BYPASSES.md).
+# Known dangers — operational hazards in pg_brakes' own setup. Honesty-first; see also [KNOWN_BYPASSES.md](KNOWN_BYPASSES.md).
 
 ## D1 — `deploy/sql/10_hardened_role.sql` can take down an existing production database
 The role-hardening SQL revokes privileges from **`PUBLIC`** in schema `public` — `REVOKE EXECUTE ON ALL FUNCTIONS … FROM PUBLIC`, `ALTER DEFAULT PRIVILEGES … REVOKE EXECUTE … FROM PUBLIC`, and the `CREATE` / `TEMPORARY` / `lo_*` revokes. Those change the privilege model for **every role in the database, not just `pgb_agent`**.

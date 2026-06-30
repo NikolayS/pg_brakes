@@ -203,8 +203,8 @@ impl CloneLedger {
     /// the system tempdir (which a deployment / reboot can clear, orphaning prod
     /// PII undetectably): it is pinned to a stable XDG state dir,
     /// `$PGB_CLONE_LEDGER_DIR` (deployment override) or
-    /// `$XDG_STATE_HOME/pg_bumpers/clone-ledger`, falling back to
-    /// `$HOME/.local/state/pg_bumpers/clone-ledger`. Co-locating the ledger with
+    /// `$XDG_STATE_HOME/pg_brakes/clone-ledger`, falling back to
+    /// `$HOME/.local/state/pg_brakes/clone-ledger`. Co-locating the ledger with
     /// the durable clone storage is the documented production posture.
     pub fn canonical() -> Result<Self, CloneError> {
         Self::open(Self::canonical_dir())
@@ -242,7 +242,7 @@ impl CloneLedger {
             // host); the tempdir is documented as non-durable but is better than
             // panicking, and the filesystem sweep is the backstop.
             .unwrap_or_else(std::env::temp_dir);
-        state_base.join("pg_bumpers").join("clone-ledger")
+        state_base.join("pg_brakes").join("clone-ledger")
     }
 
     /// The ledger directory.
@@ -989,7 +989,7 @@ mod tests {
         let xdg = std::path::Path::new("/var/lib/pgb-state");
         assert_eq!(
             CloneLedger::canonical_dir_from(None, Some(xdg.as_os_str().to_owned()), None),
-            xdg.join("pg_bumpers").join("clone-ledger")
+            xdg.join("pg_brakes").join("clone-ledger")
         );
         // … else it falls back under $HOME/.local/state, …
         let home = std::path::Path::new("/home/pgb");
@@ -997,7 +997,7 @@ mod tests {
             CloneLedger::canonical_dir_from(None, None, Some(home.as_os_str().to_owned())),
             home.join(".local")
                 .join("state")
-                .join("pg_bumpers")
+                .join("pg_brakes")
                 .join("clone-ledger")
         );
         // … and a non-absolute $XDG_STATE_HOME is rejected (HOME wins instead).
@@ -1009,7 +1009,7 @@ mod tests {
             ),
             home.join(".local")
                 .join("state")
-                .join("pg_bumpers")
+                .join("pg_brakes")
                 .join("clone-ledger")
         );
     }

@@ -230,7 +230,7 @@ impl CloneProvider for LocalCloneProvider {
         //     Written to postgresql.auto.conf so it overrides the inherited conf.
         let auto_conf = datadir.join("postgresql.auto.conf");
         let conf = format!(
-            "\n# pg_bumpers local clone — isolated rehearsal target (SPEC §12)\n\
+            "\n# pg_brakes local clone — isolated rehearsal target (SPEC §12)\n\
              port = {port}\n\
              listen_addresses = '127.0.0.1'\n\
              unix_socket_directories = '{sock}'\n\

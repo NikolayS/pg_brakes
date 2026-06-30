@@ -1,4 +1,4 @@
-//! pg_bumpers proxy binary — the inline, agent-only enforcement endpoint
+//! pg_brakes proxy binary — the inline, agent-only enforcement endpoint
 //! (SPEC §3 layer 2, §7 S1).
 //!
 //! Reads its wiring from the environment (so it stays 12-factor and secret-store

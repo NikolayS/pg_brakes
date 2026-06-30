@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# pg_bumpers — local-stack.sh PATH/PID guard tests (issue #16).
+# pg_brakes — local-stack.sh PATH/PID guard tests (issue #16).
 # =====================================================================================
 # Pure path/PID-logic unit tests for the defense-in-depth hardenings flagged in the
 # PR #14 review. NO real PostgreSQL is required (and none is started); NOTHING real is
-# ever killed. The test sources local-stack.sh with PG_BUMPERS_LOCALSTACK_TEST=1 so the
+# ever killed. The test sources local-stack.sh with PG_BRAKES_LOCALSTACK_TEST=1 so the
 # script defines its functions but does NOT run `main`, then drives the real
 # `canonicalize_path`, `validate_root`, and `pid_is_ours` functions DIRECTLY with
 # controlled inputs (all confined to a private `mktemp` scratch tree + one tracked
@@ -18,7 +18,7 @@
 #     tail re-attaches under its nearest existing ancestor (incl. the ancestor == '/'
 #     case). This is the most intricate new code, so it gets dedicated unit coverage.
 #
-#   GUARD 1 — validate_root rejects a hostile PG_BUMPERS_LOCALSTACK_DIR that escapes the
+#   GUARD 1 — validate_root rejects a hostile PG_BRAKES_LOCALSTACK_DIR that escapes the
 #     repo — both via a `..` segment AND via a SYMLINK whose canonical target is outside
 #     confinement (the symlink case is what `pwd -P` defends; a string-normalize would
 #     wrongly accept it). It ACCEPTS the safe default + a legitimate *localstack* dir.
@@ -77,7 +77,7 @@ mkdir -p "$FAKE_REPO/.localstack"
 run_canon() {
   local in="$1" out rc=0
   out="$(
-    export PG_BUMPERS_LOCALSTACK_TEST=1
+    export PG_BRAKES_LOCALSTACK_TEST=1
     # shellcheck source=/dev/null
     source "$STACK"
     canonicalize_path "$in"
@@ -92,8 +92,8 @@ run_canon() {
 run_validate_root() {
   local root="$1" repo="$2" rc=0
   (
-    export PG_BUMPERS_LOCALSTACK_TEST=1
-    export PG_BUMPERS_LOCALSTACK_DIR="$root"
+    export PG_BRAKES_LOCALSTACK_TEST=1
+    export PG_BRAKES_LOCALSTACK_DIR="$root"
     # We can't change BASH_SOURCE, so override REPO_ROOT/ROOT after sourcing. These are
     # consumed by the sourced validate_root (cross-source data flow shellcheck can't see).
     # shellcheck source=/dev/null
@@ -111,7 +111,7 @@ run_validate_root() {
 run_pid_is_ours() {
   local pid="$1" primary="$2" replica="$3" meta="$4" root="$5"
   (
-    export PG_BUMPERS_LOCALSTACK_TEST=1
+    export PG_BRAKES_LOCALSTACK_TEST=1
     # shellcheck source=/dev/null
     source "$STACK"
     # These override the script's globals and are read by the sourced pid_is_ours

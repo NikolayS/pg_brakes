@@ -1,8 +1,8 @@
-//! pg_bumpers MCP server — the agent-facing Model Context Protocol surface
+//! pg_brakes MCP server — the agent-facing Model Context Protocol surface
 //! (EPIC #83; SPEC §3 layer 3, §4).
 //!
 //! This crate speaks the **real Model Context Protocol over stdio** via the
-//! official Rust SDK [`rmcp`], so `claude mcp add pg-bumpers -- pgb-mcp`
+//! official Rust SDK [`rmcp`], so `claude mcp add pg-brakes -- pgb-mcp`
 //! connects a real Claude Code to the §4 nine-tool catalog. It is the Rust
 //! replacement for the original non-Rust MCP server (the consolidation onto Rust).
 //!
@@ -57,4 +57,4 @@ pub use proxy::{
     DEFAULT_APP_NAME, PlanJson, ProxyConfig, ProxyTransport, ReadOutcome, RowJson, SchemaColumn,
     TlsMode,
 };
-pub use server::{PgBumpersMcp, SERVER_NAME};
+pub use server::{PgBrakesMcp, SERVER_NAME};

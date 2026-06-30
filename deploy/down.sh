@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# pg_bumpers — deploy/down.sh: clean teardown of the deploy/up.sh stack.
+# pg_brakes — deploy/down.sh: clean teardown of the deploy/up.sh stack.
 #
 # Stops the three daemons by tracked PID (pgb-warden, pgb-applyd, pgb-proxy),
 # tears down the throwaway Postgres via deploy/local-stack.sh down, removes the temp
@@ -12,16 +12,16 @@ IFS=$'\n\t'
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-# PG bin dir. Precedence (unified — issues #44, #102): PG_BUMPERS_PG_BIN → PGBIN
+# PG bin dir. Precedence (unified — issues #44, #102): PG_BRAKES_PG_BIN → PGBIN
 # (legacy) → the version-neutral Homebrew keg path (macOS dev fallback).
 # Version-agnostic across the supported PG 14-18 range.
-PGBIN="${PG_BUMPERS_PG_BIN:-${PGBIN:-/opt/homebrew/opt/postgresql/bin}}"
+PGBIN="${PG_BRAKES_PG_BIN:-${PGBIN:-/opt/homebrew/opt/postgresql/bin}}"
 
-PRIMARY_PORT="${PG_BUMPERS_PRIMARY_PORT:-54321}"
-META_PORT="${PG_BUMPERS_META_PORT:-54323}"
-REPLICA_PORT="${PG_BUMPERS_REPLICA_PORT:-54322}"
+PRIMARY_PORT="${PG_BRAKES_PRIMARY_PORT:-54321}"
+META_PORT="${PG_BRAKES_META_PORT:-54323}"
+REPLICA_PORT="${PG_BRAKES_REPLICA_PORT:-54322}"
 PROXY_PORT="${PGB_UP_PROXY_PORT:-6432}"
-STATE_DIR="${PGB_UP_STATE_DIR:-${TMPDIR:-/tmp}/pg_bumpers-up}"
+STATE_DIR="${PGB_UP_STATE_DIR:-${TMPDIR:-/tmp}/pg_brakes-up}"
 
 log()  { printf '[down.sh] %s\n' "$*" >&2; }
 die()  { printf '[down.sh] ERROR: %s\n' "$*" >&2; exit 1; }

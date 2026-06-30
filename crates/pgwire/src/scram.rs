@@ -6,7 +6,7 @@
 //! `i32`; the frontend replies in `PasswordMessage`-shaped 'p' frames
 //! (`SASLInitialResponse` / `SASLResponse`).
 //!
-//! pg_bumpers terminates the agent connection and re-authenticates to the
+//! pg_brakes terminates the agent connection and re-authenticates to the
 //! backend, so it must be able to **parse and reconstruct** these payloads
 //! byte-for-byte. This module models just the SASL-specific bodies; the
 //! enveloping is done in [`crate::backend`] / [`crate::frontend`].

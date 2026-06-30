@@ -14,7 +14,7 @@
 //! The pure-logic scenarios (classifier, certify, guarded-apply via the scripted
 //! `ApplyConn`, byte cutoff) run here in the **fast cargo job**. The DB-backed
 //! scenarios (WALL role denial, proxy end-to-end against real PG18) are in
-//! `gate_it.rs`, env-gated `PG_BUMPERS_IT=1`.
+//! `gate_it.rs`, env-gated `PG_BRAKES_IT=1`.
 //!
 //! To (intentionally) re-bless the golden after a deliberate corpus change, run
 //! with `DBSAFE_BENCH_BLESS=1` — it rewrites the golden file from the live corpus

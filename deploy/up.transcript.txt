@@ -1,7 +1,7 @@
 ================================================================================
- pg_bumpers — deploy/up.sh RUNNABLE-STACK e2e transcript
+ pg_brakes — deploy/up.sh RUNNABLE-STACK e2e transcript
  server: Rust pgb-mcp (crates/mcp) — the single deployable MCP server (EPIC #83)
- (crates/mcp/tests/{write_path_e2e,read_path_e2e}.rs, PG_BUMPERS_IT=1)
+ (crates/mcp/tests/{write_path_e2e,read_path_e2e}.rs, PG_BRAKES_IT=1)
  The MCP read path genuinely traverses pgb-proxy (extended-protocol-only,
  WALL-enforced); writes go through pgb-applyd's grant-gated floor; get_audit reads
  the `_meta` chain via the SELECT-only pgb_audit_reader role; one anchored _meta
@@ -10,7 +10,7 @@
  pg: initdb (PostgreSQL) 18.4 (Homebrew)
 ================================================================================
 
-a REAL MCP client drives the SHIPPED PgBumpersMcp handler over the SAME duplex
+a REAL MCP client drives the SHIPPED PgBrakesMcp handler over the SAME duplex
 transport the stdio `pgb-mcp` binary uses (initialize → tools/list → tools/call).
 the read path runs THROUGH a live pgb-proxy (TLS + SCRAM) in front of a throwaway
 PG18; the write path runs THROUGH a real pgb-applyd Unix-socket child.

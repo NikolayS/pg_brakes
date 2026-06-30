@@ -1,4 +1,4 @@
-//! Tamper-evident audit for pg_bumpers (SPEC §3, §4, §5, §10.9; issue #21).
+//! Tamper-evident audit for pg_brakes (SPEC §3, §4, §5, §10.9; issue #21).
 //!
 //! Append-only, **hash-chained** records record *every* statement the proxy
 //! sees — including the ones it blocks or rejects — so the audit log is the

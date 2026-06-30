@@ -1,23 +1,23 @@
 //! Env-gated **real PG18** end-to-end test for the EPIC #83 PR2 READ PATH: a REAL
-//! MCP client drives `PgBumpersMcp` whose read tools execute THROUGH a live
+//! MCP client drives `PgBrakesMcp` whose read tools execute THROUGH a live
 //! `pgb-proxy` (TLS + SCRAM) in front of PG18 — NOT raw PG. This is the honesty
 //! bar the founder set: reads must genuinely traverse the proxy (the real
 //! boundary), proven two ways (the WALL denies a non-granted table that a raw
 //! superuser path would return; the proxy stamps `application_name='pgb_proxy'` on
 //! the backend session it originates).
 //!
-//! Runs only when `PG_BUMPERS_IT=1`, so CI's fast `cargo test` skips it (the crate
+//! Runs only when `PG_BRAKES_IT=1`, so CI's fast `cargo test` skips it (the crate
 //! still builds/links). ⚠️ NEVER touches :5432 — it targets the local-stack
 //! primary on a dedicated high port (default 54321).
 //!
 //! ```sh
 //! deploy/local-stack.sh up
-//! PG_BUMPERS_IT=1 cargo test -p pgb-mcp --test read_path_e2e -- --nocapture
+//! PG_BRAKES_IT=1 cargo test -p pgb-mcp --test read_path_e2e -- --nocapture
 //! deploy/local-stack.sh down
 //! ```
 //!
 //! What it proves end-to-end against a live server, driving the SHIPPED
-//! `PgBumpersMcp` handler over the SAME duplex transport the stdio binary uses:
+//! `PgBrakesMcp` handler over the SAME duplex transport the stdio binary uses:
 //!   * `query` a GRANTED table → rows, bounded, genuinely through the proxy;
 //!   * `query` a NON-granted table → `WALL_DENIED` (the proxy's WALL role denies
 //!     it; a raw-PG18 superuser would have returned the row — the load-bearing
@@ -33,7 +33,7 @@
 use std::sync::{Arc, Mutex};
 
 use pgb_core::{Clock, SystemClock};
-use pgb_mcp::{AuditConfig, AuditReader, PgBumpersMcp, ProxyConfig, ProxyTransport, TlsMode};
+use pgb_mcp::{AuditConfig, AuditReader, PgBrakesMcp, ProxyConfig, ProxyTransport, TlsMode};
 use pgb_policy::{RoleBudget, WindowBudget};
 use pgb_proxy::config::{BackendTarget, ProxyConfig as ProxyServerConfig, TlsConfig};
 use pgb_proxy::{Recorder, ThreadedSink, serve_connection};
@@ -46,13 +46,13 @@ const AGENT_PASSWORD: &str = "pgb_agent_dev_pw";
 const AUDIT_WRITER_PASSWORD: &str = "pgb_audit_writer_dev_pw";
 
 fn it_enabled() -> bool {
-    std::env::var("PG_BUMPERS_IT")
+    std::env::var("PG_BRAKES_IT")
         .map(|v| v == "1")
         .unwrap_or(false)
 }
 
 fn admin_dsn() -> String {
-    std::env::var("PG_BUMPERS_PROXY_PGURL")
+    std::env::var("PG_BRAKES_PROXY_PGURL")
         .unwrap_or_else(|_| "host=127.0.0.1 port=54321 user=postgres dbname=postgres".to_string())
 }
 
@@ -257,9 +257,9 @@ async fn spawn_proxy() -> (std::net::SocketAddr, Vec<u8>, TempPaths) {
     (addr, cert_der, paths)
 }
 
-/// Build the SHIPPED `PgBumpersMcp` handler pointed at the in-process proxy
+/// Build the SHIPPED `PgBrakesMcp` handler pointed at the in-process proxy
 /// (TLS-on, verifying the self-signed cert) + the `_meta` audit reader.
-fn build_server(addr: std::net::SocketAddr, cert_der: &[u8]) -> PgBumpersMcp {
+fn build_server(addr: std::net::SocketAddr, cert_der: &[u8]) -> PgBrakesMcp {
     let proxy = ProxyTransport::new(ProxyConfig {
         host: "localhost".into(),
         port: addr.port(),
@@ -273,7 +273,7 @@ fn build_server(addr: std::net::SocketAddr, cert_der: &[u8]) -> PgBumpersMcp {
         statement_timeout_ms: 30_000,
     });
     let audit = AuditReader::new(AuditConfig { dsn: meta_dsn() });
-    PgBumpersMcp::new(AGENT_USER, "mcp-e2e-session")
+    PgBrakesMcp::new(AGENT_USER, "mcp-e2e-session")
         .with_proxy(proxy)
         .with_audit(audit)
 }
@@ -281,7 +281,7 @@ fn build_server(addr: std::net::SocketAddr, cert_der: &[u8]) -> PgBumpersMcp {
 /// Connect a REAL rmcp client to the server over an in-process duplex pipe (the
 /// same AsyncRead/AsyncWrite transport the stdio binary uses).
 async fn connect_client(
-    server: PgBumpersMcp,
+    server: PgBrakesMcp,
 ) -> rmcp::service::RunningService<rmcp::service::RoleClient, ()> {
     let (client_io, server_io) = tokio::io::duplex(64 * 1024);
     let (s_read, s_write) = tokio::io::split(server_io);
@@ -314,7 +314,7 @@ async fn call_sql(
 async fn mcp_reads_traverse_the_live_proxy_and_the_explain_hole_stays_closed() {
     if !it_enabled() {
         eprintln!(
-            "[skip] set PG_BUMPERS_IT=1 (+ deploy/local-stack.sh up) for the MCP read-path e2e"
+            "[skip] set PG_BRAKES_IT=1 (+ deploy/local-stack.sh up) for the MCP read-path e2e"
         );
         return;
     }
@@ -572,7 +572,7 @@ fn terminate_agent_backends() -> u64 {
 async fn read_path_absorbs_a_live_connection_loss_and_the_next_read_redials() {
     if !it_enabled() {
         eprintln!(
-            "[skip] set PG_BUMPERS_IT=1 (+ deploy/local-stack.sh up) for the read-path live-loss e2e"
+            "[skip] set PG_BRAKES_IT=1 (+ deploy/local-stack.sh up) for the read-path live-loss e2e"
         );
         return;
     }

@@ -164,7 +164,7 @@ pub struct DsnTarget {
     /// **password is not here** — it resolves from the conventional env var.
     pub role: String,
     /// Optional **forward-compatibility placeholder** for a secret-store reference
-    /// (e.g. `kms://pg-bumpers/primary-pw/v1`). **This version does NOT resolve it**:
+    /// (e.g. `kms://pg-brakes/primary-pw/v1`). **This version does NOT resolve it**:
     /// no daemon reads `secret_ref` — the password always comes from the conventional
     /// env var (`PGB_BACKEND_PASSWORD` / `PGB_META_PASSWORD` / `PGB_DOCTOR_PASSWORD`).
     /// It is parsed + kept credential-less so a future release can wire a resolver
@@ -862,7 +862,7 @@ primary:
   port: 5432
   database: app
   role: pgb_agent
-  secret_ref: "kms://pg-bumpers/primary-pw/v1"
+  secret_ref: "kms://pg-brakes/primary-pw/v1"
 replica:
   target:
     host: replica.internal
@@ -875,7 +875,7 @@ audit:
     port: 5432
     database: app_meta
     role: pgb_audit_writer
-    secret_ref: "kms://pg-bumpers/meta-pw/v1"
+    secret_ref: "kms://pg-brakes/meta-pw/v1"
   anchor_endpoint: "https://audit-anchor.internal/v1/append"
 "#;
         let cfg = PolicyConfig::load_from_yaml(yaml).expect("BYO targets must parse");
@@ -888,7 +888,7 @@ audit:
         assert_eq!(primary.role, "pgb_agent");
         assert_eq!(
             primary.secret_ref.as_deref(),
-            Some("kms://pg-bumpers/primary-pw/v1")
+            Some("kms://pg-brakes/primary-pw/v1")
         );
         // The credential-less DSN carries NO password keyword.
         let dsn = primary.to_credential_less_dsn();
@@ -1070,7 +1070,7 @@ audit:
         }
         // With an ordinary secret_ref (a URI with `:` and `/`, no banned chars).
         let mut t = target("db.internal", 5432, "app", "pgb_agent");
-        t.secret_ref = Some("kms://pg-bumpers/primary-pw/v1".to_string());
+        t.secret_ref = Some("kms://pg-brakes/primary-pw/v1".to_string());
         t.validate("primary")
             .expect("ordinary secret_ref must pass");
     }

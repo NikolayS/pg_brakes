@@ -1,6 +1,6 @@
 [package]
 name = "pgb-applyd"
-description = "pg_bumpers write-path daemon: Unix-socket JSON-RPC service owning the propose→dry_run→approve→apply lifecycle over the merged grant-gated apply floor."
+description = "pg_brakes write-path daemon: Unix-socket JSON-RPC service owning the propose→dry_run→approve→apply lifecycle over the merged grant-gated apply floor."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -52,7 +52,7 @@ postgres = "0.19"
 hex = "0.4"
 
 [dev-dependencies]
-# DB setup/teardown for the env-gated (PG_BUMPERS_IT=1) IT, plus the in-memory
+# DB setup/teardown for the env-gated (PG_BRAKES_IT=1) IT, plus the in-memory
 # nonce store + signing key the IT mints to drive the operator-approve path.
 rand_core = { version = "0.6", features = ["getrandom"] }
 ed25519-dalek = { version = "2", features = ["rand_core"] }
