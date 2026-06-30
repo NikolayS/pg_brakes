@@ -1,5 +1,12 @@
 -- pg_bumpers — Layer 1 WALL: the hardened native agent role (idempotent).
 -- =====================================================================================
+-- ⚠️  DANGER — DO NOT run this as-is on an EXISTING production database.
+-- It REVOKEs privileges FROM PUBLIC (function EXECUTE, CREATE/TEMP on schema public, lo_*),
+-- which mutates EVERY role's privileges, not just pgb_agent. On a live application database
+-- this can break anything relying on the implicit PUBLIC grant. Safe on a greenfield/throwaway
+-- DB only. For an existing DB: rehearse on a clone + smoke-test first, or apply only the
+-- agent-role-specific REVOKEs and skip the "… FROM PUBLIC" statements. See KNOWN_DANGERS.md (D1).
+-- =====================================================================================
 -- Source of truth: docs/spec/SPEC.md (v0.8) §3 (layer 1 WALL), §4 ("Network/roles — do
 -- FIRST"), §5 (role-hardening matrix). decisions.md: "Native roles = the security wall,
 -- hardened … 'not superuser' is insufficient." Issue #5.
