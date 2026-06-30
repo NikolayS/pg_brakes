@@ -205,6 +205,15 @@ ALTER ROLE pgb_audit_reader LOGIN PASSWORD '$AUDIT_READER_PASSWORD';
 ALTER ROLE pgb_applier LOGIN PASSWORD '$APPLIER_PASSWORD';
 SQL
 
+# FIXTURE ONLY (issue #108): the demo DB is a THROWAWAY/dedicated DB, so apply the opt-in
+# strict PUBLIC lockdown (deploy/sql/21_public_lockdown.sql — the `… FROM PUBLIC` revokes) to
+# it as well, so the demo's DB-level posture matches a dedicated deployment. A real BYO user
+# applies ONLY the agent-only 10_hardened_role.sql and opts into the lockdown ONLY for a
+# dedicated DB after a clone rehearsal (KNOWN_DANGERS.md D1). Idempotent; dedicated-DB safe.
+log "applying OPT-IN strict PUBLIC lockdown to demo DB '$DEMO_DB' (deploy/sql/21_public_lockdown.sql — fixture only)…"
+"$PGBIN/psql" -X -h "$HOST" -p "$PRIMARY_PORT" -U postgres -d "$DEMO_DB" -v ON_ERROR_STOP=1 -q \
+  -f "$SCRIPT_DIR/sql/21_public_lockdown.sql" >/dev/null
+
 # The audit-WRITER DSN — used ONLY by the proxy/applyd/warden daemons (the path that
 # legitimately appends the chain). It carries the INSERT-capable credential and MUST
 # NEVER be forwarded into the agent-facing pgb-mcp process.
