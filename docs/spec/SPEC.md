@@ -1,8 +1,8 @@
 <!-- SamoSpec-format spec (emulated). Tool: https://github.com/NikolayS/samospec -->
-# pg_bumpers — SPEC
+# pg_brakes — SPEC
 
 ## 9. Version header
-- **Project:** `pg_bumpers` (working title; brand TBD — see name-brainstorm memo)
+- **Project:** `pg_brakes` (working title; brand TBD — see name-brainstorm memo)
 - **Spec version:** v0.8.1 (BUILD-FROZEN MVP + founder build-corrections: BYO Postgres FUX, PG 14–18,
   Rust-only/no-Node — §0.5; converged across 4 review rounds)
 - **Date:** 2026-06-20
@@ -49,7 +49,7 @@ both as cheap "nine lives." Sequences, trigger side-effects, and NOTIFY are NOT 
 multi-statement interactive txns, masking beyond RLS, polished web console.
 
 ## 0.5 Supported environment & first-user experience (BYO Postgres)
-- **The user brings their own production Postgres.** The first-run path is "**point pg_bumpers at your
+- **The user brings their own production Postgres.** The first-run path is "**point pg_brakes at your
   existing database**" (DSNs in `policy.yaml`: target primary, optional read replica, audit/`_meta`
   location). We **never require** the user to spin up a database. Quickstart/README leads with BYO.
 - **The docker-compose demo cluster is CI/dev/test ONLY** (a deterministic fixture for our own tests and
@@ -89,7 +89,7 @@ multi-statement interactive txns, masking beyond RLS, polished web console.
    so legitimate work proceeds safely and exceptions are controlled. *Accept (MVP):* CLI approval emitting
    a signed, single-use, proposal-bound grant + one generic webhook; fully audited. *Fast-follow:*
    approval UI, dual-control, tiered approvers (§14).
-9. **Operate day-2 (operator/installer):** As the operator, I want to run pg_bumpers safely over time —
+9. **Operate day-2 (operator/installer):** As the operator, I want to run pg_brakes safely over time —
    key rotation, clone-reaper/orphan alarms, breaker recovery, degraded-mode transitions, and set the
    `policy.yaml` (roles, budgets, autonomy L0–L2) — so it stays healthy and correctly configured.
    *Accept:* `policy.yaml`; reaper + breaker + anchor runbooks; graceful-degradation transitions visible.
@@ -493,7 +493,7 @@ radius record) — both one-way doors MVP code touches (§15.3).
   **Baseline = T0–T2** (works with ANY libpq client / agent framework). **T3–T4 are enrichment, never
   required.**
 
-**11.3 Strategic consequence:** wire-level understanding ⇒ **universal coverage** — pg_bumpers protects
+**11.3 Strategic consequence:** wire-level understanding ⇒ **universal coverage** — pg_brakes protects
 *any* Postgres-speaking agent, not only those that adopt our MCP. A bigger wedge than cooperation-only
 competitors. (Candidate headline.)
 
@@ -547,8 +547,8 @@ relevant thread excerpt — enabling true **intent-vs-action** analysis (e.g. us
 duplicate" but the SQL deletes all orders → mismatch → block/escalate).
 - **Plumbing (opt-in, increasing integration):** (a) **MCP `context` field** — agent attaches the
   originating prompt/task/reasoning to `propose_write`/`query`; (b) **correlation-id + out-of-band
-  store** — the app pushes its thread to a pg_bumpers context endpoint keyed by a `trace_id` carried at
-  the wire (SQL comment / `SET pg_bumpers.trace_id=…`); engine fetches at eval time (keeps the wire
+  store** — the app pushes its thread to a pg_brakes context endpoint keyed by a `trace_id` carried at
+  the wire (SQL comment / `SET pg_brakes.trace_id=…`); engine fetches at eval time (keeps the wire
   thin); (c) **SDK / MCP-middleware / platform connectors** (Cursor, Claude Code, LangChain…) capturing
   the thread automatically.
 - **Trust model (critical — origin context is attacker-controllable):** a malicious/injected agent can
@@ -568,7 +568,7 @@ duplicate" but the SQL deletes all orders → mismatch → block/escalate).
 
 ## 12. Graceful degradation / optional components (v0.5 direction)
 
-pg_bumpers works against a **bare primary** (no replica, no DBLab) and each added component upgrades
+pg_brakes works against a **bare primary** (no replica, no DBLab) and each added component upgrades
 capability — keeping install friction low and making the moat an *upgrade*, not a gate.
 
 | Component | Absent (baseline) | Present (upgrade) |
@@ -720,7 +720,7 @@ it **never** degrades to single-approver bypass.
   since approval.
 - **Everything in the tamper-evident audit:** request, approver identity, decision, grant, scope, expiry,
   break-glass flag.
-- **MVP mechanism (round-3 scope cut):** **CLI approval** (`pg_bumpers approve <id>`, human-held signing
+- **MVP mechanism (round-3 scope cut):** **CLI approval** (`pg_brakes approve <id>`, human-held signing
   key) emitting the signed proposal-bound grant **+ one generic webhook POST** of the request payload
   (customers wire Slack/etc themselves). **Defer** to fast-follow: approval UI (`mcp/approval-ui`),
   dual-control, tiered approver sets, native connectors. Keeps the TOCTOU-safe grant (the load-bearing

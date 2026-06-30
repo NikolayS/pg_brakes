@@ -1,4 +1,4 @@
-# pg_bumpers — Decisions (SamoSpec)
+# pg_brakes — Decisions (SamoSpec)
 
 Accepted / rejected / deferred decisions with rationale. Paired with SPEC.md **v0.7** — **CONVERGED**
 across 4 review rounds (security/ops · QA/testability · buildability; round-3 BLOCKING resolved, round-4
@@ -27,7 +27,7 @@ MINORs closed). MVP build-ready pending founder review + 1 DECISION (LLM posture
   BUILD-FROZEN for MVP.
 
 ## ACCEPTED
-- **Working name = `pg_bumpers`** (title only; brand TBD — name-brainstorm memo). Decided by Nik.
+- **Working name = `pg_brakes`** (title only; brand TBD — name-brainstorm memo). Decided by Nik.
 - **Scope = MVP** (Nik's calls): write-safety thin-clone moat IN · own Apache Rust proxy IN ·
   **focused frozen benchmark first** (full ~120-scenario set + public multi-competitor leaderboard
   DEFERRED post-MVP).
@@ -131,7 +131,7 @@ MINORs closed). MVP build-ready pending founder review + 1 DECISION (LLM posture
   smaller makes sense.)*
 - DDL, multi-statement interactive txns, L2/L3 narrow-full-auto beyond the closed certified action set,
   multi-DB, cloud/multi-tenant, web console — post-MVP.
-- Company brand selection (Pronea/Custra/Felis/… — separate from the `pg_bumpers` working title).
+- Company brand selection (Pronea/Custra/Felis/… — separate from the `pg_brakes` working title).
 
 ## OPEN (resolve during S0)
 - `policy.yaml` schema + the closed certified-action-set format for L2.
