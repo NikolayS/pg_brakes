@@ -57,6 +57,24 @@ fn hardened_role_sql_path() -> PathBuf {
         .join("deploy/sql/10_hardened_role.sql")
 }
 
+/// The OPT-IN strict PUBLIC lockdown `deploy/sql/21_public_lockdown.sql` (#108). The
+/// agent-only default (10_hardened_role.sql) NEVER mutates PUBLIC, so on PG14 — where
+/// PUBLIC still has CREATE on schema public by default — the agent inherits CREATE-on-
+/// public via PUBLIC and a DIRECT-to-DB `CREATE TABLE` is NOT denied at the DB level by
+/// the agent-only file alone. This gate models the DIRECT-to-DB bypass (no proxy), i.e.
+/// the full DB-level WALL of the DETERMINISTIC FLOOR; on a DEDICATED throwaway test DB
+/// that posture is agent-only + this lockdown (the lockdown's `REVOKE CREATE … FROM
+/// PUBLIC` is what denies the direct CREATE on PG14). On a real SHARED BYO DB that CREATE
+/// residual is instead covered by the §3 network boundary + the proxy floor (separately
+/// tested) — see KNOWN_BYPASSES B-lo / SPEC.amendments A-M2. The gate applies BOTH so the
+/// DB-level deny holds on EVERY supported major (PG15+ already lacks the PUBLIC default).
+fn public_lockdown_sql_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("repo root")
+        .join("deploy/sql/21_public_lockdown.sql")
+}
+
 /// The FIXTURE-ONLY demo seed `deploy/sql/20_demo_seed.sql` — the `allowed_read` /
 /// `secret_data` demo tables + their grants. Issue #103 split this OUT of the
 /// canonical hardening, so this gate IT (a fixture) applies it explicitly to get the
@@ -261,11 +279,16 @@ fn direct_to_db_bypass_is_denied_by_the_wall() {
 
     let cluster = Cluster::start();
 
-    // Apply the SHIPPED hardened-role SQL (the WALL), then the FIXTURE-ONLY demo
-    // seed (issue #103 split it out of the hardening): the seed creates the demo
-    // whitelist `public.allowed_read` (granted SELECT) + `public.secret_data` (NOT
-    // granted) — exactly the positive/negative read pair we assert against.
+    // Apply the SHIPPED agent-only hardened-role SQL (the WALL), THEN the opt-in strict
+    // PUBLIC lockdown (issue #108 — needed so the DIRECT-to-DB `CREATE TABLE` bypass is
+    // denied at the DB level on PG14 too, where PUBLIC still grants CREATE-on-public and
+    // the agent-only file alone cannot subtract it; this throwaway is a DEDICATED test DB,
+    // so it runs the full hardened posture — see public_lockdown_sql_path docs). Then the
+    // FIXTURE-ONLY demo seed (issue #103 split it out of the hardening): the seed creates
+    // the demo whitelist `public.allowed_read` (granted SELECT) + `public.secret_data`
+    // (NOT granted) — exactly the positive/negative read pair we assert against.
     cluster.psql_file(DBNAME, &hardened_role_sql_path());
+    cluster.psql_file(DBNAME, &public_lockdown_sql_path());
     cluster.psql_file(DBNAME, &demo_seed_sql_path());
 
     let dsn = cluster.agent_dsn();
