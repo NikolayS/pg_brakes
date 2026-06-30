@@ -78,7 +78,7 @@ jobs:
 
   # ---------------------------------------------------------------------------
   # Coverage with a per-crate FLOOR on the enforcement crates (SPEC §4, §10.6).
-  # Runs the DB-free tests (no PG_BUMPERS_IT); env-gated IT is excluded. The
+  # Runs the DB-free tests (no PG_BRAKES_IT); env-gated IT is excluded. The
   # floor script fails CI if any enforcement crate regresses. RATCHET UP.
   # ---------------------------------------------------------------------------
   coverage:

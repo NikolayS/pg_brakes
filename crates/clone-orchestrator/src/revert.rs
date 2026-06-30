@@ -21,7 +21,7 @@
 //! The engine is DB-free: it owns the **FK ordering + the per-row routing**
 //! decisions (which relation each captured row belongs to); the connection owns
 //! the SQL. Production grows a tokio-backed [`RevertConn`]; the env-gated
-//! integration tests (`revert_it.rs`, `PG_BUMPERS_IT=1`) implement it against real
+//! integration tests (`revert_it.rs`, `PG_BRAKES_IT=1`) implement it against real
 //! PostgreSQL 18; the unit tests here implement an in-memory one that records the
 //! exact (relation, op, row) sequence so the FK ordering is asserted directly.
 //!

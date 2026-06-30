@@ -1,4 +1,4 @@
-//! pg_bumpers CLI binary (`pgb-cli`) — the MVP approval surface (SPEC §14).
+//! pg_brakes CLI binary (`pgb-cli`) — the MVP approval surface (SPEC §14).
 //!
 //! Subcommands:
 //! - `pgb-cli approve <request-id>` — a human approver signs the §14.3
@@ -90,7 +90,7 @@ fn main() -> ExitCode {
         },
         _ => {
             println!(
-                "pgb-cli — pg_bumpers approval CLI (SPEC §14 MVP).\n\
+                "pgb-cli — pg_brakes approval CLI (SPEC §14 MVP).\n\
                  usage:\n  \
                  pgb-cli approve <request-id>   sign a proposal-bound grant (human approver)\n  \
                  pgb-cli demo                   run request -> approve -> verify-at-apply\n  \

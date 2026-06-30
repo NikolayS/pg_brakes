@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# pg_bumpers — integration smoke harness for the S0 dev substrate.
+# pg_brakes — integration smoke harness for the S0 dev substrate.
 #
-# Env-gated: only runs its assertions when PG_BUMPERS_IT=1, so plain test runs
+# Env-gated: only runs its assertions when PG_BRAKES_IT=1, so plain test runs
 # (and the cargo CI job) stay fast and don't depend on a live database. This is
 # the documented integration-test gate convention for the whole project.
 #
@@ -13,7 +13,7 @@
 #   5. round-trip                  (row written on primary visible on replica
 #                                   within a bounded wait)
 #
-# Exit non-zero on ANY failure. With PG_BUMPERS_IT unset/!=1 it SKIPS (exit 0).
+# Exit non-zero on ANY failure. With PG_BRAKES_IT unset/!=1 it SKIPS (exit 0).
 #
 # SPEC refs: §7 (S0 substrate), §12 (replica OPTIONAL; streaming when present),
 # §4 (_meta audit DB). See docs/spec/SPEC.amendments.md "S0 integration substrate".
@@ -21,14 +21,14 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-# PG bin dir. Precedence (unified — issues #44, #102): PG_BUMPERS_PG_BIN → PGBIN
+# PG bin dir. Precedence (unified — issues #44, #102): PG_BRAKES_PG_BIN → PGBIN
 # (legacy) → the version-neutral Homebrew keg path (macOS dev fallback).
 # Version-agnostic across the supported PG 14-18 range.
-PGBIN="${PG_BUMPERS_PG_BIN:-${PGBIN:-/opt/homebrew/opt/postgresql/bin}}"
+PGBIN="${PG_BRAKES_PG_BIN:-${PGBIN:-/opt/homebrew/opt/postgresql/bin}}"
 LISTEN="localhost"
-PRIMARY_PORT="${PG_BUMPERS_PRIMARY_PORT:-54321}"
-REPLICA_PORT="${PG_BUMPERS_REPLICA_PORT:-54322}"
-META_PORT="${PG_BUMPERS_META_PORT:-54323}"
+PRIMARY_PORT="${PG_BRAKES_PRIMARY_PORT:-54321}"
+REPLICA_PORT="${PG_BRAKES_REPLICA_PORT:-54322}"
+META_PORT="${PG_BRAKES_META_PORT:-54323}"
 
 # Identity sentinel stamped by local-stack.sh up. A bare port probe is satisfied
 # by ANY postmaster on the port (incl. a stale orphan); this proves the cluster
@@ -36,7 +36,7 @@ META_PORT="${PG_BUMPERS_META_PORT:-54323}"
 SENTINEL_DB="pgb_localstack_sentinel"
 
 # Bound for replication visibility (seconds).
-REPL_WAIT_SECS="${PG_BUMPERS_REPL_WAIT_SECS:-15}"
+REPL_WAIT_SECS="${PG_BRAKES_REPL_WAIT_SECS:-15}"
 
 pass()  { printf '  ok   — %s\n' "$*"; }
 fail()  { printf '  FAIL — %s\n' "$*" >&2; FAILED=1; }
@@ -45,8 +45,8 @@ info()  { printf '[smoke] %s\n' "$*"; }
 # --------------------------------------------------------------------------------------
 # Gate
 # --------------------------------------------------------------------------------------
-if [ "${PG_BUMPERS_IT:-0}" != "1" ]; then
-  info "PG_BUMPERS_IT != 1 — skipping integration smoke (set PG_BUMPERS_IT=1 to run)."
+if [ "${PG_BRAKES_IT:-0}" != "1" ]; then
+  info "PG_BRAKES_IT != 1 — skipping integration smoke (set PG_BRAKES_IT=1 to run)."
   exit 0
 fi
 

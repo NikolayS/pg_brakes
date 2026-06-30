@@ -1,4 +1,4 @@
-# KNOWN_BYPASSES — honest, disclosed residual limits of the pg_bumpers MVP
+# KNOWN_BYPASSES — honest, disclosed residual limits of the pg_brakes MVP
 
 > **Status:** S5 (issue #68). **Cadence:** refreshed by the benchmark maintainer
 > quarterly AND on every floor change (SPEC §13.6).
@@ -19,7 +19,7 @@ impossible" or "tamper-proof". This file documents the residual, disclosed limit
    through as `ALLOW`) would go here and **count against** the headline
    "0 catastrophic FN" number (SPEC §13.7/§13.8). **It is EMPTY** for the MVP
    floor: the deterministic floor contains the whole frozen corpus
-   (`PG_BUMPERS_IT=1 cargo test -p dbsafe-bench` → 0 FN, 0 FP). The gate
+   (`PG_BRAKES_IT=1 cargo test -p dbsafe-bench` → 0 FN, 0 FP). The gate
    `dbsafe-bench/tests/gate.rs` asserts it stays empty, so a future non-empty entry
    is a deliberate, reviewed change that visibly dents the headline.
 
@@ -43,7 +43,7 @@ impossible" or "tamper-proof". This file documents the residual, disclosed limit
 - **Repro:** `dbsafe-bench` scenarios `exfil-by-volume-naive` (byte cutoff) and
   `exfil-slow-drip-row-cap` (row cutoff) — both resolve to `BOUND` with
   `bytes_out ≤ B` / `rows_out ≤ row-budget`, asserted by the gate's pass predicate.
-  Run: `PG_BUMPERS_IT=1 cargo test -p dbsafe-bench --locked -- --test-threads=1`.
+  Run: `PG_BRAKES_IT=1 cargo test -p dbsafe-bench --locked -- --test-threads=1`.
 - **SPEC.amendments tie:** the §13.2 bounded-disclosure posture is the read
   guarantee throughout; see "S1 proxy" (byte/row cutoff) and the `dbsafe-bench`
   verdict vocabulary (`BOUND`).
@@ -77,7 +77,7 @@ impossible" or "tamper-proof". This file documents the residual, disclosed limit
     `apply_write` called with no `confirm_rows` is blocked at the shell (absence ≠ "just
     apply") *before* the applyd `apply` RPC (`tool_apply_write`'s `confirm_rows` guard).
   - **`PROPOSAL_NOT_FOUND`** — this is an **applyd-side** code, NOT a shell short-circuit.
-    The MCP `PgBumpersMcp` struct holds **no proposal registry** (only `role` / `session_id`
+    The MCP `PgBrakesMcp` struct holds **no proposal registry** (only `role` / `session_id`
     / `proxy` / `applyd` / `audit` — §4 statelessness), so it *cannot* know whether an id
     exists: `dry_run`/`apply_write` forward the request to applyd, and **applyd** rejects it
     at proposal-lookup (`crates/applyd/src/protocol.rs` `ErrorCode::ProposalNotFound`,

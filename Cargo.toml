@@ -1,4 +1,4 @@
-# pg_bumpers — Cargo workspace root.
+# pg_brakes — Cargo workspace root.
 # See docs/spec/SPEC.md (v0.8) §3 for the repo layout this mirrors.
 [workspace]
 resolver = "2"
@@ -20,7 +20,7 @@ members = [
     "crates/applyd",
     # The agent-facing MCP server (EPIC #83): the §4 nine-tool catalog speaking
     # the REAL Model Context Protocol over stdio via the official `rmcp` SDK, so
-    # `claude mcp add pg-bumpers -- pgb-mcp` connects to a real Claude Code. This
+    # `claude mcp add pg-brakes -- pgb-mcp` connects to a real Claude Code. This
     # is the Rust replacement for the TS `mcp/server` (consolidation EPIC #83). It
     # is COOPERATIVE, NOT a security boundary (SPEC §3): the deterministic floor
     # (proxy + WALL + applyd + warden) is the real boundary. PR1 = skeleton
@@ -29,13 +29,13 @@ members = [
     "crates/mcp",
     # Throwaway S0 fidelity-spike harness (issue #8). publish = false; not
     # production. Kept in the workspace only so it compiles under the fast CI job;
-    # its DB tests are env-gated (PG_BUMPERS_IT=1) and skipped by `cargo test`.
+    # its DB tests are env-gated (PG_BRAKES_IT=1) and skipped by `cargo test`.
     "spikes/fidelity",
     # The deterministic FP/FN floor gate (issue #43; SPEC §3 "Separate:
     # dbsafe-bench", §13.5, §10.6). publish = false; consumes the merged
     # enforcement floor and gates CI on 0 catastrophic FN + 0 FP regression vs a
     # golden file. Its pure-logic gate runs in the fast `cargo test`; DB-backed
-    # scenarios are env-gated (PG_BUMPERS_IT=1).
+    # scenarios are env-gated (PG_BRAKES_IT=1).
     "dbsafe-bench",
     # The ONE shared test-support helper (issue #44): the unified PG18 bin-dir
     # resolver every env-gated IT calls, so the precedence lives + is unit-tested
@@ -49,6 +49,6 @@ members = [
 version = "0.0.0"
 edition = "2024"
 license = "Apache-2.0"
-repository = "https://github.com/NikolayS/pg_bumpers"
-authors = ["pg_bumpers contributors"]
+repository = "https://github.com/NikolayS/pg_brakes"
+authors = ["pg_brakes contributors"]
 rust-version = "1.90"

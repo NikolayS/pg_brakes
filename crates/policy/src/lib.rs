@@ -1,4 +1,4 @@
-//! Policy model + contracts seam for pg_bumpers (S0, issue #7).
+//! Policy model + contracts seam for pg_brakes (S0, issue #7).
 //!
 //! This crate pins the **one-way-door** contracts (SPEC §15.3) the rest of the
 //! system builds on, even though the engines behind them are fast-follow:

@@ -50,7 +50,7 @@ fn startup_message_round_trips() {
         parameters: vec![
             ("user".into(), "agent".into()),
             ("database".into(), "appdb".into()),
-            ("application_name".into(), "pg_bumpers".into()),
+            ("application_name".into(), "pg_brakes".into()),
         ],
     };
     let frame = msg.encode();

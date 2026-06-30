@@ -39,7 +39,7 @@
 //!
 //! The orchestration (parse → refuse → measure → assemble → rollback) is
 //! DB-free and unit-tested against a mock [`Rehearsal`]; the real PG18 backend
-//! lives in the integration tests behind `PG_BUMPERS_IT=1`.
+//! lives in the integration tests behind `PG_BRAKES_IT=1`.
 
 use std::collections::BTreeMap;
 

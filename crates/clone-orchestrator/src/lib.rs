@@ -1,4 +1,4 @@
-//! Clone-orchestrator for pg_bumpers — the **dry-run blast-radius engine**
+//! Clone-orchestrator for pg_brakes — the **dry-run blast-radius engine**
 //! (SPEC §4, §10.1, §12).
 //!
 //! Rehearses a proposed write (on a DBLab clone if present, else in a

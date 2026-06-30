@@ -1,11 +1,11 @@
 //! `pgb-mcp` — the deployable stdio MCP server entrypoint (EPIC #83).
 //!
 //! The single binary that makes the §4 nine-tool catalog a REAL, connectable
-//! Model Context Protocol server. It serves the [`PgBumpersMcp`] handler over
+//! Model Context Protocol server. It serves the [`PgBrakesMcp`] handler over
 //! stdin/stdout via the official `rmcp` SDK, so:
 //!
 //! ```sh
-//! claude mcp add pg-bumpers -- pgb-mcp
+//! claude mcp add pg-brakes -- pgb-mcp
 //! ```
 //!
 //! connects a real Claude Code to it. The handshake (`initialize`) +
@@ -62,8 +62,8 @@
 use std::process::ExitCode;
 
 use pgb_mcp::{
-    ApplydClient, ApplydConfig, AuditConfig, AuditReader, PgBumpersMcp, ProxyConfig,
-    ProxyTransport, TlsMode,
+    ApplydClient, ApplydConfig, AuditConfig, AuditReader, PgBrakesMcp, ProxyConfig, ProxyTransport,
+    TlsMode,
 };
 use pgb_policy::PolicyConfig;
 use rmcp::{ServiceExt, transport::stdio};
@@ -180,9 +180,9 @@ fn build_tls() -> Result<TlsMode, String> {
     Ok(TlsMode::Rustls { roots_der })
 }
 
-/// Build the `PgBumpersMcp` server from the environment: the session identity, the
+/// Build the `PgBrakesMcp` server from the environment: the session identity, the
 /// live proxy transport (lazy), and the optional `_meta` audit reader.
-fn build_server() -> Result<PgBumpersMcp, String> {
+fn build_server() -> Result<PgBrakesMcp, String> {
     let role = env_or("PGB_ROLE", "pgb_agent");
     let session_id = env_or("PGB_SESSION_ID", format!("mcp-{}", std::process::id()));
 
@@ -207,7 +207,7 @@ fn build_server() -> Result<PgBumpersMcp, String> {
     };
     let role_for_writes = env_or("PGB_ROLE", "pgb_agent");
     let session_for_writes = env_or("PGB_SESSION_ID", format!("mcp-{}", std::process::id()));
-    let mut server = PgBumpersMcp::new(role, session_id).with_proxy(ProxyTransport::new(proxy_cfg));
+    let mut server = PgBrakesMcp::new(role, session_id).with_proxy(ProxyTransport::new(proxy_cfg));
 
     // The write tools dial the `pgb-applyd` Unix socket. Optional: if unset, the
     // write tools return a recoverable APPLYD_UNAVAILABLE block. The role/session

@@ -1,10 +1,10 @@
 //! Real-Postgres integration tests for `pgb-applyd` (issue #67, S5). Env-gated behind
-//! `PG_BUMPERS_IT=1`; runs against a throwaway Postgres (any supported major, 14-18)
+//! `PG_BRAKES_IT=1`; runs against a throwaway Postgres (any supported major, 14-18)
 //! on a dedicated high port
 //! (⚠️ NEVER 5432). Run:
 //!
 //! ```sh
-//! PG_BUMPERS_IT=1 cargo test -p pgb-applyd --locked -- --test-threads=1
+//! PG_BRAKES_IT=1 cargo test -p pgb-applyd --locked -- --test-threads=1
 //! ```
 //!
 //! Two layers are exercised:
@@ -54,13 +54,13 @@ const SEED_SQL: &str = r#"
 "#;
 
 fn it_enabled() -> bool {
-    std::env::var("PG_BUMPERS_IT")
+    std::env::var("PG_BRAKES_IT")
         .map(|v| v == "1")
         .unwrap_or(false)
 }
 
 fn base_pgurl() -> String {
-    std::env::var("PG_BUMPERS_PGURL")
+    std::env::var("PG_BRAKES_PGURL")
         .unwrap_or_else(|_| "host=127.0.0.1 port=54355 user=postgres dbname=postgres".to_string())
 }
 
@@ -277,7 +277,7 @@ fn approve_through(
 #[test]
 fn lifecycle_apply_commits_bounded_update_and_revert_restores_prestate() {
     if !it_enabled() {
-        eprintln!("[skip] set PG_BUMPERS_IT=1 to run the applyd IT");
+        eprintln!("[skip] set PG_BRAKES_IT=1 to run the applyd IT");
         return;
     }
     let (admin, dbname) = create_seeded_db("commit_revert");
@@ -372,7 +372,7 @@ fn lifecycle_apply_commits_bounded_update_and_revert_restores_prestate() {
 #[test]
 fn guarded_apply_commits_as_constrained_applier_and_applier_cannot_ddl() {
     if !it_enabled() {
-        eprintln!("[skip] set PG_BUMPERS_IT=1 to run the applier-role IT");
+        eprintln!("[skip] set PG_BRAKES_IT=1 to run the applier-role IT");
         return;
     }
     let (admin, dbname) = create_seeded_db("applier_role");
@@ -537,7 +537,7 @@ fn assert_permission_denied(op: &str, err: &postgres::Error) {
 #[test]
 fn apply_without_a_grant_is_approval_required_no_mutation() {
     if !it_enabled() {
-        eprintln!("[skip] set PG_BUMPERS_IT=1 to run the applyd IT");
+        eprintln!("[skip] set PG_BRAKES_IT=1 to run the applyd IT");
         return;
     }
     let (admin, dbname) = create_seeded_db("no_grant");
@@ -586,7 +586,7 @@ fn apply_without_a_grant_is_approval_required_no_mutation() {
 #[test]
 fn destructive_delete_drift_aborts_with_no_mutation() {
     if !it_enabled() {
-        eprintln!("[skip] set PG_BUMPERS_IT=1 to run the applyd IT");
+        eprintln!("[skip] set PG_BRAKES_IT=1 to run the applyd IT");
         return;
     }
     let (admin, dbname) = create_seeded_db("drift");
@@ -669,7 +669,7 @@ fn destructive_delete_drift_aborts_with_no_mutation() {
 #[test]
 fn socket_jsonrpc_propose_round_trip_against_the_binary() {
     if !it_enabled() {
-        eprintln!("[skip] set PG_BUMPERS_IT=1 to run the applyd socket IT");
+        eprintln!("[skip] set PG_BRAKES_IT=1 to run the applyd socket IT");
         return;
     }
     use std::io::{BufRead, BufReader, Write};

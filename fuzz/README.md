@@ -1,4 +1,4 @@
-# pg_bumpers fuzzing — hostile parse loops (SPEC §4)
+# pg_brakes fuzzing — hostile parse loops (SPEC §4)
 
 This crate fuzzes the two **untrusted parse loops** the proxy sits on:
 

@@ -1,4 +1,4 @@
-//! `pgb-applyd` — the pg_bumpers **write-path daemon** (issue #67, S5).
+//! `pgb-applyd` — the pg_brakes **write-path daemon** (issue #67, S5).
 //!
 //! A long-lived process that binds a **Unix-domain socket** (`PGB_APPLYD_SOCKET`,
 //! dir `0700`, socket `0600` — NOT a TCP port, NOT agent-reachable) and speaks

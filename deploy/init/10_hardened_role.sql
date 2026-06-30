@@ -1,4 +1,4 @@
--- pg_bumpers — Layer 1 WALL: the hardened native agent role (idempotent).
+-- pg_brakes — Layer 1 WALL: the hardened native agent role (idempotent).
 -- =====================================================================================
 -- ⚠️  DANGER — DO NOT run this as-is on an EXISTING production database.
 -- It REVOKEs privileges FROM PUBLIC (function EXECUTE, CREATE/TEMP on schema public, lo_*),

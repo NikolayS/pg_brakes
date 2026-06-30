@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
-# pg_bumpers — CI helper: start a THROWAWAY plain Postgres admin cluster on a
+# pg_brakes — CI helper: start a THROWAWAY plain Postgres admin cluster on a
 # dedicated high port (issue #44 — the CI integration job).
 #
 # Several env-gated Rust ITs do NOT self-provision; they connect to an
 # already-running admin server on a fixed default port (each test then creates
 # its OWN uniquely-named database, so one admin server per port is enough):
 #
-#   54341  clone-orchestrator dry_run/apply/revert/apply_grant  (PG_BUMPERS_PGURL)
-#   54355  applyd_it                                            (PG_BUMPERS_PGURL)
-#   55431  fidelity spike                                       (PG_BUMPERS_PGURL)
-#   55432  audit + cli (_meta) ITs                              (PG_BUMPERS_AUDIT_PGURL)
+#   54341  clone-orchestrator dry_run/apply/revert/apply_grant  (PG_BRAKES_PGURL)
+#   54355  applyd_it                                            (PG_BRAKES_PGURL)
+#   55431  fidelity spike                                       (PG_BRAKES_PGURL)
+#   55432  audit + cli (_meta) ITs                              (PG_BRAKES_AUDIT_PGURL)
 #
 # (The proxy/read-path ITs instead use deploy/local-stack.sh, which also applies
 # the native-role WALL — they are NOT covered here.)
@@ -22,16 +22,16 @@
 #         deploy/ci/stop-pg.sh  <port> [datadir-root]
 #
 # PG bin dir precedence (unified — issues #44, #102):
-#   PG_BUMPERS_PG_BIN → PGBIN → the version-neutral Homebrew keg path (macOS dev
+#   PG_BRAKES_PG_BIN → PGBIN → the version-neutral Homebrew keg path (macOS dev
 #   fallback). Version-agnostic across the supported PG 14-18 range.
 
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-PGBIN="${PG_BUMPERS_PG_BIN:-${PGBIN:-/opt/homebrew/opt/postgresql/bin}}"
+PGBIN="${PG_BRAKES_PG_BIN:-${PGBIN:-/opt/homebrew/opt/postgresql/bin}}"
 
 PORT="${1:?usage: start-pg.sh <port> [datadir-root]}"
-ROOT="${2:-${PG_BUMPERS_CI_PGROOT:-${TMPDIR:-/tmp}/pgb-ci-pg}}"
+ROOT="${2:-${PG_BRAKES_CI_PGROOT:-${TMPDIR:-/tmp}/pgb-ci-pg}}"
 
 [ "$PORT" != "5432" ] || { echo "[start-pg] REFUSING to start on :5432 (the founder's cluster)" >&2; exit 1; }
 
@@ -40,7 +40,7 @@ SOCKDIR="$ROOT/sock-$PORT"
 LOGFILE="$ROOT/pg-$PORT.log"
 
 for b in initdb pg_ctl psql pg_isready; do
-  [ -x "$PGBIN/$b" ] || { echo "[start-pg] missing $PGBIN/$b — set PG_BUMPERS_PG_BIN" >&2; exit 1; }
+  [ -x "$PGBIN/$b" ] || { echo "[start-pg] missing $PGBIN/$b — set PG_BRAKES_PG_BIN" >&2; exit 1; }
 done
 
 echo "[start-pg] port=$PORT datadir=$DATADIR bin=$PGBIN"
@@ -55,7 +55,7 @@ mkdir -p "$DATADIR" "$SOCKDIR"
 # in a short path so the Unix-socket directory is well under any length cap.
 cat >> "$DATADIR/postgresql.auto.conf" <<EOF
 
-# --- pg_bumpers CI throwaway admin cluster (issue #44) ---
+# --- pg_brakes CI throwaway admin cluster (issue #44) ---
 listen_addresses = '127.0.0.1'
 port = $PORT
 unix_socket_directories = '$SOCKDIR'

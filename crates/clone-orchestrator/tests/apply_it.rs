@@ -1,9 +1,9 @@
 //! Real-PG18 integration tests for the **guarded-apply engine** (SPEC §4, §10.2,
-//! §10.3, §10.4, §1). Env-gated behind `PG_BUMPERS_IT=1` so CI's fast `cargo test`
+//! §10.3, §10.4, §1). Env-gated behind `PG_BRAKES_IT=1` so CI's fast `cargo test`
 //! skips them. Run with:
 //!
 //! ```sh
-//! PG_BUMPERS_IT=1 cargo test -p pgb-clone-orchestrator --test apply_it -- --nocapture
+//! PG_BRAKES_IT=1 cargo test -p pgb-clone-orchestrator --test apply_it -- --nocapture
 //! ```
 //!
 //! These drive the production [`pgb_clone_orchestrator::guarded_apply`] engine
@@ -53,7 +53,7 @@ use postgres::{Client, NoTls};
 /// Skip-guard: returns `None` (printing why) when the IT gate is unset.
 fn setup(tag: &str) -> Option<(String, String, Client)> {
     if !it_enabled() {
-        eprintln!("[skip] {tag}: set PG_BUMPERS_IT=1 to run the DB-backed apply test");
+        eprintln!("[skip] {tag}: set PG_BRAKES_IT=1 to run the DB-backed apply test");
         return None;
     }
     Some(create_seeded_db(&base_pgurl(), tag))

@@ -4,7 +4,7 @@
 # **0 catastrophic FN + 0 FP regression vs a golden file**. The seed S5 grows.
 [package]
 name = "dbsafe-bench"
-description = "pg_bumpers deterministic FP/FN floor gate: labeled corpus + golden expected-outcome + 0-FN/0-FP-regression CI gate (SPEC §13.5, §10.6)."
+description = "pg_brakes deterministic FP/FN floor gate: labeled corpus + golden expected-outcome + 0-FN/0-FP-regression CI gate (SPEC §13.5, §10.6)."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -35,11 +35,11 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 [dev-dependencies]
-# DB-backed (env-gated PG_BUMPERS_IT=1) scenarios drive a throwaway Postgres cluster
+# DB-backed (env-gated PG_BRAKES_IT=1) scenarios drive a throwaway Postgres cluster
 # via psql/initdb (no extra deps) plus a synchronous client for the WALL
 # direct-to-DB-bypass denial.
 postgres = "0.19"
 # The ONE shared PG bin-dir resolver every env-gated IT calls (issue #44), so
-# the `PG_BUMPERS_PG_BIN → legacy → Homebrew` precedence lives + is unit-tested
+# the `PG_BRAKES_PG_BIN → legacy → Homebrew` precedence lives + is unit-tested
 # in exactly one place (no per-resolver drift).
 pgb-test-support = { path = "../crates/test-support" }

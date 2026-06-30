@@ -1,4 +1,4 @@
-//! PostgreSQL **wire-protocol layer** for pg_bumpers (SPEC §3 layer 2, §4, §7 S1).
+//! PostgreSQL **wire-protocol layer** for pg_brakes (SPEC §3 layer 2, §4, §7 S1).
 //!
 //! This crate gives the proxy byte-level control over the FE/BE message loop so
 //! it can enforce the deterministic floor: force the **extended protocol**

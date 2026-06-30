@@ -1,6 +1,6 @@
 [package]
 name = "pgb-core"
-description = "pg_bumpers core domain types and one-way-door seams (ApplyBarrier, Clock, SessionState, BlastRadius)."
+description = "pg_brakes core domain types and one-way-door seams (ApplyBarrier, Clock, SessionState, BlastRadius)."
 version.workspace = true
 edition.workspace = true
 license.workspace = true

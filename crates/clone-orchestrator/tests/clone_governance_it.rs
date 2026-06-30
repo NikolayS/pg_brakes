@@ -1,8 +1,8 @@
 //! Real-PG18 integration tests for the **clone provider + governance** (SPEC §4,
-//! §10.7, §12). Env-gated behind `PG_BUMPERS_IT=1`. Run with:
+//! §10.7, §12). Env-gated behind `PG_BRAKES_IT=1`. Run with:
 //!
 //! ```sh
-//! PG_BUMPERS_IT=1 cargo test -p pgb-clone-orchestrator --test clone_governance_it -- --nocapture
+//! PG_BRAKES_IT=1 cargo test -p pgb-clone-orchestrator --test clone_governance_it -- --nocapture
 //! ```
 //!
 //! These prove the moat + the blocking clone governance:
@@ -48,7 +48,7 @@ use pgb_clone_orchestrator::{
 use pgb_core::SystemClock;
 use postgres::{Client, NoTls};
 
-const IT_ENV: &str = "PG_BUMPERS_IT";
+const IT_ENV: &str = "PG_BRAKES_IT";
 
 fn it_enabled() -> bool {
     std::env::var(IT_ENV).map(|v| v == "1").unwrap_or(false)
@@ -56,7 +56,7 @@ fn it_enabled() -> bool {
 
 fn skip(tag: &str) -> bool {
     if !it_enabled() {
-        eprintln!("[skip] {tag}: set PG_BUMPERS_IT=1 to run the clone-governance IT");
+        eprintln!("[skip] {tag}: set PG_BRAKES_IT=1 to run the clone-governance IT");
         return true;
     }
     false
@@ -84,7 +84,7 @@ fn provider_for(
             repl_user: primary.repl_user.clone(),
             dbname: primary.dbname.clone(),
         },
-        owner: "data-platform@pg-bumpers".into(),
+        owner: "data-platform@pg-brakes".into(),
     };
     LocalCloneProvider::new(cfg, ledger)
 }

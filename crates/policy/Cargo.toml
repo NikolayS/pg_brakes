@@ -1,6 +1,6 @@
 [package]
 name = "pgb-policy"
-description = "pg_bumpers policy library: policy.yaml model, certified-action-set, the RiskEngine seam, T0–T2 intent capture, and the §14.3 proposal-bound grant token."
+description = "pg_brakes policy library: policy.yaml model, certified-action-set, the RiskEngine seam, T0–T2 intent capture, and the §14.3 proposal-bound grant token."
 version.workspace = true
 edition.workspace = true
 license.workspace = true

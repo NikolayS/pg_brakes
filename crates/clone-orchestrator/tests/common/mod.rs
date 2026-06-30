@@ -1,4 +1,4 @@
-//! DB setup/teardown + the seed schema for the env-gated (`PG_BUMPERS_IT=1`)
+//! DB setup/teardown + the seed schema for the env-gated (`PG_BRAKES_IT=1`)
 //! real-PG18 integration tests.
 //!
 //! The measurement backend itself — the baseline `clone.provider: none`
@@ -28,10 +28,10 @@ use postgres::{Client, NoTls};
 pub use pgb_clone_orchestrator::conn::{PgRehearsal, current_wal_lsn};
 
 /// Env var gating the DB-touching tests (matches the S0 spike convention).
-pub const IT_ENV: &str = "PG_BUMPERS_IT";
+pub const IT_ENV: &str = "PG_BRAKES_IT";
 
 /// Default libpq URL for the throwaway PG18 cluster on the dedicated port 54341.
-/// Overridable via `PG_BUMPERS_PGURL`. **Never** points at the founder's 5432.
+/// Overridable via `PG_BRAKES_PGURL`. **Never** points at the founder's 5432.
 pub const DEFAULT_PGURL: &str = "host=127.0.0.1 port=54341 user=postgres dbname=postgres";
 
 /// Whether the IT gate is set.
@@ -41,7 +41,7 @@ pub fn it_enabled() -> bool {
 
 /// The base admin connection string (env override or [`DEFAULT_PGURL`]).
 pub fn base_pgurl() -> String {
-    std::env::var("PG_BUMPERS_PGURL").unwrap_or_else(|_| DEFAULT_PGURL.to_string())
+    std::env::var("PG_BRAKES_PGURL").unwrap_or_else(|_| DEFAULT_PGURL.to_string())
 }
 
 /// Connect (sync client).

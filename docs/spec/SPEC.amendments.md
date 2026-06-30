@@ -1,4 +1,4 @@
-# pg_bumpers — SPEC amendments
+# pg_brakes — SPEC amendments
 
 Intentional, recorded deviations from `docs/spec/SPEC.md` (v0.8, build-frozen), per
 `CLAUDE.md` §8 ("Intentional deviations: record in `docs/spec/SPEC.amendments.md` with
@@ -28,7 +28,7 @@ integration tests in this build environment run against **local Postgres 18** cl
 
 ### Rationale
 
-Docker image pulls are **non-functional** in the pg_bumpers build environment. The
+Docker image pulls are **non-functional** in the pg_brakes build environment. The
 Docker Desktop VM (4.23.0) **and** a freshly-installed Colima VM (engine 27.4.0) both
 hang `docker pull` at **zero blob bytes**, even though `curl https://registry-1.docker.io/v2/`
 succeeds (HTTP 401) from inside the same VM. Ruled out: HTTP proxy (none), Tailscale
@@ -64,7 +64,7 @@ exactly as `docker compose` (no profiles) vs. `--profile replica` would behave.
   -R`; `meta` a separate cluster hosting the append-only `_meta` audit DB. A
   clearly-marked include point reserves where the issue-#5 hardened-role WALL SQL
   attaches (no duplication of that work here).
-- **`deploy/smoke.sh`** — env-gated on `PG_BUMPERS_IT=1`: asserts primary + meta
+- **`deploy/smoke.sh`** — env-gated on `PG_BRAKES_IT=1`: asserts primary + meta
   reachable, replica in recovery and streaming (`pg_stat_replication`), and a replicated
   row round-trip within a bound. Non-zero exit on any failure; skips (exit 0) when the
   gate is unset.
@@ -213,7 +213,7 @@ seam that owns the SQL. The SPEC implies a **production, generic-schema** `Apply
 works against an arbitrary customer schema. **No such production connection exists yet.**
 The shipped real implementation is the **hardcoded seed-schema test seam** —
 `PgApplyConn` in the env-gated integration tests (`crates/clone-orchestrator/tests/`,
-`PG_BUMPERS_IT=1`) — bound to a **2-level seed schema** (`public.accounts` /
+`PG_BRAKES_IT=1`) — bound to a **2-level seed schema** (`public.accounts` /
 `public.entries`, single-int / composite-int PKs). The in-memory `MockConn` (unit tests)
 is likewise hand-scripted per scenario. There is **no** generic SQL generator that maps an
 arbitrary relation + predicate + cascade graph onto the §4 calls.
@@ -470,7 +470,7 @@ txn is never opened (the grant is checked before any `begin`). A shared/durable
 single-use store and the trusted approver key gate every apply.
 
 Proven red→green with unit tests (`apply_grant.rs`) **and** real-PG18 integration tests
-(`crates/clone-orchestrator/tests/apply_grant_it.rs`, env-gated `PG_BUMPERS_IT=1`): a
+(`crates/clone-orchestrator/tests/apply_grant_it.rs`, env-gated `PG_BRAKES_IT=1`): a
 CLI-minted grant verifies at the real apply and the bounded write commits **reversibly**
 (revert restores the pre-state); the **5 T-grant-\* tamper cases**
 (sql-swap/param-swap/cross-session/proposal-swap → `BindingMismatch`; nonce reuse →
@@ -543,7 +543,7 @@ semantics #52 proved:
   TDD'd — a stub returning no records fails 5 tests (RED); the real mapping passes (GREEN).
   Fail-closed config + the env-derived `WardenSettings` (defaults + the two required
   secrets, no credential literals) are unit-tested.
-- **Integration (`PG_BUMPERS_IT=1`, dedicated port 54362):** the running watchdog over the
+- **Integration (`PG_BRAKES_IT=1`, dedicated port 54362):** the running watchdog over the
   live `PgActivitySource` / `PgKiller` **terminates** a real agent-tagged runaway,
   **spares** a shared session, **alarms** on a replication slot, **trips** the breaker —
   and **each action lands on the `_meta` chain** (`["WARDEN_TERMINATE","SLOT_ALARM",
@@ -822,7 +822,7 @@ deployable stdio shell against the now-assembled stack (live proxy read path + `
 live `pgb-warden` + anchored `_meta` audit) and the system's behavior is shown **split by
 damage class** — honestly, no overclaim.
 
-### What ran LIVE (end-to-end, `PG_BUMPERS_IT=1`, dedicated high port 54341; NEVER 5432)
+### What ran LIVE (end-to-end, `PG_BRAKES_IT=1`, dedicated high port 54341; NEVER 5432)
 
 `mcp/server/test/marquee.integration.test.ts` (**HISTORICAL — now the env-gated Rust e2e
 `crates/mcp/tests/{write_path_e2e,read_path_e2e}.rs`** per EPIC #83; run + transcript-captured by
@@ -1207,7 +1207,7 @@ guarded writes a low-churn / re-review-on-drift instrument, not a bulk applier).
 
 ### Evidence (red→green; real PG18 + the deterministic gate)
 
-- **Real PG18 (env-gated `PG_BUMPERS_IT=1`, dedicated high port, NEVER :5432):**
+- **Real PG18 (env-gated `PG_BRAKES_IT=1`, dedicated high port, NEVER :5432):**
   `crates/clone-orchestrator/tests/apply_it.rs` adds the deterministic race (helper holds a
   `FOR UPDATE` lock so the apply blocks; the racing change commits during the block):
   `t_concurrent_insert_into_predicate_delete_aborts_missing_preimage_read_committed`,
@@ -1261,7 +1261,7 @@ read-path only), so it is replaced — **atomically, in one change** — by two 
 
 The signed binding now commits to `{ statement_text, normalized_params, role, session_id,
 proposal_id, dry_run_lsn, cap, nonce, expiry }`. **`BINDING_DOMAIN` is bumped to
-`pg_bumpers.grant.binding.v2`**, so any old **v1** token (which signed over
+`pg_brakes.grant.binding.v2`**, so any old **v1** token (which signed over
 `blast_radius_checksum`, not `cap`, under the `…v1` domain) **fails closed** under v2
 verification — old grants cannot authorize a write on the new floor (`t_grant_v1_token_
 fails_closed_under_v2`). A swapped/raised cap is a binding mismatch (`t_grant_cap_swap_*`).
@@ -1308,7 +1308,7 @@ composite/wider PK is refused upstream, not gated here.
 
 ### Evidence (red→green; real PG18 + the deterministic gate)
 
-- **Cap unit + real PG18 (env-gated `PG_BUMPERS_IT=1`, dedicated high port, NEVER :5432):**
+- **Cap unit + real PG18 (env-gated `PG_BRAKES_IT=1`, dedicated high port, NEVER :5432):**
   `apply::tests::cap_exceeded_on_rows_aborts_no_mutation` / `…_on_wal_bytes_aborts` /
   `within_cap_write_commits` / `cap_below_dry_run_footprint_is_refused_before_txn`; and
   `crates/clone-orchestrator/tests/apply_grant_it.rs`:
@@ -1402,7 +1402,7 @@ equivalents are:
 - the original read transport → **`crates/mcp/src/proxy.rs`**
   (the `ProxyTransport`/`ProxyConfig`).
 - the original tool dispatcher → **`crates/mcp/src/server.rs`**
-  (the `PgBumpersMcp` handler).
+  (the `PgBrakesMcp` handler).
 - the original `Allow` stub → the Rust **`AllowStub`** in
   `crates/policy/src/risk.rs`, captured by `crates/mcp/src/server.rs`.
 - the original live-stack tests → the env-gated Rust e2e

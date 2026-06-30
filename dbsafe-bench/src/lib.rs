@@ -30,7 +30,7 @@
 //! # The gate
 //! The CI gate lives in `tests/gate.rs` (fast, pure-logic — classifier, certify,
 //! guarded-apply via the scripted conn, byte cutoff) and `tests/gate_it.rs`
-//! (env-gated `PG_BUMPERS_IT=1` — WALL role denial + proxy end-to-end against real
+//! (env-gated `PG_BRAKES_IT=1` — WALL role denial + proxy end-to-end against real
 //! PG18). Both assert: **0 diffs vs golden + 0 catastrophic FN + 0 FP regression**.
 
 #![forbid(unsafe_code)]

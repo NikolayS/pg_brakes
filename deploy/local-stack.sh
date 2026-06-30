@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# pg_bumpers — local dev/test substrate (live S0 substrate for THIS environment)
+# pg_brakes — local dev/test substrate (live S0 substrate for THIS environment)
 #
 # Brings up isolated, throwaway Postgres clusters under ./.localstack/ using a
 # Homebrew keg-only PostgreSQL 14-18 binary set (initdb / pg_basebackup / pg_ctl). No Docker.
 #
 # Why local PG instead of docker-compose here: `docker pull` is non-functional in the
-# pg_bumpers build environment (host-level daemon networking fault). docker-compose.yml
+# pg_brakes build environment (host-level daemon networking fault). docker-compose.yml
 # remains the shipped artifact; this script is the live substrate every integration test
 # and the fidelity gate (#8) run against. See docs/spec/SPEC.amendments.md "S0 integration
 # substrate". SPEC refs: §7 (S0 compose), §12 (graceful degradation), §10.8 (degraded
@@ -30,10 +30,10 @@ IFS=$'\n\t'
 # Configuration
 # --------------------------------------------------------------------------------------
 # PG bin dir. Precedence (unified across every IT/CI — issues #44, #102):
-# PG_BUMPERS_PG_BIN (the ONE cross-IT/CI var, per-major in the matrix) → PGBIN
+# PG_BRAKES_PG_BIN (the ONE cross-IT/CI var, per-major in the matrix) → PGBIN
 # (legacy, local back-compat) → the version-neutral Homebrew keg path (macOS dev
 # fallback). Version-agnostic across the supported PG 14-18 range.
-PGBIN="${PG_BUMPERS_PG_BIN:-${PGBIN:-/opt/homebrew/opt/postgresql/bin}}"
+PGBIN="${PG_BRAKES_PG_BIN:-${PGBIN:-/opt/homebrew/opt/postgresql/bin}}"
 
 # Repo root = parent of this script's dir, so paths work from any cwd. The
 # ${BASH_SOURCE[0]:-$0} fallback keeps this robust under `set -u` when the file is sourced
@@ -41,7 +41,7 @@ PGBIN="${PG_BUMPERS_PG_BIN:-${PGBIN:-/opt/homebrew/opt/postgresql/bin}}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-ROOT="${PG_BUMPERS_LOCALSTACK_DIR:-$REPO_ROOT/.localstack}"
+ROOT="${PG_BRAKES_LOCALSTACK_DIR:-$REPO_ROOT/.localstack}"
 PRIMARY_DIR="$ROOT/primary"
 REPLICA_DIR="$ROOT/replica"
 META_DIR="$ROOT/meta"
@@ -50,8 +50,8 @@ LOG_DIR="$ROOT/logs"
 # Out-of-tree PID ledger: survives `rm -rf ./.localstack/`. This is how `down`
 # can still stop OUR postmasters after the data dir is deleted out-of-band.
 # Keyed by a stable digest of $ROOT so distinct stacks (different
-# PG_BUMPERS_LOCALSTACK_DIR) never share a ledger.
-PID_BASE="${PG_BUMPERS_PID_DIR:-${TMPDIR:-/tmp}/pg_bumpers-localstack}"
+# PG_BRAKES_LOCALSTACK_DIR) never share a ledger.
+PID_BASE="${PG_BRAKES_PID_DIR:-${TMPDIR:-/tmp}/pg_brakes-localstack}"
 ROOT_KEY="$(printf '%s' "$ROOT" | cksum | tr -d ' ' | cut -c1-12)"
 PID_DIR="$PID_BASE/$ROOT_KEY"
 
@@ -61,12 +61,12 @@ PID_DIR="$PID_BASE/$ROOT_KEY"
 # would fail there. A SHORT path under the PID base keeps us well under the
 # ~103-byte socket-path cap, and is keyed by $ROOT so distinct stacks never
 # share sockets. Connections are TCP loopback regardless; the socket is only for
-# pg_ctl's own readiness probe. Override with PG_BUMPERS_SOCK_DIR if needed.
-SOCK_DIR="${PG_BUMPERS_SOCK_DIR:-$PID_DIR/sock}"
+# pg_ctl's own readiness probe. Override with PG_BRAKES_SOCK_DIR if needed.
+SOCK_DIR="${PG_BRAKES_SOCK_DIR:-$PID_DIR/sock}"
 
-PRIMARY_PORT="${PG_BUMPERS_PRIMARY_PORT:-54321}"
-REPLICA_PORT="${PG_BUMPERS_REPLICA_PORT:-54322}"
-META_PORT="${PG_BUMPERS_META_PORT:-54323}"
+PRIMARY_PORT="${PG_BRAKES_PRIMARY_PORT:-54321}"
+REPLICA_PORT="${PG_BRAKES_REPLICA_PORT:-54322}"
+META_PORT="${PG_BRAKES_META_PORT:-54323}"
 
 REPL_USER="replicator"
 REPL_PASS="replicator"
@@ -146,30 +146,30 @@ has_dotdot_segment() {
 #
 # Hardening (issue #16): the under-repo / *localstack* confinement is checked against the
 # CANONICALIZED path, and any '..' segment is refused OUTRIGHT. A hostile
-# PG_BUMPERS_LOCALSTACK_DIR like "$REPO_ROOT/.localstack/../../../tmp/x" string-prefixes
+# PG_BRAKES_LOCALSTACK_DIR like "$REPO_ROOT/.localstack/../../../tmp/x" string-prefixes
 # the repo yet RESOLVES outside it; the old string-prefix check let it through, so the
 # later `rm -rf "$ROOT"` (files only — NEVER the kill path) could run OUTSIDE confinement.
 # We now (1) reject '..' segments, (2) canonicalize, and (3) confine on the canonical path.
 validate_root() {
-  [ -n "$ROOT" ]            || die "PG_BUMPERS_LOCALSTACK_DIR resolved to empty — refusing"
-  [ "$ROOT" != "/" ]       || die "PG_BUMPERS_LOCALSTACK_DIR='/' — refusing"
+  [ -n "$ROOT" ]            || die "PG_BRAKES_LOCALSTACK_DIR resolved to empty — refusing"
+  [ "$ROOT" != "/" ]       || die "PG_BRAKES_LOCALSTACK_DIR='/' — refusing"
   case "$ROOT" in
     /*) : ;;  # absolute, good
-    *)  die "PG_BUMPERS_LOCALSTACK_DIR='$ROOT' is not an absolute path — refusing" ;;
+    *)  die "PG_BRAKES_LOCALSTACK_DIR='$ROOT' is not an absolute path — refusing" ;;
   esac
   # Refuse traversal outright: a '..' segment is never legitimate for our throwaway root,
   # and refusing it up front means confinement can never be tricked by a path that
   # string-prefixes an allowed root but climbs back out via '..'.
   if has_dotdot_segment "$ROOT"; then
-    die "PG_BUMPERS_LOCALSTACK_DIR='$ROOT' contains a '..' segment — refusing (path traversal)"
+    die "PG_BRAKES_LOCALSTACK_DIR='$ROOT' contains a '..' segment — refusing (path traversal)"
   fi
   # Canonicalize (symlink-resolve + normalize) the nearest existing ancestor + remaining
   # tail; the dir may not exist yet on first `up`. All confinement checks run on this.
   local canon
   canon="$(canonicalize_path "$ROOT")" \
-    || die "PG_BUMPERS_LOCALSTACK_DIR='$ROOT' could not be canonicalized — refusing"
+    || die "PG_BRAKES_LOCALSTACK_DIR='$ROOT' could not be canonicalized — refusing"
   [ -n "$canon" ] && [ "$canon" != "/" ] \
-    || die "PG_BUMPERS_LOCALSTACK_DIR='$ROOT' canonicalizes to '$canon' — refusing"
+    || die "PG_BRAKES_LOCALSTACK_DIR='$ROOT' canonicalizes to '$canon' — refusing"
   # Likewise canonicalize the repo root so the under-repo check compares real path to real
   # path (e.g. /var vs /private/var on macOS, or a symlinked checkout).
   local repo_canon
@@ -178,7 +178,7 @@ validate_root() {
   local home_canon
   home_canon="$(canonicalize_path "${HOME:-/nonexistent}" 2>/dev/null || true)"
   [ "$canon" != "${home_canon:-/nonexistent}" ] \
-    || die "PG_BUMPERS_LOCALSTACK_DIR='$ROOT' is \$HOME — refusing"
+    || die "PG_BRAKES_LOCALSTACK_DIR='$ROOT' is \$HOME — refusing"
   # The CANONICAL path must be under the repo, OR have a recognizable *localstack* basename.
   case "$canon" in
     "$repo_canon"/*) return 0 ;;  # under the (canonical) repo — always fine
@@ -187,7 +187,7 @@ validate_root() {
   case "$base" in
     .localstack|*localstack*) return 0 ;;
   esac
-  die "PG_BUMPERS_LOCALSTACK_DIR='$ROOT' (resolves to '$canon') is neither under the repo ($repo_canon) nor a *localstack* dir — refusing rm -rf"
+  die "PG_BRAKES_LOCALSTACK_DIR='$ROOT' (resolves to '$canon') is neither under the repo ($repo_canon) nor a *localstack* dir — refusing rm -rf"
 }
 
 # Record a started postmaster's PID, keyed by port, in the out-of-tree ledger so
@@ -305,7 +305,7 @@ init_primary() {
   # postgresql.conf: replication-ready + PITR-ready knobs.
   cat >> "$PRIMARY_DIR/postgresql.conf" <<EOF
 
-# --- pg_bumpers local-stack: primary (SPEC §7/§12) ---
+# --- pg_brakes local-stack: primary (SPEC §7/§12) ---
 listen_addresses = '$LISTEN'
 port = $PRIMARY_PORT
 unix_socket_directories = '$SOCK_DIR'
@@ -321,7 +321,7 @@ EOF
   # pg_hba.conf: local access + a replication entry for the standby over TCP.
   cat >> "$PRIMARY_DIR/pg_hba.conf" <<EOF
 
-# --- pg_bumpers local-stack: local access + streaming replication ---
+# --- pg_brakes local-stack: local access + streaming replication ---
 local   all             all                                     trust
 host    all             all             127.0.0.1/32            trust
 host    all             all             ::1/128                 trust
@@ -376,7 +376,7 @@ CREATE TABLE IF NOT EXISTS public.pgb_devstack_marker (
     created_at timestamptz NOT NULL DEFAULT now()
 );
 INSERT INTO public.pgb_devstack_marker (id, note)
-VALUES (1, 'pg_bumpers local-stack primary initialized')
+VALUES (1, 'pg_brakes local-stack primary initialized')
 ON CONFLICT (id) DO NOTHING;
 EOF
 }
@@ -391,7 +391,7 @@ init_and_start_replica() {
   # Standby-specific knobs (appended so they win).
   cat >> "$REPLICA_DIR/postgresql.conf" <<EOF
 
-# --- pg_bumpers local-stack: replica (standby) ---
+# --- pg_brakes local-stack: replica (standby) ---
 listen_addresses = '$LISTEN'
 port = $REPLICA_PORT
 unix_socket_directories = '$SOCK_DIR'
@@ -412,14 +412,14 @@ init_and_start_meta() {
   "$PGBIN/initdb" -D "$META_DIR" -U postgres -A trust --no-sync >/dev/null
   cat >> "$META_DIR/postgresql.conf" <<EOF
 
-# --- pg_bumpers local-stack: meta (append-only _meta audit DB, SPEC §4) ---
+# --- pg_brakes local-stack: meta (append-only _meta audit DB, SPEC §4) ---
 listen_addresses = '$LISTEN'
 port = $META_PORT
 unix_socket_directories = '$SOCK_DIR'
 EOF
   cat >> "$META_DIR/pg_hba.conf" <<EOF
 
-# --- pg_bumpers local-stack: local access ---
+# --- pg_brakes local-stack: local access ---
 local   all   all                  trust
 host    all   all   127.0.0.1/32   trust
 host    all   all   ::1/128        trust
@@ -534,7 +534,7 @@ cmd_up() {
   for spec in "primary:$PRIMARY_PORT" "replica:$REPLICA_PORT" "meta:$META_PORT"; do
     label="${spec%%:*}"; port="${spec##*:}"
     if port_listening "$port"; then
-      die "port $port ($label) is occupied by a process we do not own — refusing to start (free it or override PG_BUMPERS_${label}_PORT)"
+      die "port $port ($label) is occupied by a process we do not own — refusing to start (free it or override PG_BRAKES_${label}_PORT)"
     fi
   done
 
@@ -608,10 +608,10 @@ main() {
   esac
 }
 
-# Test seam (issue #16): when sourced with PG_BUMPERS_LOCALSTACK_TEST=1, define the
+# Test seam (issue #16): when sourced with PG_BRAKES_LOCALSTACK_TEST=1, define the
 # functions but do NOT run main — so the guard unit tests (deploy/test/local_stack_guards.sh)
 # can drive validate_root / pid_is_ours / canonicalize_path directly with controlled
 # inputs, with no PG and nothing real ever started or killed.
-if [ "${PG_BUMPERS_LOCALSTACK_TEST:-0}" != "1" ]; then
+if [ "${PG_BRAKES_LOCALSTACK_TEST:-0}" != "1" ]; then
   main "$@"
 fi

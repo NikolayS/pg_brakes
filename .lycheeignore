@@ -8,7 +8,7 @@
 # Shields.io / GitHub badge + status images (remote; skipped in offline mode
 # anyway, listed here for clarity and for any future online run).
 https://img.shields.io/.*
-https://github.com/NikolayS/pg_bumpers/actions/.*
+https://github.com/NikolayS/pg_brakes/actions/.*
 
 # Mail/anchor/templated links.
 ^mailto:

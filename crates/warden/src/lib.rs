@@ -1,4 +1,4 @@
-//! pg_bumpers **warden** — the out-of-band watchdog (SPEC §3 layer 2, §4, §10.9).
+//! pg_brakes **warden** — the out-of-band watchdog (SPEC §3 layer 2, §4, §10.9).
 //!
 //! The warden runs *out of band* from the inline proxy: it is the no-app-SPOF
 //! backstop that catches what the proxy can't see — slow-drip through the DB,

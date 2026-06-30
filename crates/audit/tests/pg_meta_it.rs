@@ -1,10 +1,10 @@
 //! Env-gated Postgres `_meta` sink integration test (SPEC §4, §10.9; issue #21).
 //!
-//! Runs **for real against PG18** only when `PG_BUMPERS_IT=1`, so CI's fast
+//! Runs **for real against PG18** only when `PG_BRAKES_IT=1`, so CI's fast
 //! `cargo test` skips it (and the crate still builds/links). Run with:
 //!
 //! ```sh
-//! PG_BUMPERS_IT=1 cargo test -p pgb-audit --test pg_meta_it -- --nocapture
+//! PG_BRAKES_IT=1 cargo test -p pgb-audit --test pg_meta_it -- --nocapture
 //! ```
 //!
 //! It proves, against a live `_meta` table created from
@@ -17,7 +17,7 @@
 //!      INSERT/UPDATE/DELETE as that role all fail with a permission error
 //!      ("audited cannot write audit").
 //!
-//! Connection: `PG_BUMPERS_AUDIT_PGURL` (admin/superuser) or the default below.
+//! Connection: `PG_BRAKES_AUDIT_PGURL` (admin/superuser) or the default below.
 //! NEVER points at the founder's 5432 cluster.
 
 #![cfg(feature = "pg")]
@@ -33,13 +33,13 @@ use postgres::{Client, NoTls};
 const DEFAULT_ADMIN_PGURL: &str = "host=127.0.0.1 port=55432 user=postgres dbname=postgres";
 
 fn it_enabled() -> bool {
-    std::env::var("PG_BUMPERS_IT")
+    std::env::var("PG_BRAKES_IT")
         .map(|v| v == "1")
         .unwrap_or(false)
 }
 
 fn admin_pgurl() -> String {
-    std::env::var("PG_BUMPERS_AUDIT_PGURL").unwrap_or_else(|_| DEFAULT_ADMIN_PGURL.to_string())
+    std::env::var("PG_BRAKES_AUDIT_PGURL").unwrap_or_else(|_| DEFAULT_ADMIN_PGURL.to_string())
 }
 
 /// Connect, applying NoTls (local dev cluster).
@@ -143,7 +143,7 @@ fn rewrite_role(dsn: &str, role: &str, password: &str) -> String {
 #[test]
 fn pg_meta_sink_appends_verifies_and_rejects_are_recorded() {
     if !it_enabled() {
-        eprintln!("[skip] set PG_BUMPERS_IT=1 to run the PG18 _meta sink test");
+        eprintln!("[skip] set PG_BRAKES_IT=1 to run the PG18 _meta sink test");
         return;
     }
     let (dbname, _admin) = setup_fresh_db("sink");
@@ -200,7 +200,7 @@ fn pg_meta_sink_appends_verifies_and_rejects_are_recorded() {
 #[test]
 fn pg_meta_tamper_in_table_is_detected_on_read_back() {
     if !it_enabled() {
-        eprintln!("[skip] set PG_BUMPERS_IT=1 to run the PG18 _meta tamper test");
+        eprintln!("[skip] set PG_BRAKES_IT=1 to run the PG18 _meta tamper test");
         return;
     }
     let (dbname, mut admin) = setup_fresh_db("tamper");
@@ -255,7 +255,7 @@ fn pg_meta_tamper_in_table_is_detected_on_read_back() {
 #[test]
 fn audited_principal_cannot_write_audit_table() {
     if !it_enabled() {
-        eprintln!("[skip] set PG_BUMPERS_IT=1 to run the PG18 REVOKE test");
+        eprintln!("[skip] set PG_BRAKES_IT=1 to run the PG18 REVOKE test");
         return;
     }
     let (dbname, _admin) = setup_fresh_db("revoke");

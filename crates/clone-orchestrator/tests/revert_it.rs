@@ -1,8 +1,8 @@
 //! Real-PG18 integration tests for the **revert engine** (SPEC §5, §10.3, §10.5(b),
-//! §10.6, §1). Env-gated behind `PG_BUMPERS_IT=1`. Run with:
+//! §10.6, §1). Env-gated behind `PG_BRAKES_IT=1`. Run with:
 //!
 //! ```sh
-//! PG_BUMPERS_IT=1 cargo test -p pgb-clone-orchestrator --test revert_it -- --nocapture
+//! PG_BRAKES_IT=1 cargo test -p pgb-clone-orchestrator --test revert_it -- --nocapture
 //! ```
 //!
 //! This is the **"auto-reverted with a verifiable diff" half of the moat**. It
@@ -46,7 +46,7 @@ use postgres::{Client, NoTls};
 /// Skip-guard: returns `None` (printing why) when the IT gate is unset.
 fn setup(tag: &str) -> Option<(String, String)> {
     if !it_enabled() {
-        eprintln!("[skip] {tag}: set PG_BUMPERS_IT=1 to run the DB-backed revert test");
+        eprintln!("[skip] {tag}: set PG_BRAKES_IT=1 to run the DB-backed revert test");
         return None;
     }
     let (admin, dbname, _client) = create_seeded_db(&base_pgurl(), tag);
@@ -814,7 +814,7 @@ fn t_delete_cascade_revert_restores_target_and_cascade_to_golden() {
 #[test]
 fn t_negative_per_refused_op_is_refused_never_applied() {
     if !it_enabled() {
-        eprintln!("[skip] negative refused-op: PG_BUMPERS_IT=1");
+        eprintln!("[skip] negative refused-op: PG_BRAKES_IT=1");
         return;
     }
     // certify() is the single default-deny choke point the apply path routes
@@ -861,7 +861,7 @@ fn t_negative_per_refused_op_is_refused_never_applied() {
 #[test]
 fn t_default_deny_any_op_outside_certified_set_is_refused() {
     if !it_enabled() {
-        eprintln!("[skip] default-deny property: PG_BUMPERS_IT=1");
+        eprintln!("[skip] default-deny property: PG_BRAKES_IT=1");
         return;
     }
     // Sweep the whole op space (every flag combo + named DDL/unknown). Everything

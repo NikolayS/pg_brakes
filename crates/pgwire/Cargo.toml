@@ -1,6 +1,6 @@
 [package]
 name = "pgb-pgwire"
-description = "pg_bumpers PostgreSQL wire-protocol layer: clean-room FE/BE v3 codec (framing, startup/SCRAM auth, extended protocol), a simple-query/COPY rejection detector, and a fail-closed read-only classifier (sqlparser-rs)."
+description = "pg_brakes PostgreSQL wire-protocol layer: clean-room FE/BE v3 codec (framing, startup/SCRAM auth, extended protocol), a simple-query/COPY rejection detector, and a fail-closed read-only classifier (sqlparser-rs)."
 version.workspace = true
 edition.workspace = true
 license.workspace = true

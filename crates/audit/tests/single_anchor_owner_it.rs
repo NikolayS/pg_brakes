@@ -1,8 +1,8 @@
 //! Env-gated PG18 IT for the **single anchor OWNER** over the one shared chain
-//! (S5 #76, item 3). Runs only with `PG_BUMPERS_IT=1`. Run:
+//! (S5 #76, item 3). Runs only with `PG_BRAKES_IT=1`. Run:
 //!
 //! ```sh
-//! PG_BUMPERS_IT=1 cargo test -p pgb-audit --test single_anchor_owner_it -- --test-threads=1
+//! PG_BRAKES_IT=1 cargo test -p pgb-audit --test single_anchor_owner_it -- --test-threads=1
 //! ```
 //!
 //! It proves, against a live `_meta` table + a SHARED durable WORM anchor file +
@@ -33,13 +33,13 @@ const DEFAULT_ADMIN_PGURL: &str = "host=127.0.0.1 port=55432 user=postgres dbnam
 const SHARED_SIGNING_KEY: &[u8] = b"pgb-audit-signing-key-dev-000001";
 
 fn it_enabled() -> bool {
-    std::env::var("PG_BUMPERS_IT")
+    std::env::var("PG_BRAKES_IT")
         .map(|v| v == "1")
         .unwrap_or(false)
 }
 
 fn admin_pgurl() -> String {
-    std::env::var("PG_BUMPERS_AUDIT_PGURL").unwrap_or_else(|_| DEFAULT_ADMIN_PGURL.to_string())
+    std::env::var("PG_BRAKES_AUDIT_PGURL").unwrap_or_else(|_| DEFAULT_ADMIN_PGURL.to_string())
 }
 
 fn connect(url: &str) -> Client {
@@ -132,7 +132,7 @@ fn boot(dbname: &str, anchor_path: &std::path::Path) -> AuditBoot {
 #[test]
 fn single_owner_anchors_verifier_verifies_concurrent_restart_clean_tamper_refused() {
     if !it_enabled() {
-        eprintln!("[skip] set PG_BUMPERS_IT=1 to run the single-anchor-owner IT");
+        eprintln!("[skip] set PG_BRAKES_IT=1 to run the single-anchor-owner IT");
         return;
     }
     let dbname = setup_fresh_db("topology");

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# pg_bumpers — guard: the docker-init copies of the WALL SQL must stay byte-for-byte in
+# pg_brakes — guard: the docker-init copies of the WALL SQL must stay byte-for-byte in
 # sync with the canonical sources. The docker entrypoint mounts only deploy/init/, so the
 # SQL is duplicated there (a symlink would dangle inside the container). This guard fails
 # loudly on drift so the two never diverge silently. Run it in review/CI and the matrix

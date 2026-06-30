@@ -169,7 +169,7 @@ impl ErrorCode {
                 false,
             ),
             ErrorCode::PkLess => (
-                "the target has no primary key; pg_bumpers cannot key the affected set (no ctid fallback)",
+                "the target has no primary key; pg_brakes cannot key the affected set (no ctid fallback)",
                 false,
             ),
             ErrorCode::NotRehearsable => (

@@ -1,4 +1,4 @@
-# Fuzz crate for pg_bumpers — hostile parse-loop fuzzing (SPEC §4).
+# Fuzz crate for pg_brakes — hostile parse-loop fuzzing (SPEC §4).
 #
 # This crate is DELIBERATELY NOT a member of the main workspace (see the
 # `[workspace]` table below, which makes `fuzz/` its own root). Keeping it out

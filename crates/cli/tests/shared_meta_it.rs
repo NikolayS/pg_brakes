@@ -7,10 +7,10 @@
 //! genesis, hash-chained appends from both components — `verify_chain` passes,
 //! and the external-WORM anchored head **matches** the chain head.
 //!
-//! Runs only when `PG_BUMPERS_IT=1`. Run with:
+//! Runs only when `PG_BRAKES_IT=1`. Run with:
 //!
 //! ```sh
-//! PG_BUMPERS_IT=1 cargo test -p pgb-cli --test shared_meta_it -- --nocapture
+//! PG_BRAKES_IT=1 cargo test -p pgb-cli --test shared_meta_it -- --nocapture
 //! ```
 //!
 //! The proxy is a dev-dependency only (no crate cycle: proxy never depends on
@@ -34,13 +34,13 @@ use postgres::{Client, NoTls};
 const DEFAULT_ADMIN_PGURL: &str = "host=127.0.0.1 port=55432 user=postgres dbname=postgres";
 
 fn it_enabled() -> bool {
-    std::env::var("PG_BUMPERS_IT")
+    std::env::var("PG_BRAKES_IT")
         .map(|v| v == "1")
         .unwrap_or(false)
 }
 
 fn admin_pgurl() -> String {
-    std::env::var("PG_BUMPERS_AUDIT_PGURL").unwrap_or_else(|_| DEFAULT_ADMIN_PGURL.to_string())
+    std::env::var("PG_BRAKES_AUDIT_PGURL").unwrap_or_else(|_| DEFAULT_ADMIN_PGURL.to_string())
 }
 
 fn connect(url: &str) -> Client {
@@ -113,7 +113,7 @@ fn store_with_key() -> LocalSecretStore {
 #[test]
 fn proxy_reject_and_cli_approve_share_one_anchored_meta_chain() {
     if !it_enabled() {
-        eprintln!("[skip] set PG_BUMPERS_IT=1 to run the S5 shared-_meta cross-component test");
+        eprintln!("[skip] set PG_BRAKES_IT=1 to run the S5 shared-_meta cross-component test");
         return;
     }
     let writer_dsn = setup_fresh_db("shared");

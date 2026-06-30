@@ -415,7 +415,7 @@ mod tests {
         CloneGovernance {
             encryption_at_rest: true,
             access_log: "audit:_meta.clone_access".into(),
-            owner: "data-platform@pg-bumpers".into(),
+            owner: "data-platform@pg-brakes".into(),
             location: "host=127.0.0.1 port=54361".into(),
             classification: DataClassification::ProdPii,
         }

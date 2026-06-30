@@ -1,4 +1,4 @@
-//! pg_bumpers warden binary (SPEC §3 layer 2, §4, §10.9) — a **running, audited**
+//! pg_brakes warden binary (SPEC §3 layer 2, §4, §10.9) — a **running, audited**
 //! out-of-band watchdog.
 //!
 //! The warden runs out-of-band from the inline proxy: it polls

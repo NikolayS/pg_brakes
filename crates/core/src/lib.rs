@@ -1,4 +1,4 @@
-//! Core domain types and one-way-door seams shared across pg_bumpers.
+//! Core domain types and one-way-door seams shared across pg_brakes.
 //!
 //! This crate is intentionally dependency-light and **DB-free**: it holds the
 //! contracts every other crate builds on (see `docs/spec/SPEC.md` §3 and the S0

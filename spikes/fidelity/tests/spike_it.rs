@@ -1,10 +1,10 @@
 //! THROWAWAY S0 fidelity-spike integration tests (issue #8 — 🚦 THE GATE).
 //!
-//! These run **for real against PG18** and are gated behind `PG_BUMPERS_IT=1`
+//! These run **for real against PG18** and are gated behind `PG_BRAKES_IT=1`
 //! so CI's fast `cargo test` skips them. Run with:
 //!
 //! ```sh
-//! PG_BUMPERS_IT=1 cargo test -p fidelity-spike -- --nocapture
+//! PG_BRAKES_IT=1 cargo test -p fidelity-spike -- --nocapture
 //! ```
 //!
 //! They assert the §10.5 binary pass criteria (a)(b)(c) and the five drift
@@ -20,12 +20,12 @@ use pgb_core::inverse::{Operation, certify};
 use pgb_core::{Clock, ClosureBarrier, MockClock, NoopBarrier, RefusedOp};
 use postgres::Client;
 
-/// Skip-guard: returns `None` (and prints why) when `PG_BUMPERS_IT` is unset so
+/// Skip-guard: returns `None` (and prints why) when `PG_BRAKES_IT` is unset so
 /// the fast CI job stays DB-free. Otherwise creates a fresh, isolated database,
 /// seeds it, and returns `(admin_url, dbname, client)`.
 fn setup(tag: &str) -> Option<(String, String, Client)> {
     if !it_enabled() {
-        eprintln!("[skip] {tag}: set PG_BUMPERS_IT=1 to run the DB-backed spike test");
+        eprintln!("[skip] {tag}: set PG_BRAKES_IT=1 to run the DB-backed spike test");
         return None;
     }
     let admin_url = base_pgurl();

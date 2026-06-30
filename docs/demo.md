@@ -1,4 +1,4 @@
-# pg_bumpers — the marquee demo
+# pg_brakes — the marquee demo
 
 > **The pitch in one line.** Let an AI agent run against *production Postgres*
 > with `--dangerously-skip-permissions` and it still can't cause disaster — every
@@ -38,7 +38,7 @@ The killer demo. An agent proposes a fat-fingered, unbounded write:
 UPDATE accounts SET balance = 0   -- no WHERE: every row
 ```
 
-Instead of running it on prod, pg_bumpers **rehearses** it, **measures the blast
+Instead of running it on prod, pg_brakes **rehearses** it, **measures the blast
 radius**, and (S3) **applies it under guards** so a slipped write **auto-reverts**.
 
 ### 1a · Propose → dry-run → blast radius (S2, MERGED)
@@ -80,7 +80,7 @@ The measurement backend is the `Rehearsal` trait — the clone-provider seam
   on the primary** — the clone inherits prod's catalog, RLS policies, and column
   grants byte-for-byte (parity is *inherent*).
 
-Both are proven against the live backend (env-gated `PG_BUMPERS_IT=1`; now exercised across the 14-18 CI matrix). The clone path's
+Both are proven against the live backend (env-gated `PG_BRAKES_IT=1`; now exercised across the 14-18 CI matrix). The clone path's
 zero-prod-impact is asserted in
 [`tests/clone_governance_it.rs::marquee_rehearses_on_clone_with_zero_primary_impact`](../crates/clone-orchestrator/tests/clone_governance_it.rs)
 — the primary's balances are **byte-identical** before/after and the *same*
@@ -90,14 +90,14 @@ primary backend PID served both reads (the rehearsal never opened a txn on prod)
 
 ```sh
 # Baseline (in-txn) dry-run against a throwaway Postgres cluster:
-PG_BUMPERS_IT=1 cargo test -p pgb-clone-orchestrator --test dry_run_it -- --nocapture
+PG_BRAKES_IT=1 cargo test -p pgb-clone-orchestrator --test dry_run_it -- --nocapture
 
 # The clone-provider path (real pg_basebackup → isolated clone → zero prod impact):
-PG_BUMPERS_IT=1 cargo test -p pgb-clone-orchestrator --test clone_governance_it -- --nocapture
+PG_BRAKES_IT=1 cargo test -p pgb-clone-orchestrator --test clone_governance_it -- --nocapture
 ```
 
 (DSN defaults: the dry-run IT defaults to a dedicated throwaway port — override
-with `PG_BUMPERS_PGURL`; the clone-governance IT spins its own clusters. See
+with `PG_BRAKES_PGURL`; the clone-governance IT spins its own clusters. See
 [`docs/quickstart.md`](quickstart.md) §4.)
 
 #### What you see — the blast-radius record (real shape, real values)
@@ -238,7 +238,7 @@ applies the un-foolable backstops. **All of this is merged (S1).**
 This is the attack that bypassed a well-known read-only Postgres MCP:
 statement-stacking over the **simple-query** protocol.
 
-pg_bumpers kills it structurally. The gate
+pg_brakes kills it structurally. The gate
 ([`crates/proxy/src/enforce.rs`](../crates/proxy/src/enforce.rs)) is
 **extended-protocol-only**: a simple `Query` ('Q') frame — the *only* wire path
 that permits multiple statements in one message — is **rejected outright**, before
@@ -338,7 +338,7 @@ TLS is the one remaining deferral — SPEC.amendments S1.)
 
 ```sh
 deploy/local-stack.sh up
-PG_BUMPERS_IT=1 cargo test -p pgb-proxy --test proxy_it -- --nocapture
+PG_BRAKES_IT=1 cargo test -p pgb-proxy --test proxy_it -- --nocapture
 deploy/local-stack.sh down
 ```
 

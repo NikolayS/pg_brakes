@@ -1,9 +1,9 @@
 //! **DB-backed** slice of the deterministic FP/FN gate (SPEC §13.5, §10.6),
-//! env-gated behind `PG_BUMPERS_IT=1` so CI's fast `cargo test` skips it (the
+//! env-gated behind `PG_BRAKES_IT=1` so CI's fast `cargo test` skips it (the
 //! crate still builds/links). The CI integration job that runs this lands in #44.
 //!
 //! ```sh
-//! PG_BUMPERS_IT=1 cargo test -p dbsafe-bench --test gate_it -- --nocapture
+//! PG_BRAKES_IT=1 cargo test -p dbsafe-bench --test gate_it -- --nocapture
 //! ```
 //!
 //! This proves the corpus's **direct-to-DB-bypass** scenario against a REAL,
@@ -25,7 +25,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const IT_ENV: &str = "PG_BUMPERS_IT";
+const IT_ENV: &str = "PG_BRAKES_IT";
 const AGENT_USER: &str = "pgb_agent";
 const AGENT_PASSWORD: &str = "pgb_agent_dev_pw";
 const PORT: u16 = 54390;
@@ -36,12 +36,12 @@ fn it_enabled() -> bool {
 }
 
 /// The PG bin dir, via the ONE shared resolver (issues #44, #102). Precedence
-/// (unified across every IT): `PG_BUMPERS_PG_BIN` (non-empty) →
-/// `PG_BUMPERS_PGBIN` (legacy, non-empty) → the version-neutral Homebrew keg path.
+/// (unified across every IT): `PG_BRAKES_PG_BIN` (non-empty) →
+/// `PG_BRAKES_PGBIN` (legacy, non-empty) → the version-neutral Homebrew keg path.
 /// The precedence — including the set-but-empty fall-through — is unit-tested in
 /// `pgb-test-support` against this exact function. Version-agnostic across PG 14-18.
 fn pg_bin() -> PathBuf {
-    pgb_test_support::resolve_pg_bin("PG_BUMPERS_PGBIN")
+    pgb_test_support::resolve_pg_bin("PG_BRAKES_PGBIN")
 }
 
 fn tool(name: &str) -> PathBuf {

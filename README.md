@@ -1,6 +1,6 @@
-# pg_bumpers
+# pg_brakes
 
-[![CI](https://github.com/NikolayS/pg_bumpers/actions/workflows/ci.yml/badge.svg)](https://github.com/NikolayS/pg_bumpers/actions/workflows/ci.yml)
+[![CI](https://github.com/NikolayS/pg_brakes/actions/workflows/ci.yml/badge.svg)](https://github.com/NikolayS/pg_brakes/actions/workflows/ci.yml)
 ![license](https://img.shields.io/badge/license-Apache--2.0-3ddc97)
 ![postgres](https://img.shields.io/badge/PostgreSQL-14--18-3ddc97)
 
@@ -27,7 +27,7 @@ public failures are not hypothetical:
   statement-stacking** (`COMMIT; DROP SCHEMA …` smuggled through a "read-only"
   path).
 
-App-layer "please be careful" prompts don't stop this. pg_bumpers puts a
+App-layer "please be careful" prompts don't stop this. pg_brakes puts a
 **deterministic safety floor** — native Postgres roles, byte/time budgets, and a
 bounded-and-reversible write path — between the agent and your data. No language
 model sits in that floor; it holds even if the agent is fully compromised.
@@ -61,10 +61,10 @@ The safety guarantee is the **deterministic floor**. An LLM risk-gate is planned
 to *tighten* it further (block/hold/escalate, never loosen), but in this MVP that
 gate is a stub that returns `Allow` — the floor is doing all the work.
 
-## Get started — point pg_bumpers at YOUR existing PostgreSQL (14–18)
+## Get started — point pg_brakes at YOUR existing PostgreSQL (14–18)
 
-**The first-run path is "point pg_bumpers at your existing database."** You bring
-your own production Postgres; pg_bumpers never asks you to spin one up. You declare
+**The first-run path is "point pg_brakes at your existing database."** You bring
+your own production Postgres; pg_brakes never asks you to spin one up. You declare
 where your database lives in `policy.yaml`, apply the canonical role hardening to it,
 verify with one command, and launch the daemons against your DSNs (SPEC §0.5).
 
@@ -94,10 +94,10 @@ inject extra libpq DSN keywords). See
 # policy.yaml — point at YOUR database (no literal passwords in this file)
 primary:
   host: db.internal          # your existing primary
-  port: 5432                 # your real port — pg_bumpers never touches a throwaway cluster
+  port: 5432                 # your real port — pg_brakes never touches a throwaway cluster
   database: app
   role: pgb_agent            # the hardened WALL role (step 2)
-  secret_ref: "kms://pg-bumpers/primary-pw/v1"   # OPTIONAL forward-compat placeholder; NOT
+  secret_ref: "kms://pg-brakes/primary-pw/v1"   # OPTIONAL forward-compat placeholder; NOT
                                                  # resolved yet — password comes from PGB_BACKEND_PASSWORD
 replica:                     # OPTIONAL read replica (reads route here under §12)
   target: { host: replica.internal, port: 5432, database: app, role: pgb_agent }
@@ -206,7 +206,7 @@ The agent-facing MCP server is the native Rust **`pgb-mcp`** (crate `crates/mcp`
 Point it at the **proxy** (not the raw database) and the `_meta` reader:
 
 ```sh
-claude mcp add pg-bumpers \
+claude mcp add pg-brakes \
   --env PGB_PROXY_HOST=127.0.0.1 \
   --env PGB_PROXY_PORT=6432 \
   --env PGB_PROXY_DB=app \
@@ -220,7 +220,7 @@ claude mcp add pg-bumpers \
   -- /path/to/target/release/pgb-mcp
 ```
 
-Claude Code now has the nine pg_bumpers tools, all flowing through the
+Claude Code now has the nine pg_brakes tools, all flowing through the
 deterministic floor: a `DROP TABLE` is **refused**, a no-`WHERE` `DELETE` is
 **bounded + held for approval**, runaway reads are **killed**, and every action
 lands on the tamper-evident `_meta` chain you can `pgb-cli verify`.
@@ -245,7 +245,7 @@ get refused and a bounded write get approved.
 > throwaway Postgres clusters on **dedicated high ports** (it never touches
 > `5432`) and tears them down cleanly. The agent-facing MCP server is the native
 > Rust **`pgb-mcp`** (crate `crates/mcp`) — the one and only deployable MCP server
-> ([EPIC #83](https://github.com/NikolayS/pg_bumpers/issues/83) is complete; the
+> ([EPIC #83](https://github.com/NikolayS/pg_brakes/issues/83) is complete; the
 > old TS `mcp/server` is removed).
 
 ### 1. Prerequisites
@@ -254,20 +254,20 @@ get refused and a bounded write get approved.
 - **PostgreSQL 14–18** (any supported major — the proxy + WALL are
   version-agnostic). On macOS, a Homebrew keg works; the launcher resolves
   `initdb` / `pg_ctl` from the version-neutral `postgresql` keg by default, or
-  set `PG_BUMPERS_PG_BIN` to a specific keg's `bin`:
+  set `PG_BRAKES_PG_BIN` to a specific keg's `bin`:
   ```sh
   brew install postgresql          # latest stable, or `postgresql@17` etc.
   export PATH="/opt/homebrew/opt/postgresql/bin:$PATH"
   # To pin a specific major for the launcher/ITs:
-  #   export PG_BUMPERS_PG_BIN=/opt/homebrew/opt/postgresql@17/bin
+  #   export PG_BRAKES_PG_BIN=/opt/homebrew/opt/postgresql@17/bin
   ```
 - **[Claude Code](https://claude.com/claude-code)** (the agent you'll connect)
 
 ### 2. Clone and build
 
 ```sh
-git clone https://github.com/NikolayS/pg_bumpers.git
-cd pg_bumpers
+git clone https://github.com/NikolayS/pg_brakes.git
+cd pg_brakes
 ```
 
 `deploy/up.sh` builds the binaries for you on first run; you can also build them
@@ -288,18 +288,18 @@ warden, and prints a ready-to-paste connect line. Real output:
 
 ```text
 ================================================================================
- pg_bumpers stack is UP. Reads route through pgb-proxy (NOT raw Postgres). :5432 untouched.
+ pg_brakes stack is UP. Reads route through pgb-proxy (NOT raw Postgres). :5432 untouched.
 ================================================================================
 
   pgb-proxy  : 127.0.0.1:6432   (agent SCRAM endpoint, TLS OFF dev-mode, WALL role pgb_agent)
-  pgb-applyd : /tmp/pg_bumpers-up/applyd.sock        (write-path Unix socket)
+  pgb-applyd : /tmp/pg_brakes-up/applyd.sock        (write-path Unix socket)
   pgb-warden : live
   Postgres   : primary 54321, meta 54323  (throwaway; NEVER 5432)
   demo DB    : pgb_demo  (accounts read surface + the _meta audit chain)
 
   Connect a REAL Claude Code to this stack — paste this single line:
 
-  claude mcp add pg-bumpers \
+  claude mcp add pg-brakes \
     --env PGB_PROXY_HOST=127.0.0.1 \
     --env PGB_PROXY_PORT=6432 \
     --env PGB_PROXY_DB=pgb_demo \
@@ -309,13 +309,13 @@ warden, and prints a ready-to-paste connect line. Real output:
     --env PGB_PROXY_REQUIRE_TLS=false \
     --env PGB_ROLE=pgb_agent \
     --env PGB_SESSION_ID=pgb-demo-session \
-    --env PGB_APPLYD_SOCKET=/tmp/pg_bumpers-up/applyd.sock \
+    --env PGB_APPLYD_SOCKET=/tmp/pg_brakes-up/applyd.sock \
     --env PGB_META_DSN='host=127.0.0.1 port=54321 dbname=pgb_demo user=pgb_audit_writer password=...' \
     -- <repo>/target/debug/pgb-mcp
 ```
 
 **Paste the exact `claude mcp add` line `up.sh` printed** into your shell (the
-paths are filled in for your machine). Claude Code now has nine pg_bumpers tools.
+paths are filled in for your machine). Claude Code now has nine pg_brakes tools.
 
 ### 4. Drive it from Claude Code
 
@@ -395,7 +395,7 @@ shown in `deploy/README.md`; a `pgb-cli`/operator UI hop is fast-follow.)
 ```sh
 PGB_META_DSN='host=127.0.0.1 port=54321 dbname=pgb_demo user=pgb_audit_writer password=pgb_audit_writer_dev_pw' \
 PGB_AUDIT_SIGNING_KEY=pgb-audit-signing-key-dev-000001 \
-PGB_ANCHOR_PATH=/tmp/pg_bumpers-up/verify.anchor.worm \
+PGB_ANCHOR_PATH=/tmp/pg_brakes-up/verify.anchor.worm \
   target/debug/pgb-cli verify
 ```
 
@@ -424,14 +424,14 @@ verifies `:5432` was never touched.
 
 > The same end-to-end flow runs as env-gated Rust integration tests against a
 > throwaway Postgres:
-> `PG_BUMPERS_IT=1 cargo test -p pgb-mcp --test write_path_e2e --test read_path_e2e`
+> `PG_BRAKES_IT=1 cargo test -p pgb-mcp --test write_path_e2e --test read_path_e2e`
 > drives the shipped `pgb-mcp` handler through the write path (via `pgb-applyd`)
 > and the read path (via `pgb-proxy`) — see
 > [`deploy/up.transcript.txt`](deploy/up.transcript.txt) for a captured `up.sh` run.
 
 ## How it works
 
-pg_bumpers is four layers plus a mandatory network boundary. The first two are
+pg_brakes is four layers plus a mandatory network boundary. The first two are
 **native Postgres** and hold even against a hostile raw client; the proxy and
 write path add enforcement and the agent-facing API.
 
@@ -460,7 +460,7 @@ safety integration suite against every major in that range (spec v0.8.1 §0.5).
   audit chain; and the MCP tool surface — all exercised end-to-end (BYO above; the
   demo fixture below).
 - **Deferred / fast-follow:** the LLM risk-gate (the `RiskEngine` is a stub
-  returning `Allow`); the native Rust `pgb-mcp` ([EPIC #83](https://github.com/NikolayS/pg_bumpers/issues/83));
+  returning `Allow`); the native Rust `pgb-mcp` ([EPIC #83](https://github.com/NikolayS/pg_brakes/issues/83));
   DDL / multi-statement transactions / multi-DB; an operator approval UI; and a
   managed clone provider for zero-impact rehearsal.
 
@@ -470,8 +470,8 @@ Known limitations and intentional deviations are documented honestly:
 
 ## Contributing
 
-Building on pg_bumpers? The engineering process — the red/green TDD discipline,
-the CI gates, the `PG_BUMPERS_IT` integration convention, the **CI/dev/test fixture
+Building on pg_brakes? The engineering process — the red/green TDD discipline,
+the CI gates, the `PG_BRAKES_IT` integration convention, the **CI/dev/test fixture
 stack** (`local-stack.sh` / `wall_matrix.sh` / `smoke.sh` — a throwaway substrate,
 not the onboarding flow), test-port discipline, and the PR lifecycle — lives in
 **[`docs/development.md`](docs/development.md)**. The deploy stack (the fixture

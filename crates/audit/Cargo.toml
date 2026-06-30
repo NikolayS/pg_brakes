@@ -1,6 +1,6 @@
 [package]
 name = "pgb-audit"
-description = "pg_bumpers tamper-evident audit: append-only hash-chained records with external anchoring."
+description = "pg_brakes tamper-evident audit: append-only hash-chained records with external anchoring."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -15,7 +15,7 @@ name = "pgb_audit"
 [features]
 # The Postgres `_meta` sink is behind a default-on feature so the pure chain +
 # in-memory sink can be built/tested without a DB client when desired. The
-# env-gated integration test (`PG_BUMPERS_IT=1`) needs this feature.
+# env-gated integration test (`PG_BRAKES_IT=1`) needs this feature.
 default = ["pg"]
 pg = ["dep:postgres"]
 

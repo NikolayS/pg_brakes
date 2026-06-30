@@ -44,13 +44,13 @@ pub mod harness;
 /// Environment variable that gates the DB-touching integration tests.
 ///
 /// CI's fast `cargo test` job runs with this **unset**, so the integration
-/// tests skip (and the crate still compiles). Set `PG_BUMPERS_IT=1` to run the
+/// tests skip (and the crate still compiles). Set `PG_BRAKES_IT=1` to run the
 /// spike against a live PG18 cluster.
-pub const IT_ENV: &str = "PG_BUMPERS_IT";
+pub const IT_ENV: &str = "PG_BRAKES_IT";
 
 /// Default libpq connection string for the throwaway PG18 cluster on port 55431.
 ///
-/// Overridable via the `PG_BUMPERS_PGURL` env var. **Never** points at the
+/// Overridable via the `PG_BRAKES_PGURL` env var. **Never** points at the
 /// founder's 5432 cluster.
 pub const DEFAULT_PGURL: &str = "host=127.0.0.1 port=55431 user=postgres dbname=postgres";
 
@@ -62,5 +62,5 @@ pub fn it_enabled() -> bool {
 
 /// The base connection string (env override or [`DEFAULT_PGURL`]).
 pub fn base_pgurl() -> String {
-    std::env::var("PG_BUMPERS_PGURL").unwrap_or_else(|_| DEFAULT_PGURL.to_string())
+    std::env::var("PG_BRAKES_PGURL").unwrap_or_else(|_| DEFAULT_PGURL.to_string())
 }

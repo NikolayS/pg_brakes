@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# pg_bumpers — Layer 1 WALL + Layer 0 boundary: the role-hardening TEST MATRIX.
+# pg_brakes — Layer 1 WALL + Layer 0 boundary: the role-hardening TEST MATRIX.
 # =====================================================================================
-# Env-gated on PG_BUMPERS_IT=1 (the project integration-test gate). Spins a DEDICATED,
+# Env-gated on PG_BRAKES_IT=1 (the project integration-test gate). Spins a DEDICATED,
 # throwaway Postgres 18 cluster on port 54331 under a temp dir (never collides with
 # local-stack's 54321-3, and NEVER touches the founder's 5432), applies the hardened-role
 # SQL + the Layer 0 boundary pg_hba, then asserts ONE matrix row per check by ATTEMPTING
@@ -35,8 +35,8 @@
 # wall, hardened".
 #
 # Usage:
-#   PG_BUMPERS_IT=1 deploy/test/wall_matrix.sh           # GREEN: all rows pass, exit 0
-#   PG_BUMPERS_IT=1 deploy/test/wall_matrix.sh --red     # RED:  denies fail, exit non-0
+#   PG_BRAKES_IT=1 deploy/test/wall_matrix.sh           # GREEN: all rows pass, exit 0
+#   PG_BRAKES_IT=1 deploy/test/wall_matrix.sh --red     # RED:  denies fail, exit non-0
 #   deploy/test/wall_matrix.sh                           # gate unset → SKIP (exit 0)
 # =====================================================================================
 set -Eeuo pipefail
@@ -45,11 +45,11 @@ IFS=$'\n\t'
 # --------------------------------------------------------------------------------------
 # Config
 # --------------------------------------------------------------------------------------
-# PG bin dir. Precedence (unified — issues #44, #102): PG_BUMPERS_PG_BIN → PGBIN
+# PG bin dir. Precedence (unified — issues #44, #102): PG_BRAKES_PG_BIN → PGBIN
 # (legacy) → the version-neutral Homebrew keg path (macOS dev fallback).
 # Version-agnostic across the supported PG 14-18 range (the WALL matrix is the
 # very assertion that the hardened-role SQL applies on every supported major).
-PGBIN="${PG_BUMPERS_PG_BIN:-${PGBIN:-/opt/homebrew/opt/postgresql/bin}}"
+PGBIN="${PG_BRAKES_PG_BIN:-${PGBIN:-/opt/homebrew/opt/postgresql/bin}}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEPLOY_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 SQL_FILE="$DEPLOY_DIR/sql/10_hardened_role.sql"
@@ -60,7 +60,7 @@ DEMO_SEED_FILE="$DEPLOY_DIR/sql/20_demo_seed.sql"
 HBA_RENDER="$DEPLOY_DIR/hba/render-hba.sh"
 
 # Dedicated test port + temp data dir. 54331 ∉ {54321,54322,54323,5432}.
-TEST_PORT="${PG_BUMPERS_WALL_PORT:-54331}"
+TEST_PORT="${PG_BRAKES_WALL_PORT:-54331}"
 AGENT_ROLE="pgb_agent"
 AGENT_PW="pgb_agent_dev_pw"           # must match deploy/sql/10_hardened_role.sql default
 AGENT_DB="postgres"
@@ -74,8 +74,8 @@ MODE="green"
 # --------------------------------------------------------------------------------------
 # Gate
 # --------------------------------------------------------------------------------------
-if [ "${PG_BUMPERS_IT:-0}" != "1" ]; then
-  echo "[wall] PG_BUMPERS_IT != 1 — skipping role-hardening matrix (set PG_BUMPERS_IT=1 to run)."
+if [ "${PG_BRAKES_IT:-0}" != "1" ]; then
+  echo "[wall] PG_BRAKES_IT != 1 — skipping role-hardening matrix (set PG_BRAKES_IT=1 to run)."
   exit 0
 fi
 for b in initdb pg_ctl psql pg_isready; do
@@ -118,7 +118,7 @@ trap cleanup EXIT INT TERM
 # --------------------------------------------------------------------------------------
 [ "$TEST_PORT" != "5432" ] || { echo "[wall] FAIL: refusing TEST_PORT=5432 (the founder's cluster)" >&2; exit 1; }
 if lsof -tiTCP:"$TEST_PORT" -sTCP:LISTEN >/dev/null 2>&1; then
-  echo "[wall] FAIL: port $TEST_PORT already bound — refusing to collide (set PG_BUMPERS_WALL_PORT)" >&2
+  echo "[wall] FAIL: port $TEST_PORT already bound — refusing to collide (set PG_BRAKES_WALL_PORT)" >&2
   exit 1
 fi
 
@@ -134,7 +134,7 @@ log "mode=$MODE — initdb dedicated cluster on :$TEST_PORT under $DATADIR"
 
 cat >> "$DATADIR/data/postgresql.conf" <<EOF
 
-# pg_bumpers wall-matrix test cluster
+# pg_brakes wall-matrix test cluster
 listen_addresses = '$NONPROXY_HOST,$PROXY_HOST'
 port = $TEST_PORT
 # Pin the socket dir to our (short, writable) scratch dir. PGDG PostgreSQL on

@@ -52,7 +52,7 @@ fn main() {
             repl_user,
             dbname,
         },
-        owner: "orphan-test@pg-bumpers".into(),
+        owner: "orphan-test@pg-brakes".into(),
     };
     let mut provider = LocalCloneProvider::new(cfg, ledger);
 

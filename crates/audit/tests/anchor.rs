@@ -15,7 +15,7 @@
 //! chain against the anchored head **fails** — the attacker cannot forge the
 //! signature over the original head.
 //!
-//! These tests are DB-free and deterministic (no `PG_BUMPERS_IT`, no wall
+//! These tests are DB-free and deterministic (no `PG_BRAKES_IT`, no wall
 //! clock). The env-gated PG18 path lives in `tests/pg_meta_it.rs`.
 
 use pgb_audit::anchor::{
