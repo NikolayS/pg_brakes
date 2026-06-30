@@ -1,4 +1,4 @@
-# pg_bumpers — brief
+# pg_brakes — brief
 
 ![license](https://img.shields.io/badge/license-Apache--2.0-3ddc97)
 ![spec](https://img.shields.io/badge/SPEC-v0.8%20·%20build--frozen-5b8cff)
