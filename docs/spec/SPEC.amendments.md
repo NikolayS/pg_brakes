@@ -161,7 +161,19 @@ passthrough + TLS").
 
 ### Un-foolable enforcement actually proven (issue #22, against live PG18)
 
-The classifier is **advisory and foolable** (e.g. `pg_sleep` classifies as a read). The
+The classifier is **advisory and foolable** (e.g. `pg_sleep` classifies as a read).
+
+> **Superseded by A-M2a (#114/#115) — the classifier is now a fail-closed allowlist:**
+> as of M2a (#114 function-call gate + #115 operator/cast/lock classes) a `SELECT` is
+> `Read` **only if every function it references is on the curated read-safe allowlist**,
+> so `pg_sleep`/`nextval`/`setval`/`lo_*`/`pg_read_file` classify `NotRead` → **Blocked at
+> the proxy floor** — the "advisory and foolable / `pg_sleep` classifies as a read"
+> statement above describes the *pre-M2a* (issue-#22 era) behavior and is retained here as
+> historical record. The `statement_timeout` + byte/row cutoff remain the un-foolable
+> backstops *behind* the classifier (for anything that slips past it), not the sole
+> defense against `pg_sleep`.
+
+The
 proxy therefore relies on the un-foolable backstops, all exercised in the env-gated
 `crates/proxy/tests/proxy_it.rs` against the local-stack WALL role: extended-protocol-only
 (the marquee `COMMIT; DROP SCHEMA public CASCADE` simple-query **BLOCKED**, schema intact),
