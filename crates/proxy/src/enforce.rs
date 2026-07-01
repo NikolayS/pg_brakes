@@ -15,8 +15,12 @@
 //!    permits multiple statements in one message.
 //! 2. **SQL gate** (read-only): the SQL text carried by an extended-protocol
 //!    `Parse` is classified by [`pgb_pgwire::classify`]; anything not provably a
-//!    single read is **blocked**. The classifier is advisory — the WALL role is
-//!    the un-foolable backstop — but the proxy still gates on it and audits.
+//!    single read is **blocked**. Since M2a (#114) the classifier fail-closes on
+//!    non-allowlisted function calls, so it is the **real gate** for the
+//!    function-call write class (`SELECT lo_create(…)`/`setval(…)`/`writing_fn()`
+//!    are Blocked here); the WALL role + `statement_timeout` + byte cutoff remain
+//!    the un-foolable backstops for everything else. The proxy audits every
+//!    decision.
 
 use pgb_pgwire::{
     Classification, FrontendMessage, NotReadReason, RejectReason, classify_frontend_tag,
@@ -308,16 +312,64 @@ mod tests {
     }
 
     #[test]
-    fn classifier_blind_spot_pg_sleep_classifies_as_read() {
-        // Honesty: the advisory classifier does NOT catch pg_sleep — it is a
-        // SELECT and classifies as Read. The proxy lets it through the gate and
-        // relies on statement_timeout (an un-foolable backstop) to stop it. This
-        // test documents the blind spot so the timeout backstop is justified.
+    fn function_call_writes_are_blocked_at_the_floor_gate() {
+        // M2a (#114): the read-only classifier is now the REAL gate for the
+        // function-call write class — a `SELECT` is a read ONLY IF every function
+        // it references is on the curated read-safe allowlist. These
+        // side-effecting/unknown-function SELECTs are Blocked at the proxy FLOOR
+        // gate (they never reach the backend), not merely caught by the downstream
+        // statement_timeout / WALL role. Fail-closed: `lo_*` writers, sequence
+        // mutators, server-file readers, `pg_sleep`, `dblink`, and EVERY
+        // user/unknown/qualified `schema.fn()` — including a SECURITY DEFINER fn.
         let g = Enforcement::new();
-        assert!(matches!(
-            g.gate(&parse("SELECT pg_sleep(30)")),
-            GateDecision::Allow { .. }
-        ));
+        for sql in [
+            "SELECT lo_create(0)",
+            "SELECT lo_put(lo_create(0), 0, 'x')",
+            "SELECT lowrite(0, 'x')",
+            "SELECT lo_import('/etc/passwd')",
+            "SELECT setval('s', 1)",
+            "SELECT nextval('s')",
+            "SELECT pg_read_file('/etc/passwd')",
+            "SELECT pg_sleep(30)",
+            "SELECT dblink('dbname=x', 'DELETE FROM t')",
+            "SELECT public.some_security_definer_write_fn()",
+            "SELECT public.writing_fn() FROM public.allowed_read",
+            "WITH w AS (SELECT lo_create(0)) SELECT * FROM w",
+            "SELECT (SELECT setval('s', 1))",
+            "SELECT * FROM public.allowed_read WHERE public.writing_fn()",
+            "SELECT * FROM my_writing_table_fn(1)",
+        ] {
+            match g.gate(&parse(sql)) {
+                GateDecision::Block { code, .. } => {
+                    assert_eq!(
+                        code, "write_on_readonly",
+                        "{sql} should be BLOCKED at the floor"
+                    )
+                }
+                other => panic!("expected Block for {sql}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn allowlisted_read_functions_still_pass_the_floor_gate() {
+        // GREEN guard: the legitimate read built-ins the agent needs must still be
+        // Allowed through the floor gate so real reads keep working.
+        let g = Enforcement::new();
+        for sql in [
+            "SELECT count(*) FROM public.allowed_read",
+            "SELECT max(id), min(id) FROM public.allowed_read",
+            "SELECT now()",
+            "SELECT current_setting('search_path')",
+            "SELECT jsonb_build_object('a', 1)",
+            "SELECT * FROM public.allowed_read WHERE lower(label) = 'x'",
+            "SELECT * FROM generate_series(1, 5) g",
+        ] {
+            match g.gate(&parse(sql)) {
+                GateDecision::Allow { sql: Some(_) } => {}
+                other => panic!("expected Allow for {sql}, got {other:?}"),
+            }
+        }
     }
 
     #[test]

@@ -54,6 +54,19 @@
 //! Together these make 2b assert the real invariant — "a genuinely-stacked write
 //! must never classify as a safe read" — with no false positives. The bare-tail
 //! assertion (a lone write must be `NotRead`) is unconditional and unaffected.
+//!
+//! ## M2a (#114) — the oracle is unchanged and STILL sound
+//!
+//! M2a tightened the classifier so a `SELECT` is `Read` only if every function it
+//! references is on a curated read-safe allowlist (non-allowlisted function calls
+//! — `lo_create`/`setval`/`pg_read_file`/`public.writing_fn()`/… — are now
+//! `NotRead`). This oracle NEVER assumed function-bearing SELECTs are `Read`; it
+//! only asserts the *tighten-only* safety direction — that writes / DDL / genuine
+//! statement-stacks are NEVER `Read`. Making MORE inputs `NotRead` can only
+//! REINFORCE those assertions, never break them (invariant 2a's determinism and
+//! reason-freeness of `Read` also still hold: `Read` is still returned only for a
+//! provable single read, now a stricter set). So no oracle change is needed; the
+//! target keeps its teeth against a classifier that would wrongly admit a write.
 
 #![no_main]
 

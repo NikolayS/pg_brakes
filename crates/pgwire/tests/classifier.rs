@@ -34,6 +34,135 @@ fn selects_are_read() {
     assert_read("SELECT 1 UNION SELECT 2");
 }
 
+// -------------------------------------------------------------------------
+// M2a (#114): the read-only classifier fail-closes on NON-ALLOWLISTED function
+// calls. Before M2a the classifier was projection-blind — it inspected only the
+// statement KIND + FROM/CTE table factors, never the projection/WHERE/etc.
+// EXPRESSIONS — so a `SELECT lo_create(0)` / `SELECT setval(...)` /
+// `SELECT public.writing_fn()` classified as Read → Allow and the proxy forwarded
+// the write to the backend. Now a SELECT is Read ONLY IF every function it
+// references (anywhere in the AST) is on the curated read-safe allowlist;
+// otherwise NotRead → the proxy floor Blocks it. These are the RED tests.
+// -------------------------------------------------------------------------
+
+#[test]
+fn select_of_a_non_allowlisted_write_function_is_not_read() {
+    // Large-object writers — the catastrophic-FN class (KNOWN_DANGERS B-lo).
+    assert_not_read("SELECT lo_create(0)");
+    assert_not_read("SELECT lo_creat(-1)");
+    assert_not_read("SELECT lowrite(0, 'x')");
+    assert_not_read("SELECT lo_from_bytea(0, '\\x00'::bytea)");
+    assert_not_read("SELECT lo_truncate(0, 0)");
+    assert_not_read("SELECT lo_truncate64(0, 0)");
+    assert_not_read("SELECT lo_unlink(0)");
+    assert_not_read("SELECT lo_import('/etc/passwd')");
+    assert_not_read("SELECT lo_export(0, '/tmp/x')");
+    // Sequence mutators.
+    assert_not_read("SELECT setval('s', 1)");
+    assert_not_read("SELECT nextval('s')");
+    // Server-side file/dir readers (exfiltration side-channels).
+    assert_not_read("SELECT pg_read_file('/etc/passwd')");
+    assert_not_read("SELECT pg_read_binary_file('/etc/passwd')");
+    assert_not_read("SELECT pg_stat_file('/etc/passwd')");
+    assert_not_read("SELECT pg_ls_dir('/')");
+    // Sleep / dblink / and any pg_* not on the allowlist.
+    assert_not_read("SELECT pg_sleep(5)");
+    assert_not_read("SELECT dblink('dbname=x', 'DELETE FROM t')");
+    assert_not_read("SELECT pg_terminate_backend(1)");
+}
+
+#[test]
+fn select_of_a_user_or_qualified_function_is_not_read_fail_closed() {
+    // Any user/unknown/qualified schema.fn() — incl. a SECURITY DEFINER write fn
+    // that could be mislabeled STABLE — is NOT on the allowlist → NotRead.
+    assert_not_read("SELECT public.writing_fn()");
+    assert_not_read("SELECT public.some_security_definer_write_fn()");
+    assert_not_read("SELECT my_writing_fn(1, 2)");
+    assert_not_read("SELECT app.do_the_thing()");
+    // Even a name that *collides* with an allowlisted built-in becomes NotRead once
+    // it is schema-qualified (it is no longer the trusted built-in): fail-closed.
+    assert_not_read("SELECT public.count(x) FROM t");
+}
+
+#[test]
+fn write_function_hidden_in_a_nested_call_is_not_read() {
+    // A write nested as an ARGUMENT to another (even allowlisted) call must still
+    // be caught — the scan walks function arguments recursively.
+    assert_not_read("SELECT lo_put(lo_create(0), 0, 'x')");
+    assert_not_read("SELECT length(pg_read_file('/etc/passwd'))");
+    assert_not_read("SELECT coalesce(setval('s', 1), 0)");
+    assert_not_read("SELECT count(*) FROM t WHERE id = nextval('s')");
+}
+
+#[test]
+fn write_function_hidden_in_where_group_order_having_is_not_read() {
+    assert_not_read("SELECT * FROM t WHERE public.writing_fn()");
+    assert_not_read("SELECT * FROM t WHERE setval('s', 1) > 0");
+    assert_not_read("SELECT a FROM t GROUP BY a HAVING sum(nextval('s')) > 0");
+    assert_not_read("SELECT a FROM t ORDER BY lo_create(0)");
+    assert_not_read("SELECT a FROM t JOIN u ON writing_fn(t.id) = u.id");
+    // In an aggregate's FILTER/ORDER-BY clause.
+    assert_not_read("SELECT sum(x) FILTER (WHERE setval('s', 1) > 0) FROM t");
+    assert_not_read("SELECT array_agg(x ORDER BY nextval('s')) FROM t");
+}
+
+#[test]
+fn write_function_hidden_in_cte_or_subquery_is_not_read() {
+    // The exfil/destroy-via-CTE / correlated-subquery shape — the scan descends
+    // into WITH bodies and nested subqueries.
+    assert_not_read("WITH w AS (SELECT lo_create(0)) SELECT * FROM w");
+    assert_not_read("SELECT (SELECT setval('s', 1))");
+    assert_not_read("SELECT * FROM t WHERE id IN (SELECT nextval('s'))");
+    assert_not_read("SELECT * FROM (SELECT lo_create(0)) AS sub");
+}
+
+#[test]
+fn table_valued_write_function_in_the_from_clause_is_not_read() {
+    // Table-valued function calls in FROM/JOIN are NOT `Expr::Function` nodes —
+    // they are table factors with args — so they need their own allowlist check.
+    // A plain table read (`FROM t`) has no args and stays Read; a table-fn call
+    // whose name is non-allowlisted is NotRead.
+    assert_not_read("SELECT * FROM my_writing_table_fn(1)");
+    assert_not_read("SELECT * FROM lo_import('/etc/passwd')");
+    assert_not_read("SELECT * FROM t JOIN dblink('x', 'y') u ON true");
+    // A write nested inside a table-fn's args is also caught.
+    assert_not_read("SELECT * FROM generate_series(1, lo_create(0))");
+}
+
+#[test]
+fn explain_of_a_function_call_write_is_not_read() {
+    // The explain-hole must not reopen for the function-call write class: an
+    // EXPLAIN whose inner read references a non-allowlisted function is NotRead
+    // (the scan descends into the EXPLAIN's inner statement). A plan-only EXPLAIN
+    // of an allowlisted read stays Read so `explain_plan` keeps working.
+    assert_not_read("EXPLAIN SELECT lo_create(0)");
+    assert_not_read("EXPLAIN (FORMAT JSON) SELECT public.writing_fn()");
+    assert_not_read("EXPLAIN SELECT setval('s', 1)");
+    assert_read("EXPLAIN SELECT count(*) FROM t");
+    assert_read("EXPLAIN (FORMAT JSON) SELECT now()");
+}
+
+#[test]
+fn select_of_allowlisted_read_functions_is_read() {
+    // The legitimate read built-ins the agent needs — these must stay Read.
+    assert_read("SELECT count(*) FROM t");
+    assert_read("SELECT max(x), min(x), sum(x), avg(x) FROM t");
+    assert_read("SELECT array_agg(x), string_agg(name, ','), jsonb_agg(x) FROM t");
+    assert_read("SELECT now()");
+    assert_read("SELECT current_timestamp, current_date, current_setting('search_path')");
+    assert_read("SELECT date_trunc('day', ts), extract(year FROM ts), age(ts) FROM t");
+    assert_read("SELECT jsonb_build_object('a', 1), json_build_array(1, 2)");
+    assert_read("SELECT * FROM t WHERE lower(name) = $1");
+    assert_read("SELECT upper(name), length(name), trim(name), substr(name, 1, 3) FROM t");
+    assert_read("SELECT coalesce(a, 0), nullif(a, b), greatest(a, b), least(a, b) FROM t");
+    assert_read("SELECT concat(a, b), replace(a, 'x', 'y') FROM t");
+    // Table-valued read functions the tests / agent use.
+    assert_read("SELECT * FROM generate_series(1, 5) g");
+    // Nested allowlisted calls stay Read.
+    assert_read("SELECT count(distinct lower(name)) FROM t");
+    assert_read("SELECT max(length(name)) FROM t WHERE upper(name) LIKE 'A%'");
+}
+
 #[test]
 fn read_only_cte_is_read() {
     assert_read(
