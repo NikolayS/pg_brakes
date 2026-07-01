@@ -1471,15 +1471,30 @@ privilege granted to `PUBLIC`):
    agent-only default. PG15+ already denies this.
 
 On a shared BYO DB these residuals are gated **NOT by a DB-level revoke** but by the layers
-that already carry the agent's containment in the SPEC model: the **§3 Layer-0 network
-boundary** (pg_hba lets `pgb_agent` connect ONLY from the proxy host — the agent cannot make
-a direct libpq connection to reach these surfaces) **plus** the **proxy floor** (the read-
-only WALL classifier + no-write rejects any `lo_*`/`CREATE TEMP`/volatile-function-write
-statement, with cost/byte/timeout budgets and audit). The `… FROM PUBLIC` revokes were
-always *defense-in-depth* for the boundary-prevented direct-connect case; the founder
-decision (#108) is that a global blast radius that can take down a production DB is **not an
-acceptable default cost** for that extra belt. The strict opt-in `21_public_lockdown.sql`
-restores the DB-level belt-and-suspenders for a **dedicated** DB (clone-rehearsed per D1).
+that already carry the agent's containment in the SPEC model, split by path:
+
+- **Through the proxy (the realistic agent path):** the **M2a fail-closed read classifier**
+  (`pgb_pgwire::classify`, #114 + #115) is the un-foolable gate. A `SELECT` is `Read` **only
+  if every function it references is on the curated read-safe allowlist**; ANY non-allowlisted
+  function, a schema-qualified/custom operator, a qualified/`CONVERT`/`TypedString` cast, or a
+  `FOR UPDATE`/`FOR SHARE` lock makes the whole statement **NotRead → Blocked at the proxy
+  floor** (with cost/byte/timeout budgets + audit). So `SELECT lo_create(0)` / `SELECT
+  lowrite(…)` / `SELECT some_write_fn()` / `SELECT a OPERATOR(public.wop) b` /
+  `SELECT x::public.evil` are all Blocked, and `CREATE TEMP TABLE` / `CREATE TABLE public.x`
+  are DDL — already NotRead structurally. **This is what makes removing the DB-level `… FROM
+  PUBLIC` revoke from the default SAFE for the through-proxy path** — the write class above
+  cannot execute through the proxy even though the `PUBLIC` grants still exist at the DB.
+- **Direct-to-DB (agent bypassing the proxy):** prevented by the **§3 Layer-0 network
+  boundary** (pg_hba lets `pgb_agent` connect ONLY from the proxy host — the agent cannot make
+  a direct libpq connection to reach these surfaces). This boundary is now **load-bearing** for
+  the DB-level residuals in the BYO default and must be documented/enforced as such. The
+  `… FROM PUBLIC` revokes were always *defense-in-depth* for this boundary-prevented
+  direct-connect case; the founder decision (#108) is that a global blast radius that can take
+  down a production DB is **not an acceptable default cost** for that extra belt.
+
+The strict opt-in `21_public_lockdown.sql` restores the DB-level belt-and-suspenders for a
+**dedicated** DB (clone-rehearsed per D1), fully closing even the direct-to-DB residuals
+(including the PG14 direct-`CREATE` and the bare-cast B9 residual).
 
 The agent's **load-bearing containments are UNCHANGED** and still proven by the WALL matrix
 on the agent-only default across PG 14-18: NOSUPERUSER/NOINHERIT, member-of-nothing, no DML

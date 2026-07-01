@@ -134,12 +134,14 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON app.your_write_table TO pgb_applier;
 > `deploy/sql/20_demo_seed.sql`; CI/dev/test only). Also set up the `_meta` audit chain in
 > your audit DB ([`crates/audit/sql/10_audit_meta.sql`](../crates/audit/sql/10_audit_meta.sql))
 > and **restrict the agent role to the proxy host in `pg_hba.conf`** (see
-> [`deploy/hba/`](../deploy/hba/)) — that network boundary plus the proxy floor is what
-> contains the agent.
+> [`deploy/hba/`](../deploy/hba/)) — this network boundary is **load-bearing** on the
+> agent-only default: it plus the proxy read-only floor is what contains the agent.
 >
 > **Optional, DEDICATED DBs only — the strict `PUBLIC` lockdown.** On a shared DB the agent
-> keeps `PUBLIC`'s default `EXECUTE`/`TEMP`/large-object-write surfaces at the DB level
-> (gated by the network boundary + proxy floor — see [`KNOWN_BYPASSES.md`](../KNOWN_BYPASSES.md)
+> keeps `PUBLIC`'s default `EXECUTE`/`TEMP`/large-object-write surfaces at the DB level —
+> contained **through the proxy** by the fail-closed read classifier (a `SELECT lo_create()`/
+> write-function / qualified cast classifies `NotRead` → Blocked at the proxy floor) and
+> **direct-to-DB** by the network boundary (see [`KNOWN_BYPASSES.md`](../KNOWN_BYPASSES.md)
 > B-lo). If your database is **dedicated to pg_brakes** you MAY add the DB-level belt-and-
 > suspenders by applying [`deploy/sql/21_public_lockdown.sql`](../deploy/sql/21_public_lockdown.sql)
 > — ⚠️ it revokes `… FROM PUBLIC` and **can break an existing application**, so do this ONLY

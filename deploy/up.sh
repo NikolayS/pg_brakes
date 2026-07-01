@@ -148,6 +148,17 @@ log "seeding demo DB '$DEMO_DB' on the primary (audit _meta chain + accounts rea
 psql_primary postgres "SELECT 1 FROM pg_database WHERE datname='$DEMO_DB'" | grep -q 1 \
   || psql_primary postgres "CREATE DATABASE \"$DEMO_DB\""
 
+# The AGENT-ONLY hardened-role WALL (deploy/sql/10_hardened_role.sql) must be applied to the
+# DB the agent ACTUALLY connects to (issue #108). local-stack applied it to the `postgres` DB,
+# but the proxy/applyd connect to '$DEMO_DB' (PGB_BACKEND_DB below) — and the file's DB-scoped
+# statements (REVOKE CREATE / REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA public FROM pgb_agent,
+# GRANT USAGE, the TEMP drift-revoke) act on current_database(). Applying it here re-targets
+# those to '$DEMO_DB' so the agent's DB-level hardening protects the demo DB it uses, not just
+# `postgres`. Idempotent (roles use IF NOT EXISTS; re-asserts the hardened state).
+log "applying AGENT-ONLY hardened-role WALL to demo DB '$DEMO_DB' (deploy/sql/10_hardened_role.sql)…"
+"$PGBIN/psql" -X -h "$HOST" -p "$PRIMARY_PORT" -U postgres -d "$DEMO_DB" -v ON_ERROR_STOP=1 -q \
+  -f "$SCRIPT_DIR/sql/10_hardened_role.sql" >/dev/null
+
 # The canonical _meta schema (creates pgb_audit schema + the pgb_audit_writer and
 # SELECT-only pgb_audit_reader roles +
 # the append-only audit_log). Strip psql meta-commands the -f path tolerates but
@@ -156,8 +167,9 @@ psql_primary postgres "SELECT 1 FROM pg_database WHERE datname='$DEMO_DB'" | gre
   -f "$REPO_ROOT/crates/audit/sql/10_audit_meta.sql" >/dev/null
 
 # The hardened WALL role `pgb_agent` and the constrained applier role `pgb_applier`
-# already exist on the primary (applied by local-stack to the `postgres` DB), but
-# role-level grants on THIS demo DB's objects must be granted here. Seed the demo
+# already exist on the primary (created by local-stack; the agent-only DB-level hardening
+# was just re-applied to THIS demo DB above), but the object-level grants on THIS demo DB's
+# tables must be granted here. Seed the demo
 # tables + GRANT the read surface to the WALL role so reads THROUGH THE PROXY (which
 # connects as pgb_agent) succeed, and GRANT DML on the writable table to pgb_applier
 # (S5 #77) so applyd's guarded apply runs under the constrained, DDL-incapable role

@@ -15,10 +15,18 @@
 -- retains PUBLIC's default function-EXECUTE, TEMP, and in-DB large-object write built-ins
 -- at the DB level (this file no longer revokes them globally). The agent's containment
 -- then rests on its AGENT-SPECIFIC controls (member-of-nothing, NOSUPERUSER/NOINHERIT, no
--- write grant, default-deny on data) PLUS the §3 Layer-0 NETWORK BOUNDARY (pg_hba lets the
--- agent connect ONLY from the proxy host) + the PROXY FLOOR (read-only classifier, WALL
--- no-write, cost/byte/timeout, audit) — NOT a global PUBLIC revoke. The strict opt-in file
--- restores the DB-level belt-and-suspenders for dedicated DBs. See KNOWN_BYPASSES.md (B-lo).
+-- write grant, default-deny on data) PLUS two orthogonal layers, split by path:
+--   • THROUGH THE PROXY (the realistic agent path): the M2a fail-closed read classifier
+--     (crates/pgwire, #114/#115) Blocks the whole PUBLIC-default write class — SELECT
+--     lo_create()/lowrite()/any non-allowlisted or qualified fn, a custom operator, a
+--     qualified/CONVERT/TypedString cast, or a FOR-lock all classify NotRead; CREATE
+--     TEMP/CREATE TABLE public.x are DDL (NotRead). This is the un-foolable gate that
+--     makes dropping the global PUBLIC revoke SAFE for the through-proxy path.
+--   • DIRECT-TO-DB (agent bypassing the proxy): the §3 Layer-0 NETWORK BOUNDARY (pg_hba
+--     lets the agent connect ONLY from the proxy host) — now LOAD-BEARING for the
+--     DB-level residuals in this default.
+-- NOT a global PUBLIC revoke. The strict opt-in 21_public_lockdown.sql restores the
+-- DB-level belt-and-suspenders for dedicated DBs. See KNOWN_BYPASSES.md (B-lo).
 -- =====================================================================================
 -- Source of truth: docs/spec/SPEC.md (v0.8) §3 (layer 1 WALL), §4 ("Network/roles — do
 -- FIRST"), §5 (role-hardening matrix). decisions.md: "Native roles = the security wall,
@@ -327,9 +335,11 @@ GRANT USAGE ON SCHEMA public TO pgb_agent;
 --    EXECUTE to PUBLIC by default, and the agent — as a PUBLIC member — would inherit it
 --    at the DB level (the agent-only revoke above only covers functions present at apply
 --    time; there is no agent-scoped ALTER DEFAULT PRIVILEGES form, that targets a grantee
---    not the agent). Reaching such a function still requires the agent to (a) be on the DB
---    at all — gated by the §3 network boundary to the proxy host only — and (b) get a
---    write/volatile call past the proxy's read-only classifier + WALL no-write floor. The
+--    not the agent). THROUGH THE PROXY (the realistic path) such a call is Blocked by the
+--    M2a fail-closed read classifier (#114/#115): `SELECT some_fn()` is Read only if EVERY
+--    referenced function is on the read-safe allowlist, so a user/qualified/write function
+--    classifies NotRead → Blocked at the proxy floor. DIRECT-TO-DB it is gated by the §3
+--    network boundary (agent may connect only from the proxy host — now load-bearing). The
 --    strict 21_public_lockdown.sql restores the DB-level deny for dedicated DBs. pg_catalog
 --    built-ins are governed by predefined-role membership (already stripped) + the
 --    superuser bit (NOSUPERUSER), so pg_read_file/lo_import/etc. are denied regardless.
@@ -361,10 +371,13 @@ REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA public FROM pgb_agent;
 --    HONEST RESIDUAL (shared BYO DB): with this agent-only default the agent CAN still
 --    CREATE TEMP TABLE *and* CREATE a large object (lo_create/lowrite/...) at the DB level —
 --    write surfaces the global PUBLIC revoke used to close. Both are now gated NOT by a DB
---    revoke but by the PROXY FLOOR (read-only classifier + WALL no-write rejects the
---    statement) and the §3 network boundary (the agent can only reach the DB through the
---    proxy). See KNOWN_BYPASSES.md (B-lo) and SPEC.amendments.md (A-M2). The strict opt-in
---    21_public_lockdown.sql restores the DB-level TEMP + lo_* deny for dedicated DBs.
+--    revoke but, split by path: THROUGH THE PROXY by the M2a fail-closed read classifier
+--    (#114/#115) — `SELECT lo_create()`/`lowrite()`/any non-allowlisted fn classifies
+--    NotRead → Blocked at the proxy floor, and `CREATE TEMP TABLE` is DDL (NotRead too);
+--    DIRECT-TO-DB by the §3 network boundary (the agent can only reach the DB from the proxy
+--    host — now load-bearing). See KNOWN_BYPASSES.md (B-lo) and SPEC.amendments.md (A-M2).
+--    The strict opt-in 21_public_lockdown.sql restores the DB-level TEMP + lo_* deny for
+--    dedicated DBs.
 -- -------------------------------------------------------------------------------------
 -- REVOKE any DIRECT TEMP grant on the CONNECTED database (current_database()) from the
 -- AGENT (drift-defense only — see the note above; identifiers stay literal-free via
@@ -427,18 +440,25 @@ COMMIT;
 -- shared BYO DB (verified on real PG 14-18): the agent retains, at the DB level, PUBLIC's
 -- default function-EXECUTE (on funcs created after apply), TEMP on the database (CREATE TEMP
 -- TABLE), and the in-DB large-object write built-ins — none can be denied by an agent-scoped
--- revoke (they flow through PUBLIC). Those residuals are gated by the §3 network boundary +
--- the proxy read-only floor, NOT a global revoke. See KNOWN_BYPASSES.md (B-lo) and
+-- revoke (they flow through PUBLIC). Those residuals are contained NOT by a global revoke but,
+-- split by path: THROUGH THE PROXY (the realistic agent path) by the M2a fail-closed read
+-- classifier (#114/#115 — SELECT lo_create()/write-fn/non-allowlisted-or-qualified call →
+-- NotRead → Blocked; CREATE TEMP is DDL → NotRead), and DIRECT-TO-DB by the §3 network
+-- boundary (now load-bearing). See KNOWN_BYPASSES.md (B-lo) and
 -- docs/spec/SPEC.amendments.md (A-M2).
 --
 -- search_path: the role-level pin above is BEST-EFFORT defense-in-depth ONLY — a
 -- non-superuser CAN change its own role GUCs, so the agent can mutate/RESET its path.
 -- The AUTHORITATIVE pin is the PROXY (S1). The WALL's guarantee does NOT rely on
 -- search_path: with explicit fully-qualified SELECT grants as the only read surface and
--- no CREATE/no write anywhere, no search_path the agent chooses can widen access or plant
--- a trojan. deploy/test/wall_matrix.sh (which applies 20_demo_seed.sql for its fixtures)
+-- NO DML write grant (default-deny on data), no search_path the agent chooses can widen its
+-- read/DML surface or plant a trojan. (This is the GRANT-based read/DML surface — it does NOT
+-- claim "no write/CREATE anywhere": the agent-only default leaves PUBLIC's TEMP/lo_*/(PG14)
+-- CREATE defaults at the DB level, contained per the residual note above.)
+-- deploy/test/wall_matrix.sh (which applies 20_demo_seed.sql for its fixtures)
 -- asserts every deny by attempting it as the agent, AND asserts the search_path invariant
--- (agent mutates path + RESET ALL → STILL cannot read non-whitelisted data or write).
+-- (agent mutates path + RESET ALL → STILL cannot read non-whitelisted DATA or perform grant-
+-- gated DML).
 --
 -- pgb_applier (S5 #77): the constrained write-path role applyd connects as. LOGIN,
 -- NOSUPERUSER, NOCREATEDB/ROLE, NOREPLICATION, NOBYPASSRLS, no CREATE on public, owns

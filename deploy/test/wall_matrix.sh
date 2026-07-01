@@ -26,11 +26,18 @@
 #   * search_path INVARIANT (section I): the role-level search_path pin is BEST-EFFORT (a
 #     non-superuser CAN change its own role GUCs — the proxy is the authoritative pin). We
 #     assert the agent CAN mutate/RESET its path (documented PG behavior) AND that after
-#     maximal mutation + RESET ALL it STILL cannot read non-whitelisted data or write — the
-#     WALL's guarantee is the explicit-grant model, not search_path.
-#   * NO write grant to the AGENT (section C): CREATE TEMP TABLE is DENIED on the agent-only
-#     default (TEMP revoked from the AGENT directly); the in-DB large-object write built-ins
-#     are denied only under the PHASE-2 lockdown (no agent-scoped revoke exists for them).
+#     maximal mutation + RESET ALL it STILL cannot read non-whitelisted DATA (no DML grant)
+#     — the WALL's guarantee is the explicit-grant model, not search_path. (It does NOT claim
+#     "cannot write/CREATE anywhere": on the agent-only default the agent retains PUBLIC's
+#     TEMP/CREATE-on-PG14 defaults at the DB level — see the RESIDUAL rows below.)
+#   * NO DML write GRANT to the AGENT (section C): the agent has no grant on any application
+#     relation, so DML on the seeded tables is denied. But CREATE TEMP TABLE is NOT denied on
+#     the agent-only default — TEMP flows through PUBLIC and a per-role REVOKE cannot subtract
+#     it (section C asserts the agent CAN create a TEMP table as a documented RESIDUAL). The
+#     TEMP + in-DB large-object write built-ins are denied at the DB level only under the
+#     PHASE-2 lockdown (no agent-scoped revoke exists for them). THROUGH THE PROXY that same
+#     write class (SELECT lo_create()/lowrite()/CREATE TEMP) is Blocked by the M2a fail-closed
+#     classifier (#114/#115); DIRECT-TO-DB it is gated by the §3 network boundary.
 # assert_denied now requires a permission/insufficient-privilege error class (a typo or
 # connection error can no longer masquerade as a deny), and an independent BOUNDARY-RED
 # self-test proves the boundary assertion fails when the pg_hba is misconfigured.
@@ -373,13 +380,14 @@ assert_denied "no INSERT on non-whitelisted public.secret_data" \
 # inherits it via PUBLIC (the agent-scoped `REVOKE CREATE … FROM pgb_agent` is a no-op while
 # PUBLIC has it — verified on real PG14), so "agent can create in public" is a DOCUMENTED
 # PG14 RESIDUAL on the agent-only default; its DB-level deny comes only from the lockdown
-# (PHASE 2 asserts it). On PG14 the agent's create is otherwise gated by the proxy floor +
-# network boundary. (We drop any table the agent manages to create so it does not linger.)
+# (PHASE 2 asserts it). CREATE TABLE is DDL, so THROUGH THE PROXY it is Blocked structurally
+# by the read-only classifier (M2a #114/#115); DIRECT-TO-DB the PG14 create is gated by the
+# §3 network boundary. (We drop any table the agent manages to create so it does not linger.)
 if [ "$PG_MAJOR_SRV" -ge 15 ]; then
   assert_denied "no CREATE TABLE in public (PG15+: PUBLIC lacks CREATE on public; agent denied)" \
     "CREATE TABLE public.pgb_pwn (id int)"
 else
-  assert_allowed "RESIDUAL (agent-only, PG14): agent CAN CREATE TABLE in public — PG14 PUBLIC still has CREATE on schema public; not deniable agent-only (gated by proxy floor; DB-level deny only under the lockdown)" \
+  assert_allowed "RESIDUAL (agent-only, PG14): agent CAN CREATE TABLE in public — PG14 PUBLIC still has CREATE on schema public; not deniable agent-only (through-proxy: DDL Blocked by the M2a classifier; direct-to-DB: gated by the network boundary; DB-level deny only under the lockdown)" \
     "CREATE TABLE public.pgb_pwn14 (id int); SELECT 'created-pg14'" "created-pg14"
   SU "DROP TABLE IF EXISTS public.pgb_pwn14" >/dev/null
 fi
@@ -387,12 +395,14 @@ fi
 # TEMP flows through the PUBLIC grant and CANNOT be denied by an agent-scoped revoke (verified
 # on real PG 14-18: has_database_privilege(agent,…,'TEMP') stays TRUE after `REVOKE TEMPORARY …
 # FROM pgb_agent`). So the agent CAN create a temp table at the DB level; that write is gated
-# by the proxy floor + network boundary, NOT a DB revoke. We assert it SUCCEEDS here (honest
-# residual) and assert the DB-level DENY in PHASE 2 after the lockdown revokes TEMP FROM PUBLIC.
+# NOT by a DB revoke but, split by path: THROUGH THE PROXY `CREATE TEMP TABLE` is DDL, Blocked
+# structurally by the M2a read-only classifier (#114/#115); DIRECT-TO-DB by the §3 network
+# boundary. We assert it SUCCEEDS here (honest DB-level residual) and assert the DB-level DENY
+# in PHASE 2 after the lockdown revokes TEMP FROM PUBLIC.
 # (See KNOWN_BYPASSES B-lo / SPEC.amendments A-M2.) A single `CREATE TEMP TABLE` statement
 # returns no rows under -tAq (the command tag is suppressed) so we assert SUCCESS by exit code
 # only (empty `want`); the table is session-local and vanishes when this psql session ends.
-assert_allowed "RESIDUAL (agent-only): agent CAN CREATE TEMP TABLE — TEMP is a PUBLIC default, not deniable agent-only (gated by proxy floor; denied at DB level only under the lockdown)" \
+assert_allowed "RESIDUAL (agent-only): agent CAN CREATE TEMP TABLE — TEMP is a PUBLIC default, not deniable agent-only (through-proxy: DDL Blocked by the M2a classifier; direct-to-DB: gated by the network boundary; DB-level deny only under the lockdown)" \
   "CREATE TEMP TABLE pgb_residual_tmp (id int)"
 
 # --------------------------------------------------------------------------------------
@@ -424,7 +434,7 @@ fi
 # the agent-only default deliberately leaves open on a shared DB (KNOWN_BYPASSES B-lo).
 HAS_PUB_LO="$(SU "SELECT has_function_privilege('public','lo_create(oid)','EXECUTE')")"
 if [ "$HAS_PUB_LO" = "t" ]; then
-  okrow "PUBLIC-UNTOUCHED: PUBLIC still has EXECUTE on lo_create (agent-only default leaves the lo_* PUBLIC default — documented residual, gated by the proxy floor)"
+  okrow "PUBLIC-UNTOUCHED: PUBLIC still has EXECUTE on lo_create (agent-only default leaves the lo_* PUBLIC default — documented residual; through-proxy SELECT lo_create() is Blocked by the M2a classifier, direct-to-DB gated by the network boundary)"
 else
   badrow "PUBLIC-UNTOUCHED: PUBLIC lost EXECUTE on lo_create after the agent-only default (it should NOT mutate PUBLIC — issue #108)"
 fi
@@ -480,13 +490,17 @@ assert_denied "agent cannot CREATE EXTENSION postgres_fdw (egress)" \
 #    default does NOT revoke function EXECUTE from PUBLIC. We assert it SUCCEEDS here (honest
 #    residual), then prove the DB-level DENY in section G-LOCKDOWN below (after the lockdown's
 #    blanket `REVOKE EXECUTE ON ALL FUNCTIONS … FROM PUBLIC` strips it). On a shared BYO DB
-#    the agent's containment against such a function rests on the §3 network boundary + the
-#    proxy read-only floor (the INSERT inside the SECURITY DEFINER body is a write the WALL
-#    classifier rejects), NOT a DB-level revoke — see SPEC.amendments.md A-M2 / KNOWN_BYPASSES.
-#    (The write the function performs is a no-op ON CONFLICT, so asserting it succeeds does
-#    not corrupt the secret_data fixture.)
+#    the agent's containment against such a function rests, split by path, NOT on a DB revoke:
+#    THROUGH THE PROXY (the realistic agent path) the M2a fail-closed read classifier
+#    (#114/#115) Blocks the very call — `SELECT public.pgb_secdef_write()` references a
+#    NON-allowlisted (and schema-qualified) function, so the SELECT classifies NotRead and the
+#    proxy floor rejects it BEFORE it reaches the DB (the classifier gates the CALL by name; it
+#    does not need to see the INSERT inside the SECURITY DEFINER body). DIRECT-TO-DB it is gated
+#    by the §3 network boundary. See SPEC.amendments.md A-M2 / KNOWN_BYPASSES.md B-lo. (The
+#    write the function performs is a no-op ON CONFLICT, so asserting it succeeds here — at the
+#    DB level, bypassing the proxy — does not corrupt the secret_data fixture.)
 # --------------------------------------------------------------------------------------
-assert_allowed "RESIDUAL (agent-only): agent CAN call a PUBLIC-executable SECURITY DEFINER fn — function EXECUTE is a PUBLIC default, not deniable agent-only (gated by proxy floor; DB-level deny only under the lockdown)" \
+assert_allowed "RESIDUAL (agent-only, DIRECT-TO-DB): agent CAN call a PUBLIC-executable SECURITY DEFINER fn — function EXECUTE is a PUBLIC default, not deniable agent-only (through-proxy the M2a classifier Blocks this SELECT: non-allowlisted/qualified fn → NotRead; direct-to-DB gated by the network boundary; DB-level deny only under the lockdown)" \
   "SELECT public.pgb_secdef_write(); SELECT 'secdef-called'" "secdef-called"
 
 # --------------------------------------------------------------------------------------
@@ -495,9 +509,14 @@ assert_allowed "RESIDUAL (agent-only): agent CAN call a PUBLIC-executable SECURI
 #    RESET its search_path (documented PG behavior — we assert it SUCCEEDS, not pretend it
 #    fails). The WALL's real guarantee is the explicit-grant model: after MAXIMAL mutation
 #    (hostile pg_temp-first path) AND a full `RESET ALL` that wipes the pin entirely, the
-#    agent STILL cannot read non-whitelisted data or write anywhere. We prove the invariant
-#    two ways: (1) within a single session that sets a hostile path then attempts the deny;
-#    (2) by persisting `ALTER ROLE self … / RESET ALL` and re-connecting a FRESH session.
+#    agent STILL cannot read non-whitelisted DATA or perform grant-gated DML (no grant). This
+#    is scoped to the GRANT-based read/DML surface — it does NOT claim "no write/CREATE
+#    anywhere": on the agent-only default the agent retains PUBLIC's TEMP / lo_* / (PG14)
+#    CREATE-on-public defaults at the DB level (the RESIDUAL rows in section C assert those;
+#    their DB-level deny is asserted only after the PHASE-2 lockdown, and through the proxy
+#    they are Blocked by the M2a classifier). We prove the invariant two ways: (1) within a
+#    single session that sets a hostile path then attempts the deny; (2) by persisting
+#    `ALTER ROLE self … / RESET ALL` and re-connecting a FRESH session.
 # --------------------------------------------------------------------------------------
 echo
 log "===== SEARCH_PATH INVARIANT (role-level pin is best-effort; guarantee is grant-model) ====="

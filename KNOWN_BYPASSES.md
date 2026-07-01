@@ -330,7 +330,7 @@ impossible" or "tamper-proof". This file documents the residual, disclosed limit
 
 ---
 
-## B-lo — Default (agent-only) BYO hardening leaves `PUBLIC`-default write surfaces at the DB level; they are gated by the network boundary + proxy floor, not a DB revoke (#108)
+## B-lo — Default (agent-only) BYO hardening leaves `PUBLIC`-default write surfaces at the DB level; through the proxy they are Blocked by the M2a fail-closed classifier, direct-to-DB by the network boundary — not a DB revoke (#108)
 
 **Scope ledger (NOT a floor false-negative).** As of #108 (M2), the default BYO
 role hardening `deploy/sql/10_hardened_role.sql` is **agent-role-only** and NEVER

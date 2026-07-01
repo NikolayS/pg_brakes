@@ -22,9 +22,12 @@
 --
 -- HONEST NOTE (what this restores): with ONLY the agent-only default, the agent — as a
 -- PUBLIC member — retains PUBLIC's default function-EXECUTE and the in-DB large-object
--- write built-ins at the DB level (containment then rests on the §3 network boundary + the
--- proxy read-only floor, not a global revoke — see SPEC.amendments.md A-M2, KNOWN_BYPASSES
--- B-lo). This file revokes those FROM PUBLIC, restoring the DB-level deny for a dedicated DB.
+-- write built-ins at the DB level. Containment then rests, not on a global revoke but,
+-- split by path: THROUGH THE PROXY (the realistic agent path) on the M2a fail-closed read
+-- classifier (#114/#115 — SELECT lo_create()/write-fn/non-allowlisted-or-qualified call →
+-- NotRead → Blocked at the proxy floor), and DIRECT-TO-DB on the §3 network boundary — see
+-- SPEC.amendments.md A-M2, KNOWN_BYPASSES B-lo. This file revokes those FROM PUBLIC,
+-- restoring the DB-level deny for a dedicated DB.
 --
 -- IDEMPOTENT: safe to run repeatedly. Run it against the SAME database `10_hardened_role.sql`
 -- was applied to. Identifiers are plain literals on purpose (psql does NOT interpolate

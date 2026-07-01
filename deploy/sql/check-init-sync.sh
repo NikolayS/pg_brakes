@@ -89,20 +89,22 @@ LOCKDOWN="$DEPLOY_DIR/sql/21_public_lockdown.sql"
 # An executable revoke-from-PUBLIC: a non-comment line whose statement ends in FROM PUBLIC.
 # (Covers `REVOKE … FROM PUBLIC`, `ALTER DEFAULT PRIVILEGES … REVOKE … FROM PUBLIC`, and the
 # `EXECUTE format('REVOKE … FROM PUBLIC', …)` dynamic form.) Comment lines start with `--`.
+# CASE-INSENSITIVE (`grep -Ei`): SQL keywords are case-insensitive, so a `revoke … from public`
+# or `From Public` re-introduced into the default must trip this guard just as `FROM PUBLIC` does.
 frompublic_re='^[[:space:]]*[^-].*FROM[[:space:]]+PUBLIC'
 
-if grep -Eq "$frompublic_re" "$HARDEN"; then
+if grep -Eiq "$frompublic_re" "$HARDEN"; then
   echo "check-init-sync: FROM-PUBLIC VIOLATION — deploy/sql/10_hardened_role.sql contains an" >&2
   echo "  executable '… FROM PUBLIC' statement. The DEFAULT BYO hardening must be AGENT-ROLE-" >&2
   echo "  ONLY and NEVER mutate PUBLIC (issue #108, KNOWN_DANGERS.md D1). Move the strict" >&2
   echo "  PUBLIC revokes to the opt-in 21_public_lockdown.sql." >&2
-  grep -nE "$frompublic_re" "$HARDEN" >&2
+  grep -niE "$frompublic_re" "$HARDEN" >&2
   drift=1
 else
   echo "check-init-sync: FROM-PUBLIC OK — 10_hardened_role.sql has NO '… FROM PUBLIC' statement (agent-only default)."
 fi
 
-if [ -f "$LOCKDOWN" ] && grep -Eq "$frompublic_re" "$LOCKDOWN"; then
+if [ -f "$LOCKDOWN" ] && grep -Eiq "$frompublic_re" "$LOCKDOWN"; then
   echo "check-init-sync: FROM-PUBLIC OK — 21_public_lockdown.sql DOES carry the '… FROM PUBLIC' revokes (opt-in strict lockdown)."
 else
   echo "check-init-sync: FROM-PUBLIC VIOLATION — deploy/sql/21_public_lockdown.sql is missing" >&2

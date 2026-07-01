@@ -353,11 +353,15 @@ deploy/hba/render-hba.sh --agent-role pgb_agent --proxy-cidr 10.0.0.5/32 >> "$PG
 > is a fresh origination the proxy re-pins, so no agent-chosen path survives into a new session
 > — proven by `crates/proxy/tests/proxy_it.rs::proxy_pins_search_path_on_every_brokered_session`
 > (env-gated IT against the live backend). The WALL's real guarantee does **not** depend on `search_path`: reads
-> are via fully-qualified **explicit SELECT grants** only, and the agent can neither CREATE
-> schemas/objects (so no trojan-shadowing) nor write anywhere — therefore **no `search_path`
-> the agent chooses can widen its read surface or escalate**. The matrix proves this
-> **invariant** directly (section I): it shows the agent CAN mutate its path + `RESET ALL`
-> (documented PG behavior) yet **STILL** cannot read non-whitelisted data or write anywhere.
+> are via fully-qualified **explicit SELECT grants** only, and the agent has **no DML write grant**
+> on any relation (default-deny on data) — therefore **no `search_path` the agent chooses can
+> widen its read surface or reach data it lacks a grant on**. (This is the GRANT-based
+> read/DML surface; it does NOT claim "no write/CREATE anywhere" — the agent-only default
+> leaves `PUBLIC`'s `TEMP`/`lo_*`/(PG14) CREATE defaults at the DB level, contained by the
+> proxy classifier through-proxy + the network boundary direct-to-DB, per the next note.) The
+> matrix proves this **invariant** directly (section I): it shows the agent CAN mutate its path
+> + `RESET ALL` (documented PG behavior) yet **STILL** cannot read non-whitelisted DATA or
+> perform grant-gated DML.
 
 > **`PUBLIC`-default write paths — agent-only default vs. opt-in lockdown (issue #108).**
 > PostgreSQL grants two write paths to `PUBLIC` by default: `TEMPORARY` on the database
@@ -366,7 +370,11 @@ deploy/hba/render-hba.sh --agent-role pgb_agent --proxy-cidr 10.0.0.5/32 >> "$PG
 > be denied by an agent-scoped revoke** — they flow through the `PUBLIC` grant, and a per-role
 > `REVOKE … FROM pgb_agent` cannot subtract a `PUBLIC` grant. So on the **agent-only default**
 > they remain a **documented residual** (the agent CAN `CREATE TEMP TABLE` and write a large
-> object at the DB level), gated by the **network boundary + proxy floor**, NOT a DB revoke —
+> object at the DB level), contained NOT by a DB revoke but, split by path: **through the proxy**
+> (the realistic agent path) by the **M2a fail-closed read classifier** (#114/#115 — `SELECT
+> lo_create()`/`lowrite()`/any non-allowlisted or qualified function classifies `NotRead` →
+> Blocked, and `CREATE TEMP TABLE` is DDL → `NotRead`), and **direct-to-DB** by the **§3 network
+> boundary** —
 > the matrix PHASE 1 asserts these as residuals (and asserts `PUBLIC` still HAS the defaults).
 > The **opt-in `21_public_lockdown.sql`** revokes them `… FROM PUBLIC`; the matrix PHASE 2 then
 > asserts `CREATE TEMP TABLE` and `lo_create`/`lowrite`/`lo_from_bytea`/`lo_put` are **DENIED**
