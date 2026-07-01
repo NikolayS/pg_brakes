@@ -19,8 +19,13 @@ name = "pgb_pgwire"
 tokio = { version = "1", features = ["io-util", "macros", "rt", "net"] }
 bytes = "1"
 thiserror = "2"
-# Apache-2.0 SQL parser for the advisory, fail-closed read-only classifier.
-sqlparser = "0.62"
+# Apache-2.0 SQL parser for the fail-closed read-only classifier. The `visitor`
+# feature (Apache-2.0 `sqlparser_derive`, already a transitive dep via the default
+# `recursive-protection` feature) gives the derived AST `Visit` walk used by the
+# classifier's function-call scan — it descends into EVERY expression (projection,
+# WHERE/HAVING/GROUP BY/ORDER BY, JOIN ON, FILTER, subqueries, CTEs, and nested
+# function arguments) so no function node can be missed (M2a #114).
+sqlparser = { version = "0.62", features = ["visitor"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["io-util", "macros", "rt", "rt-multi-thread"] }

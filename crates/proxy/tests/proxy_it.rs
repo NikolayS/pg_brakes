@@ -19,7 +19,9 @@
 //!    **BLOCKED** (extended-protocol-only — statement-stacking defense);
 //!  * `UPDATE`/`DELETE`/DDL are **blocked** (read-only gate; the WALL role is
 //!    the backstop) and `COPY` is rejected;
-//!  * `statement_timeout` **fires** on `pg_sleep` (the classifier blind spot);
+//!  * `SELECT pg_sleep(…)` is **BLOCKED at the read-only gate** — M2a (#114) made
+//!    the classifier fail-close on non-allowlisted function calls, so a
+//!    side-effecting/sleep function never reaches the backend;
 //!  * a parse failure **fails closed** (blocked);
 //!  * the **audit chain** records allow + blocks/rejects and `verify_chain()`
 //!    holds.
@@ -396,14 +398,22 @@ async fn proxy_enforcement_end_to_end_against_pg18() {
         .expect_err("COPY must be rejected/blocked");
     eprintln!("[ok] COPY blocked: {}", db_msg(&copy_err));
 
-    // ---- 5. statement_timeout fires on pg_sleep (classifier blind spot) ----
+    // ---- 5. pg_sleep is now BLOCKED at the read-only gate (M2a #114) ----
+    // Before M2a `pg_sleep` was a classifier blind spot (a bare SELECT → Read) and
+    // only the downstream statement_timeout stopped it. Now `pg_sleep` is a
+    // NON-allowlisted function, so the read-only classifier FAIL-CLOSES on it: it
+    // is blocked at the proxy floor and never reaches the backend. The read-only
+    // gate is a recoverable block, so the error surfaces as the gate's
+    // `write_on_readonly` message, NOT a timeout. (The un-foolable
+    // statement_timeout backstop for a genuinely slow *allowlisted* read is
+    // exercised separately by the EXPLAIN/window IT in readgates_it.)
     let sleep = client.query("SELECT pg_sleep(5)", &[]).await;
-    let serr = sleep.expect_err("pg_sleep must hit statement_timeout");
+    let serr = sleep.expect_err("pg_sleep must be blocked at the read-only gate");
     let smsg = db_msg(&serr);
-    eprintln!("[ok] statement_timeout fired on pg_sleep: {smsg}");
+    eprintln!("[ok] pg_sleep blocked at the read-only gate (M2a): {smsg}");
     assert!(
-        smsg.contains("timeout") || smsg.contains("canceling") || smsg.contains("statement"),
-        "expected a timeout cancel: {smsg}"
+        smsg.contains("read-only") || smsg.contains("blocked") || smsg.contains("read path"),
+        "expected the read-only gate block message: {smsg}"
     );
 
     // ---- 6. Fail-closed on a parse failure ----

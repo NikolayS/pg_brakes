@@ -54,6 +54,33 @@
 //! Together these make 2b assert the real invariant — "a genuinely-stacked write
 //! must never classify as a safe read" — with no false positives. The bare-tail
 //! assertion (a lone write must be `NotRead`) is unconditional and unaffected.
+//!
+//! ## M2a (#114) — the stacking oracle is unchanged and STILL sound
+//!
+//! M2a tightened the classifier so a `SELECT` is `Read` only if every function it
+//! references is on a curated read-safe allowlist (non-allowlisted function calls
+//! — `lo_create`/`setval`/`pg_read_file`/`public.writing_fn()`/… — are now
+//! `NotRead`). This oracle NEVER assumed function-bearing SELECTs are `Read`; it
+//! only asserts the *tighten-only* safety direction — that writes / DDL / genuine
+//! statement-stacks are NEVER `Read`. Making MORE inputs `NotRead` can only
+//! REINFORCE those assertions, never break them (invariant 2a's determinism and
+//! reason-freeness of `Read` also still hold: `Read` is still returned only for a
+//! provable single read, now a stricter set). So no oracle change is needed for
+//! the stacking teeth; the target keeps them against a classifier that would
+//! wrongly admit a write.
+//!
+//! ## #115 fix round — new positive teeth for the operator/lock classes
+//!
+//! The #115 review found three more side-effecting-SELECT classes the classifier
+//! must reject: a **qualified/custom operator** (`a OPERATOR(public.writeop) b` —
+//! an arbitrary backing function), a **schema-qualified (non-builtin) cast**
+//! (`x::public.evil` / `CONVERT(x, public.evil)` — a type input function), and a
+//! **`FOR UPDATE`/`FOR SHARE` row lock** (real locks on the primary). Invariant 2c
+//! below adds UNCONDITIONAL teeth for the operator, cast, and lock classes (a
+//! fixed corpus of poison SELECTs that must never be `Read`), so a future
+//! regression that reopened one of them would fail the fuzzer here rather than
+//! ship. (The #115 delta re-review extended the cast-class teeth to `Expr::Convert`
+//! and `Expr::TypedString`, which route through the same cast-target guard.)
 
 #![no_main]
 
@@ -74,6 +101,39 @@ const UNSAFE_TAILS: &[&str] = &[
     "ALTER TABLE t ADD COLUMN c int",
     "GRANT ALL ON t TO public",
     "COPY t FROM PROGRAM 'sh'",
+];
+
+/// Single `SELECT` statements that are NOT a safe read even though they parse as
+/// a lone SELECT — the #115 fix classes. A **qualified/custom operator** invokes
+/// an arbitrary backing function (incl. a SECURITY DEFINER write), and a
+/// **`FOR UPDATE`/`FOR SHARE` row-lock** clause takes real locks on the primary
+/// (a lock-DoS side effect). The classifier must NEVER return `Read` for any of
+/// these — the same tighten-only teeth we assert for writes/DDL/stacks, extended
+/// to the side-effecting-SELECT classes so a future regression on operators or
+/// locks is caught by the fuzzer, not shipped. Asserted UNCONDITIONALLY.
+const SIDE_EFFECTING_SELECTS: &[&str] = &[
+    // Qualified / custom operator in every expression position.
+    "SELECT a OPERATOR(public.writeop) b FROM t",
+    "SELECT * FROM t WHERE a OPERATOR(public.wop) b",
+    "SELECT a FROM t GROUP BY a HAVING count(*) OPERATOR(public.wop) 0",
+    "SELECT a FROM t ORDER BY a OPERATOR(public.wop) b",
+    "WITH w AS (SELECT a OPERATOR(public.wop) b AS c FROM t) SELECT * FROM w",
+    "SELECT (SELECT a OPERATOR(public.wop) b FROM t)",
+    // `FOR UPDATE` / `FOR SHARE` row locks (incl. buried in a subquery/CTE).
+    "SELECT * FROM t FOR UPDATE",
+    "SELECT * FROM t FOR SHARE",
+    "SELECT * FROM t FOR UPDATE NOWAIT",
+    "SELECT * FROM (SELECT id FROM t FOR UPDATE) sub",
+    "WITH w AS (SELECT id FROM t FOR SHARE) SELECT * FROM w",
+    // Qualified/custom CAST target — `x::public.evil` / `CAST(x AS myschema.t)` /
+    // `CONVERT(x, public.evil)` invokes a user type's INPUT function (can
+    // side-effect), and the array form must not smuggle it past the bare-node
+    // check. (`Expr::Cast` / `Expr::Convert`; #115 fix round + delta re-review.)
+    "SELECT x::public.evil",
+    "SELECT x::public.evil[]",
+    "WITH w AS (SELECT x::public.evil AS y FROM t) SELECT * FROM w",
+    "SELECT CONVERT(x, public.evil)",
+    "SELECT * FROM t WHERE x::public.evil = 1",
 ];
 
 // A non-fuzz, CI-run regression harness for this exact oracle (the known
@@ -130,4 +190,18 @@ fuzz_target!(|data: &[u8]| {
         Classification::Read,
         "SAFETY VIOLATION: bare write classified as a safe read: {tail:?}"
     );
+
+    // --- Invariant 2c (#115): a single SELECT that smuggles a side effect via a
+    // qualified/custom OPERATOR, a qualified/custom CAST target
+    // (`x::public.evil` / `CONVERT(x, public.evil)`), or a `FOR UPDATE`/`FOR SHARE`
+    // row lock must NEVER classify as a safe read — the same tighten-only teeth,
+    // extended to the operator/cast/lock classes so a regression there is caught
+    // here. Unconditional. ---
+    for poison in SIDE_EFFECTING_SELECTS {
+        assert_ne!(
+            classify(poison),
+            Classification::Read,
+            "SAFETY VIOLATION: side-effecting SELECT classified as a safe read: {poison:?}"
+        );
+    }
 });
