@@ -278,17 +278,69 @@ impossible" or "tamper-proof". This file documents the residual, disclosed limit
 - **SPEC.amendments tie:** "EPIC #91 — the exact-PK-set checksum is DROPPED; identity →
   predicate gate, magnitude → absolute cap".
 
+## B9 — A **bare, unqualified** cast / type-literal to a side-effecting user type is classified Read (only *qualified* type targets fail closed)
+
+- **Damage class:** N/A (residual scope of the cooperative read classifier, not a
+  deterministic-floor false-negative). **Defense layer:** the fail-closed read-only
+  classifier (`pgb_pgwire::classify`, M2a #114 / #115) — a *defense-in-depth* advisory
+  gate, backstopped by `statement_timeout` + the byte/row cutoff, and fully closable at
+  the DB.
+- **What it is:** the classifier routes every cast-target type through
+  `cast_target_type_is_read_safe` — for `Expr::Cast` (`x::t`, `CAST(x AS t)`),
+  `Expr::Convert` (`CONVERT(x, t)`), and `Expr::TypedString` (the type-literal
+  `mytype 'lit'`, `xml '<a/>'`). A **schema-qualified** target (`x::public.evil`,
+  `CAST(x AS myschema.t)`, `CONVERT(x, public.evil)`, incl. the array/wrapper forms
+  `public.evil[]`) fails closed → NotRead, because a qualified user type invokes that
+  type's INPUT function, which could side-effect. But a **bare, unqualified** target
+  (`x::mytype`, `mytype 'lit'`) where `mytype` is a user type whose INPUT function
+  side-effects still classifies **Read**. The residual is inherent to the conservative
+  split: sqlparser models several BARE built-in PostgreSQL types (`inet`, `citext`,
+  `hstore`, `ltree`, …) as bare `DataType::Custom`, so failing closed on *every* bare
+  `Custom` would **over-block legitimate builtin reads** — a real capability loss. We
+  therefore fail closed only on the *qualified* form and leave bare `Custom` open.
+- **Why it is not closed (and why it is near-theoretical):** it is **extremely exotic** —
+  a type's INPUT function is near-universally **pure** (parse-a-literal), and PostgreSQL
+  runs it on the string→internal conversion; a side-effecting input function is a
+  deliberately-hostile artifact, not something a normal schema contains. It **cannot be
+  schema-qualified** (the qualified form fails closed by B9's own guard), so the bypass is
+  confined to a *bare* reference to a hostile user type on the agent's `search_path`. And
+  it is **bounded** by the same two independent backstops as every read: the
+  `statement_timeout` budget and the per-role byte/row cutoff (a side-effecting input fn
+  cannot run unbounded or exfiltrate beyond ≤ B — see B1). Finally it is **fully closed at
+  the DB, opt-in**: the `REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA public FROM PUBLIC`
+  (+ `ALTER DEFAULT PRIVILEGES … REVOKE EXECUTE`) in `deploy/init/10_hardened_role.sql`
+  removes the agent role's EXECUTE on `public`-schema user functions — a user type's
+  input function included — so on a dedicated/hardened DB the bare-cast residual is denied
+  at the WALL regardless of the cooperative classifier's verdict.
+- **Repro / teeth:** the classifier unit tests
+  (`crates/pgwire/tests/classifier.rs`) prove the *qualified* direction fails closed and
+  the *bare/builtin* direction stays Read for all three node kinds
+  (`cast_to_qualified_or_nonbuiltin_type_is_not_read`,
+  `convert_to_qualified_or_nonbuiltin_type_is_not_read`,
+  `typed_string_type_literal_routes_through_the_cast_guard`); the fuzz oracle
+  (`fuzz/fuzz_targets/classifier.rs` `SIDE_EFFECTING_SELECTS`) carries unconditional teeth
+  for the qualified-cast class (`SELECT x::public.evil`, `…::public.evil[]`,
+  `CONVERT(x, public.evil)`, a CTE-wrapped form) so a regression that reopened the
+  *qualified* direction is caught. The bare residual has **no** teeth by design — it is the
+  disclosed limit, not a bug.
+- **SPEC.amendments tie:** M2a (#114) function-call fail-closed gate + #115 operator/cast/
+  lock classes; the conservative "qualified fails closed, bare stays open" cast split is
+  documented in `crates/pgwire/src/classifier.rs` (`cast_target_type_is_read_safe`).
+
 ---
 
 ### Bottom line
 
-None of B1–B8 is a deterministic-floor false-negative: the catastrophic-FN ledger
+None of B1–B9 is a deterministic-floor false-negative: the catastrophic-FN ledger
 (`dbsafe-bench/golden/known_bypasses.json`) is **empty**, and the gate keeps it
-empty (0 FN / 0 FP over the frozen corpus). B1–B8 are the honest **scope** of the
+empty (0 FN / 0 FP over the frozen corpus). B1–B9 are the honest **scope** of the
 MVP — bounded (not zero) read disclosure, a cooperative MCP, single-int-PK apply,
 deferred cross-process attestation, a file-anchor stand-in, a stubbed (tighten-only)
 RiskEngine, an inert `replica.dsn` (no replica read-routing / degraded-budget
-differential yet, deferred → #77), and (B8, EPIC #91) the grant scope — identity by the
+differential yet, deferred → #77), (B8, EPIC #91) the grant scope — identity by the
 predicate gate + magnitude by the cap (the exact-PK-set checksum is **removed**), with the
 honest residual that AFTER-trigger effects on the approved rows are not undone (surfaced at
-approval) — each disclosed here with a repro and tied to its SPEC.amendments entry.
+approval), and (B9) the near-theoretical bare/unqualified cast-to-a-side-effecting-user-type
+residual of the read classifier (only *qualified* type targets fail closed; bounded by
+`statement_timeout` + the byte/row cutoff and fully closed by the opt-in `FROM PUBLIC`
+EXECUTE revoke) — each disclosed here with a repro and tied to its SPEC.amendments entry.

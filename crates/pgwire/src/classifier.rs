@@ -606,7 +606,14 @@ fn function_name_is_read_safe(name: &ObjectName) -> bool {
 ///      `x::numeric`, …). We fail closed only on the *qualified* form because
 ///      sqlparser also models some BARE built-in types (`inet`, `citext`) as
 ///      `DataType::Custom`, so blocking every `Custom` would over-block a
-///      legitimate builtin read (see [`cast_target_type_is_read_safe`]).
+///      legitimate builtin read (see [`cast_target_type_is_read_safe`]);
+///    - `Expr::Convert` (`CONVERT(x, <type>)`) and `Expr::TypedString` (the
+///      type-literal syntax `xml '<a/>'`, `TEXT 'abc'`) each carry a cast target
+///      `data_type` that likewise invokes that type's input function, so both are
+///      routed through the SAME [`cast_target_type_is_read_safe`] guard (#115
+///      delta): a qualified/custom target fails closed, a bare builtin stays
+///      read-safe. `Expr::Convert`'s `USING charset` form (`data_type: None`)
+///      changes only the encoding, not the type, so it stays read-safe.
 ///
 ///    Because the walk descends into nested expressions, subqueries, CTEs, JOIN
 ///    `ON`, aggregate `FILTER`/`ORDER BY`, and function/operator ARGUMENTS, a
@@ -634,6 +641,28 @@ fn statement_functions_all_read_safe(stmt: &Statement) -> bool {
             Expr::UnaryOp { .. } => true,
             // A qualified/non-builtin cast target invokes the type's input fn.
             Expr::Cast { data_type, .. } => cast_target_type_is_read_safe(data_type),
+            // `CONVERT(x, <type>)` (`Expr::Convert`) carries the SAME kind of cast
+            // target as `Expr::Cast` — it invokes that type's input function — so
+            // route its `data_type` through the identical guard (#115 delta). A
+            // qualified/custom target (`CONVERT(x, public.evil)`) fails closed; a
+            // bare builtin (`CONVERT(x, int)`) stays read-safe. The `CONVERT(x USING
+            // charset)` form has `data_type: None` (a charset change, no type input
+            // fn) → read-safe.
+            Expr::Convert {
+                data_type: Some(dt),
+                ..
+            } => cast_target_type_is_read_safe(dt),
+            Expr::Convert {
+                data_type: None, ..
+            } => true,
+            // A type-literal (`xml '<a/>'`, `TEXT 'abc'`, `TIMESTAMP '…'`) —
+            // `Expr::TypedString` — invokes that type's input function too, so route
+            // its `data_type` through the SAME guard (#115 delta). Builtin
+            // type-literals stay read-safe; a qualified/custom target would fail
+            // closed (though the PG dialect does not parse a schema-qualified
+            // type-literal to a `TypedString` — the string becomes an alias — this
+            // is defense-in-depth, tighten-only).
+            Expr::TypedString(ts) => cast_target_type_is_read_safe(&ts.data_type),
             _ => true,
         };
         if read_safe {

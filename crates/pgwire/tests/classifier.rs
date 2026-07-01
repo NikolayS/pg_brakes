@@ -271,6 +271,45 @@ fn cast_to_qualified_or_nonbuiltin_type_is_not_read() {
 }
 
 #[test]
+fn convert_to_qualified_or_nonbuiltin_type_is_not_read() {
+    // #115 delta re-review: `CONVERT(x, public.evil)` is `Expr::Convert` (NOT an
+    // `Expr::Function` and NOT an `Expr::Cast`) carrying a cast target
+    // `data_type: Some(DataType::Custom([public, evil]))` that invokes that type's
+    // input function — it must route through the SAME `cast_target_type_is_read_safe`
+    // guard as `Expr::Cast`. Before the fix the sweep fell to `_ => true` = Read
+    // (the RED case). A schema-QUALIFIED target fails closed; bare builtin stays Read.
+    assert_not_read("SELECT CONVERT(x, public.evil)");
+    assert_not_read("SELECT CONVERT(x, public.evil[])");
+    assert_not_read("SELECT * FROM t WHERE CONVERT(x, public.evil) = 1");
+    assert_not_read("WITH w AS (SELECT CONVERT(x, public.evil) AS y FROM t) SELECT * FROM w");
+    // Bare builtin CONVERT target stays Read.
+    assert_read("SELECT CONVERT(x, int)");
+    assert_read("SELECT CONVERT(x, text)");
+    // The `CONVERT(x USING charset)` form has `data_type: None` (a charset change,
+    // no type input fn) → Read.
+    assert_read("SELECT CONVERT(x USING utf8)");
+}
+
+#[test]
+fn typed_string_type_literal_routes_through_the_cast_guard() {
+    // #115 delta re-review: a type-literal (`xml '<a/>'`, `TEXT 'abc'`) is
+    // `Expr::TypedString(TypedString { data_type, .. })` and invokes that type's
+    // input function, so its `data_type` must route through the SAME
+    // `cast_target_type_is_read_safe` guard. Before the fix the sweep fell to
+    // `_ => true` = Read. Builtin type-literals stay Read.
+    assert_read("SELECT xml '<a/>'"); // `xml` is a BARE single-part Custom → Read (bare stays open)
+    assert_read("SELECT TIMESTAMP '2020-01-01'");
+    assert_read("SELECT jsonb '{}'");
+    assert_read("SELECT TEXT 'abc'");
+    assert_read("SELECT DATE '2020-01-01'");
+    // NOTE: PG-dialect `SELECT public.evil '<a/>'` does NOT parse to a qualified
+    // TypedString — the string becomes an alias of a compound identifier — so a
+    // schema-qualified type-literal is not expressible here. The guard is still
+    // routed through the same helper (tighten-only): any future multi-part Custom
+    // data_type in a TypedString would fail closed exactly like a qualified cast.
+}
+
+#[test]
 fn read_only_cte_is_read() {
     assert_read(
         "WITH recent AS (SELECT id FROM events WHERE ts > now() - interval '1 day') \
